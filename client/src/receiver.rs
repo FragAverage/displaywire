@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use proto::stream::{Msg, VERSION};
+use proto::stream::{CAP_AUDIO, Msg, VERSION};
+use timing::history::{Binner, History};
 use timing::{Samples, ms, now_ns};
 use transport::video::{Frame, Reassembler};
 use transport::is_transient;
@@ -22,6 +23,9 @@ const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
 const PING_INTERVAL_NS: u64 = 20 * MS;
 const HELLO_INTERVAL_NS: u64 = 200 * MS;
+/// Width of one graph sample, and how many to keep (60 s).
+const BIN_NS: u64 = 100 * MS;
+pub const HISTORY_BINS: usize = 600;
 const KEYFRAME_RETRY_NS: u64 = 100 * MS;
 /// Incomplete frames older than this are given up on.
 const PARTIAL_MAX_AGE_NS: u64 = 100 * MS;
@@ -35,9 +39,10 @@ pub fn run(
     input: Arc<input::Sender>,
     layer: Layer,
     proxy: EventLoopProxy<UserEvent>,
+    history: Arc<Mutex<History>>,
     stop: Arc<AtomicBool>,
 ) {
-    if let Err(e) = Receiver::new(server, sock, input, layer, proxy.clone()).and_then(|mut r| r.run(&stop)) {
+    if let Err(e) = Receiver::new(server, sock, input, layer, proxy.clone(), history).and_then(|mut r| r.run(&stop)) {
         let _ = proxy.send_event(UserEvent::Fatal(e));
     }
 }
@@ -63,6 +68,8 @@ struct Receiver {
     last_keyframe_request: u64,
     clock: Clock,
     stats: Stats,
+    binner: Binner,
+    history: Arc<Mutex<History>>,
 }
 
 impl Receiver {
@@ -72,6 +79,7 @@ impl Receiver {
         input: Arc<input::Sender>,
         layer: Layer,
         proxy: EventLoopProxy<UserEvent>,
+        history: Arc<Mutex<History>>,
     ) -> Result<Receiver, String> {
         sock.set_read_timeout(Some(Duration::from_millis(2))).map_err(|e| e.to_string())?;
         Ok(Receiver {
@@ -88,6 +96,8 @@ impl Receiver {
             last_keyframe_request: 0,
             clock: Clock::default(),
             stats: Stats::new(),
+            binner: Binner::new(now_ns(), BIN_NS),
+            history,
         })
     }
 
@@ -99,7 +109,7 @@ impl Receiver {
 
     fn run(&mut self, stop: &AtomicBool) -> Result<(), String> {
         let begin = now_ns();
-        let (mut next_hello, mut next_ping, mut ping_id) = (0, 0, 0u32);
+        let (mut next_hello, mut next_ping, mut next_bin, mut ping_id) = (0, 0, 0, 0u32);
         let mut last_video = 0u64;
         let mut buf = [0u8; 2048];
         println!("connecting to {}", self.server);
@@ -115,7 +125,7 @@ impl Receiver {
                         self.server.port()
                     ));
                 }
-                self.send(Msg::Hello { version: VERSION });
+                self.send(Msg::Hello { version: VERSION, caps: CAP_AUDIO });
                 next_hello = now + HELLO_INTERVAL_NS;
             }
             if now >= next_ping {
@@ -130,6 +140,15 @@ impl Receiver {
             if streaming && self.need_keyframe && now - self.last_keyframe_request > KEYFRAME_RETRY_NS {
                 self.send(Msg::KeyframeRequest);
                 self.last_keyframe_request = now;
+            }
+            if now >= next_bin {
+                next_bin = now + BIN_NS;
+                if let Some(rtt) = self.clock.recent_rtt() {
+                    self.binner.rtt(rtt);
+                }
+                if let Some(bin) = self.binner.tick(now) {
+                    self.history.lock().unwrap().push(bin);
+                }
             }
             if let Some(line) = self.stats.tick(now, &self.clock) {
                 println!("{line}");
@@ -146,6 +165,7 @@ impl Receiver {
                 Some(Msg::Video(v, payload)) => {
                     last_video = rx;
                     self.stats.bytes += n as u64;
+                    self.binner.bytes(n);
                     if let Some(frame) = self.reassembler.push(v, payload, rx) {
                         self.on_frame(frame);
                     }
@@ -163,10 +183,12 @@ impl Receiver {
     fn on_frame(&mut self, frame: Frame) {
         if frame.skipped > 0 {
             self.stats.lost += frame.skipped;
+            self.binner.lost(frame.skipped);
             self.need_keyframe = true;
         }
         if self.need_keyframe && !frame.keyframe {
             self.stats.dropped += 1;
+            self.binner.lost(1);
             return;
         }
         let sample = hevc::to_sample(&frame.data);
@@ -195,10 +217,12 @@ impl Receiver {
                 }
                 self.stats.frames += 1;
                 self.stats.decode.push((decoded_ns - start) as i64);
-                if let Some(offset) = self.clock.offset() {
-                    // Server clock → client clock: server = client + offset.
-                    self.stats.latency.push(decoded_ns as i64 + offset - frame.capture_ns as i64);
+                // Server clock → client clock: server = client + offset.
+                let latency = self.clock.offset().map(|o| decoded_ns as i64 + o - frame.capture_ns as i64);
+                if let Some(l) = latency {
+                    self.stats.latency.push(l);
                 }
+                self.binner.frame((decoded_ns - start) as i64, latency);
             }
             (r, d) => {
                 let status = match (&r, &d) {
@@ -208,6 +232,7 @@ impl Receiver {
                 };
                 eprintln!("decode failed on frame {}: {status}", frame.id);
                 self.stats.errors += 1;
+                self.binner.lost(1);
                 self.need_keyframe = true;
             }
         }

@@ -1,5 +1,7 @@
 //! Clocks, precise waits and latency statistics.
 
+pub mod history;
+
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 

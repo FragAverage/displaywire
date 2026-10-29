@@ -220,7 +220,7 @@ fn control(sock: &UdpSocket, shared: &Shared) {
         };
         let is_peer = *shared.peer.lock().unwrap() == Some(from);
         match Msg::decode(&buf[..n]) {
-            Some(Msg::Hello { version }) => {
+            Some(Msg::Hello { version, .. }) => {
                 if version != VERSION {
                     eprintln!("{from}: protocol version {version}, expected {VERSION}; ignoring");
                     continue;

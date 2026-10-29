@@ -2,12 +2,26 @@
 
 use crate::{Reader, Writer};
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// Bytes taken by a `Video` header.
 pub const VIDEO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 2 + 2 + 8;
 /// Largest video payload per datagram.
 pub const VIDEO_PAYLOAD: usize = crate::MAX_DATAGRAM - VIDEO_HEADER_LEN;
+
+/// Bytes taken by an `Audio`/`Mic` header.
+pub const AUDIO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 8;
+/// Largest audio payload per datagram.
+pub const AUDIO_PAYLOAD: usize = crate::MAX_DATAGRAM - AUDIO_HEADER_LEN;
+/// Audio is always 48 kHz stereo.
+pub const AUDIO_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: usize = 2;
+
+/// `Hello::caps`: what the client wants from the session.
+/// Server → client desktop audio.
+pub const CAP_AUDIO: u8 = 1;
+/// Client → server microphone.
+pub const CAP_MIC: u8 = 2;
 
 const HELLO: u8 = 1;
 const PING: u8 = 2;
@@ -16,6 +30,8 @@ const KEYFRAME_REQUEST: u8 = 4;
 const VIDEO: u8 = 5;
 const BYE: u8 = 6;
 const INPUT: u8 = 7;
+const AUDIO: u8 = 8;
+const MIC: u8 = 9;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -84,10 +100,28 @@ pub struct Video {
     pub capture_ns: u64,
 }
 
+/// How an `Audio`/`Mic` payload is encoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioFormat {
+    /// Interleaved signed 16-bit little-endian samples, whole frames only
+    /// (4 bytes per stereo frame).
+    Pcm16 = 0,
+}
+
+/// One chunk of audio, server → client (`Msg::Audio`) or client → server (`Msg::Mic`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Audio {
+    /// Increases by one per chunk; gaps are lost chunks.
+    pub seq: u32,
+    pub format: AudioFormat,
+    /// Sender's clock when the chunk's first sample was captured.
+    pub capture_ns: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Msg<'a> {
-    /// Client → server: start streaming to me.
-    Hello { version: u16 },
+    /// Client → server: start streaming to me. `caps` is `CAP_*` flags.
+    Hello { version: u16, caps: u8 },
     /// Client → server, every few ms; doubles as the session heartbeat.
     Ping { id: u32, client_ns: u64 },
     /// Server → client, for RTT and clock offset.
@@ -97,6 +131,10 @@ pub enum Msg<'a> {
     Video(Video, &'a [u8]),
     Bye,
     Input(Input),
+    /// Server → client: desktop audio.
+    Audio(Audio, &'a [u8]),
+    /// Client → server: microphone.
+    Mic(Audio, &'a [u8]),
 }
 
 impl<'a> Msg<'a> {
@@ -105,9 +143,10 @@ impl<'a> Msg<'a> {
         let mut w = Writer::new(buf);
         w.bytes(&crate::MAGIC);
         match *self {
-            Msg::Hello { version } => {
+            Msg::Hello { version, caps } => {
                 w.u8(HELLO);
                 w.u16(version);
+                w.u8(caps);
             }
             Msg::Ping { id, client_ns } => {
                 w.u8(PING);
@@ -145,6 +184,13 @@ impl<'a> Msg<'a> {
                 }
                 w.u16(i.repeat);
             }
+            Msg::Audio(a, payload) | Msg::Mic(a, payload) => {
+                w.u8(if matches!(self, Msg::Audio(..)) { AUDIO } else { MIC });
+                w.u8(a.format as u8);
+                w.u32(a.seq);
+                w.u64(a.capture_ns);
+                w.bytes(payload);
+            }
         }
         w.len()
     }
@@ -153,7 +199,7 @@ impl<'a> Msg<'a> {
         let mut r = Reader::new(buf);
         r.magic()?;
         Some(match r.u8()? {
-            HELLO => Msg::Hello { version: r.u16()? },
+            HELLO => Msg::Hello { version: r.u16()?, caps: r.u8()? },
             PING => Msg::Ping { id: r.u32()?, client_ns: r.u64()? },
             PONG => Msg::Pong { id: r.u32()?, client_ns: r.u64()?, server_ns: r.u64()? },
             KEYFRAME_REQUEST => Msg::KeyframeRequest,
@@ -190,6 +236,19 @@ impl<'a> Msg<'a> {
                     repeat: r.u16()?,
                 })
             }
+            kind @ (AUDIO | MIC) => {
+                let format = match r.u8()? {
+                    0 => AudioFormat::Pcm16,
+                    _ => return None,
+                };
+                let a = Audio { format, seq: r.u32()?, capture_ns: r.u64()? };
+                let payload = r.rest();
+                // Whole stereo frames only.
+                if !payload.len().is_multiple_of(2 * AUDIO_CHANNELS) {
+                    return None;
+                }
+                if kind == AUDIO { Msg::Audio(a, payload) } else { Msg::Mic(a, payload) }
+            }
             _ => return None,
         })
     }
@@ -218,7 +277,7 @@ mod tests {
         input.set_key(0x15B, true);
         assert!(input.key(0x15B) && !input.key(0x5B));
         let msgs = [
-            Msg::Hello { version: VERSION },
+            Msg::Hello { version: VERSION, caps: CAP_AUDIO | CAP_MIC },
             Msg::Ping { id: 1, client_ns: 2 },
             Msg::Pong { id: 1, client_ns: 2, server_ns: 3 },
             Msg::KeyframeRequest,
@@ -227,6 +286,8 @@ mod tests {
             Msg::Bye,
             Msg::Input(Input::default()),
             Msg::Input(input),
+            Msg::Audio(Audio { seq: 5, format: AudioFormat::Pcm16, capture_ns: 99 }, &[1u8; 960]),
+            Msg::Mic(Audio { seq: u32::MAX, format: AudioFormat::Pcm16, capture_ns: 0 }, &[]),
         ];
         let mut buf = [0u8; crate::MAX_DATAGRAM];
         for m in msgs {
@@ -234,6 +295,25 @@ mod tests {
             assert!(n <= crate::MAX_DATAGRAM);
             assert_eq!(Msg::decode(&buf[..n]), Some(m));
         }
+    }
+
+    #[test]
+    fn full_audio_chunk_fits() {
+        let mut buf = [0u8; crate::MAX_DATAGRAM];
+        let payload = [0u8; AUDIO_PAYLOAD];
+        let a = Audio { seq: 0, format: AudioFormat::Pcm16, capture_ns: 0 };
+        assert_eq!(Msg::Audio(a, &payload).encode(&mut buf), crate::MAX_DATAGRAM);
+    }
+
+    #[test]
+    fn rejects_partial_audio_frames_and_unknown_formats() {
+        let mut buf = [0u8; 64];
+        let a = Audio { seq: 0, format: AudioFormat::Pcm16, capture_ns: 0 };
+        let n = Msg::Audio(a, &[0u8; 6]).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), None);
+        let n = Msg::Audio(a, &[0u8; 8]).encode(&mut buf);
+        buf[3] = 7;
+        assert_eq!(Msg::decode(&buf[..n]), None);
     }
 
     #[test]

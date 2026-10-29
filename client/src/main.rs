@@ -31,9 +31,11 @@ fn main() {
 #[cfg(target_os = "macos")]
 mod app {
     use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::thread::JoinHandle;
+
+    use timing::history::History;
 
     use clap::Parser;
     use winit::application::ApplicationHandler;
@@ -63,6 +65,9 @@ mod app {
     struct Session {
         window: Window,
         input: Arc<input::Sender>,
+        /// Stream health over the last minute, for the graph overlay.
+        #[allow(dead_code)]
+        history: Arc<Mutex<History>>,
         stop: Arc<AtomicBool>,
         receiver: Option<JoinHandle<()>>,
         sized: bool,
@@ -128,12 +133,13 @@ mod app {
             let window = el.create_window(attrs).map_err(|e| format!("create window: {e}"))?;
             let layer = display::Layer::attach(&window);
             let stop = Arc::new(AtomicBool::new(false));
-            let (proxy, stop2, input2) = (self.proxy.clone(), stop.clone(), input.clone());
+            let history = Arc::new(Mutex::new(History::new(receiver::HISTORY_BINS)));
+            let (proxy, stop2, input2, history2) = (self.proxy.clone(), stop.clone(), input.clone(), history.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
-                .spawn(move || receiver::run(addr, sock, input2, layer, proxy, stop2))
+                .spawn(move || receiver::run(addr, sock, input2, layer, proxy, history2, stop2))
                 .map_err(|e| e.to_string())?;
-            Ok(Session { window, input, stop, receiver: Some(receiver), sized: false, video: None })
+            Ok(Session { window, input, history, stop, receiver: Some(receiver), sized: false, video: None })
         }
 
         fn set_locked(&mut self, locked: bool) {

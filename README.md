@@ -39,6 +39,21 @@ target/release/streamy-client <server-ip>
 For lowest Wi-Fi latency on the Mac, disable AWDL while streaming: `sudo ifconfig awdl0 down`
 (restore with `up`).
 
+## Run as a service (UAC prompts and the lock screen)
+
+A normal `streamy-server.exe` can't see UAC prompts or the login/lock screen:
+Windows shows them on a separate desktop that only SYSTEM can capture. From an
+administrator terminal:
+```
+streamy-server.exe --install-service [--mbps 80 --fps 120 ...]
+streamy-server.exe --uninstall-service
+```
+The service starts at boot, runs the server as SYSTEM in the active session
+(the console if someone is there, else e.g. a remote desktop session), and
+restarts it when the session changes (logon, logoff, lock, switch user). It
+adds a firewall rule for the exe and logs to `C:\ProgramData\Streamy\server.log`.
+Install from a stable path, since the service points at the exe you ran.
+
 ## Controls
 
 Keyboard and mouse go to the PC while the client window has focus (injected

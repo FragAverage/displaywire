@@ -77,6 +77,9 @@ send→decoded on loopback). Windows capture/encode path compiles; awaiting firs
 MVP shortcuts to revisit: MF instead of direct NVENC SDK, IDR-on-loss instead of FEC/intra-refresh,
 no encryption, no input, no cursor, primary monitor only.
 
+**Service mode done (2026-10-29)**: `--install-service` runs the server as SYSTEM in the active
+session; capture follows the input desktop, so UAC prompts, the lock screen and the login screen stream.
+
 ## Phases
 0. **Spike** — DDA → NVENC → file (HEVC + AV1); VideoToolbox decode on M5 Max; measure encode/decode ms.
    Measure raw Wi-Fi UDP jitter/loss between the two machines with a pacing test tool.
@@ -89,4 +92,4 @@ no encryption, no input, no cursor, primary monitor only.
 6. **Network tuning (parked 2026-10-29)** — current Wi-Fi: 9.9 ms RTT p50, 17 ms p99 delay with
    AWDL off + PC WLAN tuning. To do: clear congested 5 GHz ch 36–64 (move to 100–128 or 6 GHz/WPA3),
    check router Wi-Fi 7/MLO settings, test wired server, AWDL privileged helper in client.
-7. **Later** — HDR (Main10/PQ), service mode (UAC/login screen), clipboard, Windows client.
+7. **Later** — HDR (Main10/PQ), clipboard, Windows client.

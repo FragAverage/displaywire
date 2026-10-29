@@ -5,6 +5,7 @@ mod capture;
 mod convert;
 mod encoder;
 pub mod input;
+pub mod service;
 
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};

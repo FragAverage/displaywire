@@ -59,6 +59,16 @@ pub struct Cli {
     /// Leave Windows Wi-Fi background scanning and power settings alone.
     #[arg(long)]
     no_wifi_tuning: bool,
+    /// Windows: install and start a service that runs this server as SYSTEM
+    /// (streams UAC prompts and the lock screen), with the other options given.
+    #[arg(long)]
+    install_service: bool,
+    /// Windows: stop and remove the service.
+    #[arg(long)]
+    uninstall_service: bool,
+    /// Run as the service (started by Windows; not for manual use).
+    #[arg(long, hide = true)]
+    service: bool,
 }
 
 pub struct EncodedFrame {
@@ -104,7 +114,30 @@ fn wait_for_enter() {
     let _ = std::io::stdin().read_line(&mut String::new());
 }
 
+#[cfg(windows)]
+fn service_command(cli: &Cli) -> Option<Result<(), String>> {
+    use windows::service;
+    if cli.install_service {
+        let args: Vec<_> = std::env::args_os().skip(1).filter(|a| a != "--install-service").collect();
+        Some(service::install(&args))
+    } else if cli.uninstall_service {
+        Some(service::uninstall())
+    } else if cli.service {
+        Some(service::run())
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+fn service_command(cli: &Cli) -> Option<Result<(), String>> {
+    (cli.install_service || cli.uninstall_service || cli.service).then(|| Err("the service is Windows only".into()))
+}
+
 fn run(cli: Cli) -> Result<(), String> {
+    if let Some(result) = service_command(&cli) {
+        return result;
+    }
     let _tuning = (!cli.no_wifi_tuning).then(wlan::tune).flatten();
     let mut source: Box<dyn Source> = match &cli.file {
         Some(path) => Box::new(file::FileSource::open(path, cli.fps)?),

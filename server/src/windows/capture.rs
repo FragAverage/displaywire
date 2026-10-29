@@ -108,6 +108,17 @@ pub struct Change {
     pub pointer: bool,
 }
 
+/// Attaches the calling thread to the desktop that currently receives input.
+fn attach_input_desktop() -> Option<(HDESK, String)> {
+    let desk = unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(GENERIC_ALL)) }.ok()?;
+    if unsafe { SetThreadDesktop(desk) }.is_err() {
+        let _ = unsafe { CloseDesktop(desk) };
+        return None;
+    }
+    let name = desktop_name(desk);
+    Some((desk, name))
+}
+
 fn desktop_name(desk: HDESK) -> String {
     let mut buf = [0u16; 128];
     let mut needed = 0u32;
@@ -154,6 +165,8 @@ pub(super) fn primary_output() -> Res<(IDXGIAdapter1, IDXGIOutput, String)> {
 
 impl Capture {
     pub fn new() -> Res<Capture> {
+        // Started while the lock screen or a UAC prompt is up: capture that.
+        let desktop = attach_input_desktop().inspect(|(_, name)| println!("capture: input desktop is {name}"));
         let (adapter, output, adapter_name) = primary_output()?;
         let mut device = None;
         let mut context = None;
@@ -193,7 +206,7 @@ impl Capture {
             output,
             dup: Some(dup),
             next_retry_ns: 0,
-            desktop: None,
+            desktop,
             frame,
             composed,
             staging: None,

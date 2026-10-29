@@ -86,6 +86,8 @@ struct Receiver {
     telemetry: Arc<Telemetry>,
     /// None if no output device could be opened: video only then.
     audio: Option<audio::Player>,
+    /// `STREAMY_SIM_LOSS=<percent>`: drop that share of incoming video packets, to test recovery.
+    sim_loss: Option<SimLoss>,
     /// `STREAMY_TRACE=file`: one CSV line per decoded frame, for timing analysis.
     trace: Option<std::io::BufWriter<std::fs::File>>,
 }
@@ -116,6 +118,7 @@ impl Receiver {
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
             telemetry,
+            sim_loss: std::env::var("STREAMY_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
             audio: audio::Player::new().map_err(|e| eprintln!("audio disabled: {e}")).ok(),
             trace: std::env::var_os("STREAMY_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
                 use std::io::Write;
@@ -192,6 +195,7 @@ impl Receiver {
             };
             let rx = now_ns();
             match Msg::decode(&buf[..n]) {
+                Some(Msg::Video(..)) if self.sim_loss.as_mut().is_some_and(SimLoss::drop_this) => {}
                 Some(Msg::Video(v, payload)) => {
                     last_video = rx;
                     self.stats.bytes += n as u64;
@@ -226,6 +230,9 @@ impl Receiver {
             self.stats.dropped += 1;
             self.binner.lost(1);
             return;
+        }
+        if frame.repaired > 0 {
+            self.stats.repaired += 1;
         }
         let sample = hevc::to_sample(&frame.data);
         if let Some(ps) = sample.param_sets
@@ -346,8 +353,30 @@ impl Clock {
     }
 }
 
+/// Drops a fixed share of packets at random (a debugging aid, see `sim_loss`).
+struct SimLoss {
+    percent: f64,
+    state: u64,
+}
+
+impl SimLoss {
+    fn new(percent: f64) -> SimLoss {
+        println!("simulating {percent}% video packet loss");
+        SimLoss { percent, state: 0x9E37_79B9_7F4A_7C15 }
+    }
+
+    fn drop_this(&mut self) -> bool {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        (self.state >> 11) as f64 / (1u64 << 53) as f64 * 100.0 < self.percent
+    }
+}
+
 struct Stats {
     window_start: u64,
+    /// Frames that lost packets but were rebuilt from repair packets.
+    repaired: u32,
     frames: u32,
     bytes: u64,
     dropped: u32,
@@ -361,6 +390,7 @@ impl Stats {
     fn new() -> Self {
         Stats {
             window_start: now_ns(),
+            repaired: 0,
             frames: 0,
             bytes: 0,
             dropped: 0,
@@ -389,6 +419,9 @@ impl Stats {
         );
         if self.lost + self.dropped + self.errors > 0 {
             line += &format!("  lost {} dropped {} errors {}", self.lost, self.dropped, self.errors);
+        }
+        if self.repaired > 0 {
+            line += &format!("  fec-repaired {}", self.repaired);
         }
         *self = Stats { window_start: now, ..Stats::new() };
         Some(line)

@@ -80,6 +80,11 @@ no encryption, no input, no cursor, primary monitor only.
 **Service mode done (2026-10-29)**: `--install-service` runs the server as SYSTEM in the active
 session; capture follows the input desktop, so UAC prompts, the lock screen and the login screen stream.
 
+**Loss recovery (2026-10-29)**: per-frame Reed-Solomon FEC (10% default). With 1% simulated
+packet loss and FEC off the stream collapses to ~19 fps (759 frames lost, 1,804 dropped waiting for
+keyframes in 64 s); with FEC on, 0 lost and 1,001 repaired. 3%: 23 lost, 1,479 repaired. Next:
+reference-frame invalidation for whole-frame loss, adaptive parity from measured loss.
+
 ## Phases
 0. **Spike** — DDA → NVENC → file (HEVC + AV1); VideoToolbox decode on M5 Max; measure encode/decode ms.
    Measure raw Wi-Fi UDP jitter/loss between the two machines with a pacing test tool.

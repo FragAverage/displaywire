@@ -2,12 +2,13 @@
 
 use crate::{Reader, Writer};
 
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// Bytes taken by a `Video` header.
-pub const VIDEO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 2 + 2 + 8;
-/// Largest video payload per datagram.
-pub const VIDEO_PAYLOAD: usize = crate::MAX_DATAGRAM - VIDEO_HEADER_LEN;
+pub const VIDEO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 2 + 2 + 1 + 2 + 8;
+/// Bytes in every video fragment but the last data one, and in every parity
+/// fragment. Even, as the Reed-Solomon code needs.
+pub const VIDEO_PAYLOAD: usize = (crate::MAX_DATAGRAM - VIDEO_HEADER_LEN) & !1;
 
 /// Bytes taken by an `Audio`/`Mic` header.
 pub const AUDIO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 8;
@@ -89,12 +90,19 @@ impl Input {
     }
 }
 
-/// One fragment of an encoded video frame (HEVC Annex B).
+/// One fragment of an encoded video frame (HEVC Annex B). A frame is `frags`
+/// data fragments (`frag` 0..frags) followed by `parity` repair fragments
+/// (`frag` frags..frags+parity): any `frags` of them rebuild the frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Video {
     pub frame: u32,
     pub frag: u16,
+    /// Data fragments in the frame.
     pub frags: u16,
+    /// Repair fragments in the frame.
+    pub parity: u8,
+    /// Bytes in the last data fragment (the others are `VIDEO_PAYLOAD`).
+    pub last_len: u16,
     pub keyframe: bool,
     /// Server clock when the frame was captured.
     pub capture_ns: u64,
@@ -166,6 +174,8 @@ impl<'a> Msg<'a> {
                 w.u32(v.frame);
                 w.u16(v.frag);
                 w.u16(v.frags);
+                w.u8(v.parity);
+                w.u16(v.last_len);
                 w.u64(v.capture_ns);
                 w.bytes(payload);
             }
@@ -210,9 +220,11 @@ impl<'a> Msg<'a> {
                     frame: r.u32()?,
                     frag: r.u16()?,
                     frags: r.u16()?,
+                    parity: r.u8()?,
+                    last_len: r.u16()?,
                     capture_ns: r.u64()?,
                 };
-                if v.frags == 0 || v.frag >= v.frags {
+                if v.frags == 0 || v.frag as usize >= v.frags as usize + v.parity as usize || v.last_len as usize > VIDEO_PAYLOAD {
                     return None;
                 }
                 Msg::Video(v, r.rest())
@@ -261,7 +273,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let payload = [7u8; VIDEO_PAYLOAD];
-        let v = Video { frame: 9, frag: 2, frags: 3, keyframe: true, capture_ns: 42 };
+        let v = Video { frame: 9, frag: 2, frags: 3, parity: 1, last_len: 700, keyframe: true, capture_ns: 42 };
         let mut input = Input {
             seq: 7,
             buttons: BUTTON_LEFT | BUTTON_FORWARD,
@@ -317,9 +329,21 @@ mod tests {
     }
 
     #[test]
+    fn parity_fragment_indexes_are_accepted_up_to_the_count() {
+        let mut buf = [0u8; 64];
+        let v = |frag| Video { frame: 0, frag, frags: 3, parity: 2, last_len: 5, keyframe: false, capture_ns: 0 };
+        for frag in [3, 4] {
+            let n = Msg::Video(v(frag), &[]).encode(&mut buf);
+            assert!(Msg::decode(&buf[..n]).is_some());
+        }
+        let n = Msg::Video(v(5), &[]).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), None);
+    }
+
+    #[test]
     fn rejects_bad_fragment_index() {
         let mut buf = [0u8; 64];
-        let v = Video { frame: 0, frag: 3, frags: 3, keyframe: false, capture_ns: 0 };
+        let v = Video { frame: 0, frag: 3, frags: 3, parity: 0, last_len: 0, keyframe: false, capture_ns: 0 };
         let n = Msg::Video(v, &[]).encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), None);
     }

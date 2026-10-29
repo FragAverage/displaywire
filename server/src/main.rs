@@ -60,6 +60,9 @@ pub struct Cli {
     /// Leave Windows Wi-Fi background scanning and power settings alone.
     #[arg(long)]
     no_wifi_tuning: bool,
+    /// Repair packets per frame, as a percentage of its data packets (0 turns FEC off).
+    #[arg(long, default_value_t = 10)]
+    fec: u32,
     /// Don't send desktop audio.
     #[arg(long)]
     no_audio: bool,
@@ -208,7 +211,7 @@ fn run(cli: Cli) -> Result<(), String> {
 
         let encoded_ns = now_ns();
         let mut next_send = encoded_ns;
-        video::packetize(frame_id, frame.keyframe, frame.capture_ns, &frame.data, |pkt| {
+        video::packetize(frame_id, frame.keyframe, frame.capture_ns, &frame.data, cli.fec, |pkt| {
             sleep_until(next_send);
             let _ = sock.send_to(pkt, peer);
             next_send = next_send.max(now_ns()) + (pkt.len() as f64 * pace_ns_per_byte) as u64;

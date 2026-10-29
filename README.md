@@ -65,7 +65,17 @@ releases every key and button.
 lost frames over the last 20 seconds (remembered between launches). Run the server as administrator to control
 elevated windows.
 
+## Packet loss
+
+Every video frame is sent with 10% repair packets (Reed-Solomon, `--fec <percent>`
+on the server, 0 turns it off): a frame that loses a few packets is rebuilt on
+the client with no retransmission and no extra latency. The client's stats line
+shows `fec-repaired N` for frames saved that way.
+
 ## Debugging
+
+`STREAMY_SIM_LOSS=<percent> streamy-client <server>` drops that share of incoming
+video packets, to test loss recovery.
 
 `STREAMY_TRACE=trace.csv streamy-client <server>` writes one line per frame
 (server capture time, decoded time, size, keyframe) for timing analysis.

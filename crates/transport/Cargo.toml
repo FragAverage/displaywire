@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 proto.workspace = true
 socket2 = { version = "0.6.5", features = ["all"] }
+reed-solomon-simd = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_WiFi"] }

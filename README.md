@@ -65,6 +65,11 @@ releases every key and button.
 lost frames over the last 20 seconds (remembered between launches). Run the server as administrator to control
 elevated windows.
 
+## Debugging
+
+`STREAMY_TRACE=trace.csv streamy-client <server>` writes one line per frame
+(server capture time, decoded time, size, keyframe) for timing analysis.
+
 ## Test without Windows
 ```
 scripts/make-clips.sh

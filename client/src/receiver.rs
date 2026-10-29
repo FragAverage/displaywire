@@ -83,6 +83,8 @@ struct Receiver {
     stats: Stats,
     binner: Binner,
     telemetry: Arc<Telemetry>,
+    /// `STREAMY_TRACE=file`: one CSV line per decoded frame, for timing analysis.
+    trace: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl Receiver {
@@ -111,6 +113,11 @@ impl Receiver {
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
             telemetry,
+            trace: std::env::var_os("STREAMY_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
+                use std::io::Write;
+                let _ = writeln!(f, "frame,keyframe,bytes,capture_ns,decoded_ns,decode_ns");
+                std::io::BufWriter::new(f)
+            }),
         })
     }
 
@@ -239,6 +246,19 @@ impl Receiver {
                     self.stats.latency.push(l);
                 }
                 self.binner.frame((decoded_ns - start) as i64, latency);
+                if let Some(t) = &mut self.trace {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        t,
+                        "{},{},{},{},{},{}",
+                        frame.id,
+                        frame.keyframe as u8,
+                        frame.data.len(),
+                        frame.capture_ns,
+                        decoded_ns as i64 + self.clock.offset().unwrap_or(0),
+                        decoded_ns - start
+                    );
+                }
             }
             (r, d) => {
                 let status = match (&r, &d) {

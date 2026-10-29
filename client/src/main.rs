@@ -215,8 +215,8 @@ mod app {
                         }
                         return;
                     }
-                    // ⌃⌥G: show or hide the stats graph.
-                    if self.modifiers.control_key() && self.modifiers.alt_key() && code == KeyCode::KeyG {
+                    // ⌃⌥S: show or hide the stats graph (⌃⌥G is taken by window managers).
+                    if self.modifiers.control_key() && self.modifiers.alt_key() && code == KeyCode::KeyS {
                         if down && !event.repeat {
                             self.toggle_graph();
                         }

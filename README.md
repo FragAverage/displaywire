@@ -61,7 +61,7 @@ with `SendInput`, like Sunshine and Parsec). The pointer follows the Mac
 cursor by default; **⌃⌥M** captures it for games (relative motion, Mac
 cursor hidden) and releases it again. Switching away from the window
 releases every key and button.
-**⌃⌥G** shows or hides a graph of frame rate, bitrate, latency, RTT and
+**⌃⌥S** shows or hides a graph of frame rate, bitrate, latency, RTT and
 lost frames over the last 20 seconds (remembered between launches). Run the server as administrator to control
 elevated windows.
 

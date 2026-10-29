@@ -65,6 +65,22 @@ releases every key and button.
 lost frames over the last 20 seconds (remembered between launches). Run the server as administrator to control
 elevated windows.
 
+## Pairing
+
+The server has a pairing key and encrypts everything with it; a client without
+the key can't see or do anything, and the server doesn't answer it at all
+(details in `docs/AUTH.md`).
+
+- `streamy-server.exe --install-service` creates the key (in
+  `C:\ProgramData\Streamy\key`, readable only by administrators) and prints it.
+  `--show-key` prints it again, `--new-key` replaces it (every client then needs
+  the new one).
+- On the Mac, once per server: `streamy-client --set-key <server> <key>`, or
+  `streamy-client <server> --key <key>`. It is kept in
+  `~/Library/Application Support/Streamy/keys`.
+- You can fetch the key from the Mac over SSH, without touching the PC:
+  `ssh gaming-pc 'C:\ProgramData\Streamy\streamy-server.exe --show-key'`.
+
 ## Packet loss
 
 Every video frame is sent with 10% repair packets (Reed-Solomon, `--fec <percent>`

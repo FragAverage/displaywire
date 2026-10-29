@@ -57,18 +57,19 @@ pub fn spawn(sock: UdpSocket, shared: Arc<Shared>, mut source: Box<dyn AudioSour
     let _ = std::thread::Builder::new().name("audio".into()).spawn(move || {
         let mut samples = [0i16; CHUNK_SAMPLES];
         let mut bytes = [0u8; CHUNK_SAMPLES * 2];
+        let mut plain = [0u8; proto::MAX_DATAGRAM];
         let mut out = [0u8; proto::MAX_DATAGRAM];
         let mut seq = 0u32;
         source.on_thread_start();
         loop {
             let Some(capture_ns) = source.next_chunk(&mut samples) else { continue };
-            let peer = *shared.peer.lock().unwrap();
-            let Some(peer) = peer.filter(|_| shared.caps.load(Relaxed) & CAP_AUDIO != 0) else { continue };
+            let link = shared.link.lock().unwrap().clone();
+            let Some(link) = link.filter(|_| shared.caps.load(Relaxed) & CAP_AUDIO != 0) else { continue };
             for (b, s) in bytes.chunks_mut(2).zip(samples) {
                 b.copy_from_slice(&s.to_le_bytes());
             }
-            let n = Msg::Audio(Audio { seq, format: AudioFormat::Pcm16, capture_ns }, &bytes).encode(&mut out);
-            let _ = sock.send_to(&out[..n], peer);
+            let n = Msg::Audio(Audio { seq, format: AudioFormat::Pcm16, capture_ns }, &bytes).encode(&mut plain);
+            link.send(&sock, &plain[..n], &mut out);
             seq = seq.wrapping_add(1);
         }
     });

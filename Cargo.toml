@@ -10,6 +10,7 @@ version = "0.3.0"
 proto = { path = "crates/proto" }
 timing = { path = "crates/timing" }
 transport = { path = "crates/transport" }
+secure = { path = "crates/secure" }
 hevc = { path = "crates/hevc" }
 videotoolbox = { path = "crates/videotoolbox" }
 

@@ -2,20 +2,21 @@
 //! button state, sent on each change and re-sent every `HEARTBEAT_NS`, so a
 //! lost packet can't leave a key held down on the server.
 
-use std::net::UdpSocket;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use proto::stream::{BUTTON_BACK, BUTTON_FORWARD, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Input, Msg};
 use timing::now_ns;
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
+use crate::link::Link;
+
 const HEARTBEAT_NS: u64 = 50_000_000;
 /// Trackpad scrolling: pixels per 120-unit wheel notch.
 const PIXELS_PER_NOTCH: f64 = 50.0;
 
 pub struct Sender {
-    sock: UdpSocket,
+    link: Arc<Link>,
     state: Mutex<State>,
     iso_keyboard: bool,
 }
@@ -29,9 +30,8 @@ struct State {
 }
 
 impl Sender {
-    /// `sock` must be connected to the server.
-    pub fn new(sock: UdpSocket) -> Sender {
-        Sender { sock, state: Mutex::default(), iso_keyboard: iso_keyboard() }
+    pub fn new(link: Arc<Link>) -> Sender {
+        Sender { link, state: Mutex::default(), iso_keyboard: iso_keyboard() }
     }
 
     /// Returns false for keys Windows has no scancode for.
@@ -122,7 +122,7 @@ impl Sender {
         s.msg.seq = s.msg.seq.wrapping_add(1);
         let mut buf = [0u8; proto::MAX_DATAGRAM];
         let n = Msg::Input(s.msg).encode(&mut buf);
-        let _ = self.sock.send(&buf[..n]);
+        self.link.send(&buf[..n]);
         s.last_sent_ns = now_ns();
         // Deltas and one-shot fields go out once; the key/button state persists.
         let m = &mut s.msg;

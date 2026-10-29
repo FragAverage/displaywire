@@ -2,18 +2,18 @@
 
 use crate::{Reader, Writer};
 
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// Bytes taken by a `Video` header.
 pub const VIDEO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 2 + 2 + 1 + 2 + 8;
 /// Bytes in every video fragment but the last data one, and in every parity
 /// fragment. Even, as the Reed-Solomon code needs.
-pub const VIDEO_PAYLOAD: usize = (crate::MAX_DATAGRAM - VIDEO_HEADER_LEN) & !1;
+pub const VIDEO_PAYLOAD: usize = (crate::MAX_PLAIN - VIDEO_HEADER_LEN) & !1;
 
 /// Bytes taken by an `Audio`/`Mic` header.
 pub const AUDIO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 8;
 /// Largest audio payload per datagram.
-pub const AUDIO_PAYLOAD: usize = crate::MAX_DATAGRAM - AUDIO_HEADER_LEN;
+pub const AUDIO_PAYLOAD: usize = crate::MAX_PLAIN - AUDIO_HEADER_LEN;
 /// Audio is always 48 kHz stereo.
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: usize = 2;
@@ -146,7 +146,7 @@ pub enum Msg<'a> {
 }
 
 impl<'a> Msg<'a> {
-    /// Encodes into `buf` (at least `MAX_DATAGRAM` bytes) and returns the length.
+    /// Encodes into `buf` (at least `MAX_PLAIN` bytes) and returns the length.
     pub fn encode(&self, buf: &mut [u8]) -> usize {
         let mut w = Writer::new(buf);
         w.bytes(&crate::MAGIC);
@@ -304,7 +304,7 @@ mod tests {
         let mut buf = [0u8; crate::MAX_DATAGRAM];
         for m in msgs {
             let n = m.encode(&mut buf);
-            assert!(n <= crate::MAX_DATAGRAM);
+            assert!(n <= crate::MAX_PLAIN);
             assert_eq!(Msg::decode(&buf[..n]), Some(m));
         }
     }
@@ -314,7 +314,7 @@ mod tests {
         let mut buf = [0u8; crate::MAX_DATAGRAM];
         let payload = [0u8; AUDIO_PAYLOAD];
         let a = Audio { seq: 0, format: AudioFormat::Pcm16, capture_ns: 0 };
-        assert_eq!(Msg::Audio(a, &payload).encode(&mut buf), crate::MAX_DATAGRAM);
+        assert_eq!(Msg::Audio(a, &payload).encode(&mut buf), crate::MAX_PLAIN);
     }
 
     #[test]

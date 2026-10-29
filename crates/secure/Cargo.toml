@@ -1,0 +1,9 @@
+[package]
+name = "secure"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto.workspace = true
+snow = "0.10"
+getrandom = "0.3"

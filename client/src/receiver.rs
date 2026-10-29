@@ -2,7 +2,7 @@
 //! upkeep (hello, pings for RTT/clock offset, keyframe requests).
 
 use std::collections::VecDeque;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,6 +19,8 @@ use crate::app::UserEvent;
 use crate::audio;
 use crate::display::Layer;
 use crate::input;
+use crate::link::Link;
+use secure::{Initiator, ReplayWindow};
 
 const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
@@ -32,18 +34,24 @@ const KEYFRAME_RETRY_NS: u64 = 100 * MS;
 const PARTIAL_MAX_AGE_NS: u64 = 100 * MS;
 /// No video for this long: assume the server dropped us and say hello again.
 const VIDEO_STALL_NS: u64 = 2 * SEC;
+/// Nothing that verifies for this long (pongs come every 20 ms): the session is gone.
+const SESSION_DEAD_NS: u64 = 1_500 * MS;
 
-/// `sock` must be connected to `server`; `input` re-sends its state from this thread.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// `link`'s socket must be connected to `server`; `input` re-sends its state from this thread.
 pub fn run(
     server: SocketAddr,
-    sock: UdpSocket,
+    link: Arc<Link>,
     input: Arc<input::Sender>,
     layer: Layer,
     proxy: EventLoopProxy<UserEvent>,
     telemetry: Arc<Telemetry>,
     stop: Arc<AtomicBool>,
 ) {
-    if let Err(e) = Receiver::new(server, sock, input, layer, proxy.clone(), telemetry).and_then(|mut r| r.run(&stop)) {
+    if let Err(e) = Receiver::new(server, link, input, layer, proxy.clone(), telemetry).and_then(|mut r| r.run(&stop)) {
         let _ = proxy.send_event(UserEvent::Fatal(e));
     }
 }
@@ -68,7 +76,7 @@ struct Decoder {
 
 struct Receiver {
     server: SocketAddr,
-    sock: UdpSocket,
+    link: Arc<Link>,
     input: Arc<input::Sender>,
     layer: Layer,
     proxy: EventLoopProxy<UserEvent>,
@@ -95,16 +103,16 @@ struct Receiver {
 impl Receiver {
     fn new(
         server: SocketAddr,
-        sock: UdpSocket,
+        link: Arc<Link>,
         input: Arc<input::Sender>,
         layer: Layer,
         proxy: EventLoopProxy<UserEvent>,
         telemetry: Arc<Telemetry>,
     ) -> Result<Receiver, String> {
-        sock.set_read_timeout(Some(Duration::from_millis(2))).map_err(|e| e.to_string())?;
+        link.set_read_timeout(Duration::from_millis(2)).map_err(|e| e.to_string())?;
         Ok(Receiver {
             server,
-            sock,
+            link,
             input,
             layer,
             proxy,
@@ -131,7 +139,7 @@ impl Receiver {
     fn send(&self, msg: Msg) {
         let mut buf = [0u8; 64];
         let n = msg.encode(&mut buf);
-        let _ = self.sock.send(&buf[..n]);
+        self.link.send(&buf[..n]);
     }
 
     fn run(&mut self, stop: &AtomicBool) -> Result<(), String> {
@@ -139,20 +147,43 @@ impl Receiver {
         let (mut next_hello, mut next_ping, mut next_bin, mut ping_id) = (0, 0, 0, 0u32);
         let mut last_video = 0u64;
         let mut buf = [0u8; 2048];
+        let mut plain = [0u8; 2048];
+        let caps = if self.audio.is_some() { CAP_AUDIO } else { 0 };
+        // Handshake state (see docs/AUTH.md): a session is "alive" while datagrams
+        // that verify keep arriving; otherwise we (re)handshake, keeping the old
+        // session until the new one is ready.
+        let mut initiator: Option<(Initiator, Vec<u8>)> = None;
+        let mut next_hs = 0u64;
+        let mut window = ReplayWindow::default();
+        let mut last_rx = 0u64;
+        let mut ever_connected = false;
         println!("connecting to {}", self.server);
 
         while !stop.load(Relaxed) {
             let now = now_ns();
-            let streaming = last_video > 0 && now - last_video < VIDEO_STALL_NS;
-            if !streaming && now >= next_hello {
-                if last_video == 0 && now - begin > 5 * SEC && self.clock.is_empty() {
+            let alive = self.link.session().is_some() && now - last_rx < SESSION_DEAD_NS;
+            if !alive {
+                if !ever_connected && now - begin > 5 * SEC {
                     return Err(format!(
-                        "no reply from {}: is streamy-server running and udp/{} allowed through its firewall?",
+                        "no reply from {}: is streamy-server running, is udp/{} allowed through its firewall, and is the pairing key right?",
                         self.server,
                         self.server.port()
                     ));
                 }
-                self.send(Msg::Hello { version: VERSION, caps: if self.audio.is_some() { CAP_AUDIO } else { 0 } });
+                if now >= next_hs {
+                    if initiator.is_none() {
+                        let hello = secure::ClientHello { version: VERSION, caps };
+                        initiator = Some(Initiator::start(self.link.key(), hello, unix_ms()).map_err(|e| e.to_string())?);
+                    }
+                    if let Some((_, hs1)) = &initiator {
+                        self.link.send_raw(hs1);
+                    }
+                    next_hs = now + HELLO_INTERVAL_NS;
+                }
+            }
+            let streaming = last_video > 0 && now - last_video < VIDEO_STALL_NS;
+            if alive && !streaming && now >= next_hello {
+                self.send(Msg::Hello { version: VERSION, caps });
                 next_hello = now + HELLO_INTERVAL_NS;
             }
             if now >= next_ping {
@@ -188,13 +219,36 @@ impl Receiver {
                 let _ = self.proxy.send_event(UserEvent::Title(format!("Streamy: {}  |  {line}", self.server)));
             }
 
-            let n = match self.sock.recv(&mut buf) {
+            let n = match self.link.recv(&mut buf) {
                 Ok(n) => n,
                 Err(e) if is_transient(&e) => continue,
                 Err(e) => return Err(e.to_string()),
             };
             let rx = now_ns();
-            match Msg::decode(&buf[..n]) {
+            let datagram = &buf[..n];
+            match secure::kind(datagram) {
+                Some(secure::HS2) => {
+                    if let Some((init, _)) = initiator.take()
+                        && let Ok((session, hello)) = init.finish(datagram)
+                    {
+                        if hello.version != VERSION {
+                            return Err(format!("the server speaks protocol {}, this client {VERSION}: update the older one", hello.version));
+                        }
+                        self.link.set_session(Some(Arc::new(session)));
+                        window = ReplayWindow::default();
+                        (last_rx, ever_connected) = (rx, true);
+                        // The server starts again from a keyframe; don't wait for the stall timer.
+                        next_hello = 0;
+                    }
+                    continue;
+                }
+                Some(secure::SEC) => {}
+                _ => continue,
+            }
+            let Some(session) = self.link.session() else { continue };
+            let Some(len) = session.open(datagram, &mut window, &mut plain) else { continue };
+            last_rx = rx;
+            match Msg::decode(&plain[..len]) {
                 Some(Msg::Video(..)) if self.sim_loss.as_mut().is_some_and(SimLoss::drop_this) => {}
                 Some(Msg::Video(v, payload)) => {
                     last_video = rx;
@@ -331,10 +385,6 @@ impl Clock {
             self.samples.pop_front();
         }
         self.samples.push_back((rtt, offset));
-    }
-
-    fn is_empty(&self) -> bool {
-        self.samples.is_empty()
     }
 
     fn best(&self) -> Option<(u64, i64)> {

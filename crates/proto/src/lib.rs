@@ -10,6 +10,12 @@ pub const MAGIC: [u8; 2] = *b"SY";
 /// IPv6 (40) + UDP (8) headers, so nothing ever fragments.
 pub const MAX_DATAGRAM: usize = 1200;
 
+/// What encryption adds to a datagram (see the `secure` crate).
+pub const SECURE_OVERHEAD: usize = 31;
+
+/// Largest message before encryption: what fits in a datagram once it is sealed.
+pub const MAX_PLAIN: usize = MAX_DATAGRAM - SECURE_OVERHEAD;
+
 pub(crate) struct Writer<'a> {
     buf: &'a mut [u8],
     pos: usize,

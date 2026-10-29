@@ -12,6 +12,10 @@ mod display;
 #[cfg(target_os = "macos")]
 mod input;
 #[cfg(target_os = "macos")]
+mod keys;
+#[cfg(target_os = "macos")]
+mod link;
+#[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod receiver;
@@ -48,13 +52,20 @@ mod app {
     use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
     use winit::window::{CursorGrabMode, Window, WindowId};
 
-    use crate::{dialog, display, input, overlay, receiver};
+    use crate::link::Link;
+    use crate::{dialog, display, input, keys, overlay, receiver};
 
     #[derive(Parser)]
     #[command(about = "View a streamy server's screen")]
     pub struct Cli {
         /// Server address, `host` or `host:port`. Asked for in a dialog if omitted.
         server: Option<String>,
+        /// Pairing key for this server (saved for next time). Only needed once.
+        #[arg(long)]
+        key: Option<String>,
+        /// Save a pairing key without connecting: `--set-key <server> <key>`.
+        #[arg(long, num_args = 2, value_names = ["SERVER", "KEY"])]
+        set_key: Option<Vec<String>>,
     }
 
     /// Sent from the receiver thread to the UI thread.
@@ -93,6 +104,8 @@ mod app {
         /// Server from the command line; without one, errors go back to the dialog.
         arg: Option<String>,
         interactive: bool,
+        /// `--key`, used for the first connection.
+        key: Option<String>,
         proxy: EventLoopProxy<UserEvent>,
         session: Option<Session>,
         modifiers: ModifiersState,
@@ -131,7 +144,18 @@ mod app {
             let addr: SocketAddr = transport::resolve(server, 9000).map_err(|e| e.to_string())?;
             let sock = transport::udp_socket(transport::any_local(addr)).map_err(|e| e.to_string())?;
             sock.connect(addr).map_err(|e| e.to_string())?;
-            let input = Arc::new(input::Sender::new(sock.try_clone().map_err(|e| e.to_string())?));
+            let key = match &self.key {
+                Some(k) => {
+                    let key = secure::Key::parse(k).map_err(|e| e.to_string())?;
+                    keys::save(server, &key)?;
+                    key
+                }
+                None => keys::load(server).ok_or_else(|| {
+                    format!("no pairing key for {server}: get it from the PC (streamy-server --show-key) and run  streamy-client --set-key {server} <key>")
+                })?,
+            };
+            let link = Arc::new(Link::new(sock, key));
+            let input = Arc::new(input::Sender::new(link.clone()));
             let attrs = Window::default_attributes()
                 .with_title(format!("Streamy: {server}"))
                 .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -144,7 +168,7 @@ mod app {
             let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
-                .spawn(move || receiver::run(addr, sock, input2, layer, proxy, telemetry2, stop2))
+                .spawn(move || receiver::run(addr, link, input2, layer, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
             Ok(Session { window, input, telemetry, overlay, stop, receiver: Some(receiver), sized: false, video: None })
         }
@@ -286,9 +310,16 @@ mod app {
     }
 
     pub fn run(cli: Cli) -> Result<(), String> {
+        if let Some(args) = &cli.set_key {
+            let key = secure::Key::parse(&args[1]).map_err(|e| e.to_string())?;
+            keys::save(&args[0], &key)?;
+            println!("saved the pairing key for {}", args[0]);
+            return Ok(());
+        }
         let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| e.to_string())?;
         let mut app = App {
             interactive: cli.server.is_none(),
+            key: cli.key,
             arg: cli.server,
             proxy: event_loop.create_proxy(),
             session: None,

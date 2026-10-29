@@ -15,11 +15,19 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource,
 };
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetUserObjectInformationW, HDESK, OpenInputDesktop,
+    SetThreadDesktop, UOI_NAME,
+};
 use windows::core::Interface;
 
 use super::{Context, Res};
 
-const RETRY_NS: u64 = 1_000_000_000;
+/// How often a lost duplication is retried. Failed attempts are cheap, and
+/// this bounds how long the picture freezes when a UAC prompt comes or goes.
+const RETRY_NS: u64 = 100_000_000;
+const GENERIC_ALL: u32 = 0x1000_0000;
 
 pub struct Capture {
     pub device: ID3D11Device,
@@ -28,6 +36,8 @@ pub struct Capture {
     /// None while the desktop is unavailable (lock screen, display off, mode change).
     dup: Option<IDXGIOutputDuplication>,
     next_retry_ns: u64,
+    /// The input desktop this thread is attached to, once it has had to leave the default one.
+    desktop: Option<(HDESK, String)>,
     /// Latest desktop image (BGRA), kept so a keyframe can be re-encoded when nothing changes.
     frame: ID3D11Texture2D,
     /// `frame` with the pointer drawn on: what gets encoded.
@@ -98,6 +108,24 @@ pub struct Change {
     pub pointer: bool,
 }
 
+fn desktop_name(desk: HDESK) -> String {
+    let mut buf = [0u16; 128];
+    let mut needed = 0u32;
+    let ok = unsafe {
+        GetUserObjectInformationW(
+            HANDLE(desk.0),
+            UOI_NAME,
+            Some(buf.as_mut_ptr().cast()),
+            size_of_val(&buf) as u32,
+            Some(&mut needed),
+        )
+    };
+    if ok.is_err() {
+        return "?".into();
+    }
+    String::from_utf16_lossy(&buf).trim_end_matches('\0').to_string()
+}
+
 /// First monitor attached to the desktop, and its adapter.
 pub(super) fn primary_output() -> Res<(IDXGIAdapter1, IDXGIOutput, String)> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
@@ -165,6 +193,7 @@ impl Capture {
             output,
             dup: Some(dup),
             next_retry_ns: 0,
+            desktop: None,
             frame,
             composed,
             staging: None,
@@ -223,6 +252,7 @@ impl Capture {
     /// The current duplication, recreating it (at most every `RETRY_NS`) if it was lost.
     fn duplication(&mut self, timeout_ms: u32) -> Option<IDXGIOutputDuplication> {
         if self.dup.is_none() && timing::now_ns() >= self.next_retry_ns {
+            self.follow_input_desktop();
             match unsafe { self.output.DuplicateOutput(&self.device) } {
                 Ok(dup) => {
                     let mode = unsafe { dup.GetDesc() }.ModeDesc;
@@ -242,6 +272,34 @@ impl Capture {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms.min(100) as u64));
         }
         self.dup.clone()
+    }
+
+    /// Duplication only works from a thread on the desktop that currently
+    /// receives input, and UAC prompts and the lock screen live on their own
+    /// (Winlogon) desktop, which only SYSTEM may open. Without that right this
+    /// stays on the user's desktop and those screens can't be captured.
+    fn follow_input_desktop(&mut self) {
+        let Ok(desk) = (unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(GENERIC_ALL)) })
+        else {
+            return;
+        };
+        let name = desktop_name(desk);
+        if self.desktop.as_ref().is_some_and(|(_, n)| *n == name) {
+            let _ = unsafe { CloseDesktop(desk) };
+            return;
+        }
+        if unsafe { SetThreadDesktop(desk) }.is_err() {
+            let _ = unsafe { CloseDesktop(desk) };
+            return;
+        }
+        println!("capture: following the input desktop ({name})");
+        // The output was enumerated on the previous desktop; take a fresh one.
+        if let Ok(output) = primary_output().and_then(|(_, o, _)| Ok(o.cast::<IDXGIOutput1>()?)) {
+            self.output = output;
+        }
+        if let Some((old, _)) = self.desktop.replace((desk, name)) {
+            let _ = unsafe { CloseDesktop(old) };
+        }
     }
 
     /// Fills `composed`: the desktop with the pointer drawn on it.

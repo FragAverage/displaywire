@@ -81,6 +81,26 @@ the key can't see or do anything, and the server doesn't answer it at all
 - You can fetch the key from the Mac over SSH, without touching the PC:
   `ssh gaming-pc 'C:\ProgramData\Streamy\streamy-server.exe --show-key'`.
 
+## Clipboard and files
+
+- **Clipboard text** is shared both ways while connected (up to 1 MB; items a
+  password manager marks as concealed are never sent). Turn it off in
+  Settings (⌘,) on the Mac, or with `--no-clipboard` on the server.
+- **Files**: drop them on the stream window, or Connection ▸ Send File to PC…, or
+  `streamy-client <server> --send <file>`. They land in the PC user's
+  `Downloads\Streamy` folder, owned by that user, at up to ~8 MB/s so they can't
+  starve the video. `--no-files` turns uploads off on the server and
+  `--max-upload-mb` (default 4096) limits their size. Transfers ride the same
+  encrypted session, with their own retransmission (`crates/xfer`).
+
+## Settings
+
+Settings (⌘,) on the Mac: video bitrate, a frame-rate cap, loss protection (FEC),
+volume and clipboard sharing. Bitrate, cap and FEC are applied live on the server;
+`View ▸ Mute Audio`, `⌃⌥S` (stats) and `⌃⌘F` (full screen) are in the menus too.
+On a LAN the connect dialog lists servers that announce themselves (turn that off with
+`--no-discovery`), and remembers the ones you used.
+
 ## Packet loss
 
 Every video frame is sent with 10% repair packets (Reed-Solomon, `--fec <percent>`

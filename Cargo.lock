@@ -1978,6 +1978,7 @@ dependencies = [
  "transport",
  "videotoolbox",
  "winit",
+ "xfer",
 ]
 
 [[package]]
@@ -1992,6 +1993,7 @@ dependencies = [
  "timing",
  "transport",
  "windows",
+ "xfer",
 ]
 
 [[package]]
@@ -2166,6 +2168,7 @@ dependencies = [
  "reed-solomon-simd",
  "socket2",
  "windows-sys 0.61.2",
+ "xfer",
 ]
 
 [[package]]
@@ -2748,6 +2751,10 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xfer"
+version = "0.3.0"
 
 [[package]]
 name = "xkbcommon-dl"

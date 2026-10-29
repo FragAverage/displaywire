@@ -1,5 +1,6 @@
 //! UDP plumbing shared by the server, client and tools.
 
+pub mod transfer;
 pub mod video;
 pub mod wlan;
 

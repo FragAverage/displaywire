@@ -14,12 +14,14 @@ pub struct Prefs {
     /// 0..=100.
     pub volume: u8,
     pub muted: bool,
+    /// Share clipboard text with the PC.
+    pub clipboard: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         let s = Settings::default();
-        Prefs { bitrate_mbps: s.bitrate_kbps / 1000, fps_cap: s.fps_cap, fec_percent: s.fec_percent, volume: 100, muted: false }
+        Prefs { bitrate_mbps: s.bitrate_kbps / 1000, fps_cap: s.fps_cap, fec_percent: s.fec_percent, volume: 100, muted: false, clipboard: true }
     }
 }
 
@@ -45,6 +47,7 @@ impl Prefs {
                 "fec_percent" => p.fec_percent = v.parse().unwrap_or(p.fec_percent),
                 "volume" => p.volume = v.parse().unwrap_or(p.volume),
                 "muted" => p.muted = v == "true",
+                "clipboard" => p.clipboard = v != "false",
                 _ => {}
             }
         }
@@ -70,8 +73,8 @@ impl Prefs {
         if let Some(path) = state_file("settings") {
             let _ = path.parent().map(std::fs::create_dir_all);
             let text = format!(
-                "bitrate_mbps={}\nfps_cap={}\nfec_percent={}\nvolume={}\nmuted={}\n",
-                self.bitrate_mbps, self.fps_cap, self.fec_percent, self.volume, self.muted
+                "bitrate_mbps={}\nfps_cap={}\nfec_percent={}\nvolume={}\nmuted={}\nclipboard={}\n",
+                self.bitrate_mbps, self.fps_cap, self.fec_percent, self.volume, self.muted, self.clipboard
             );
             let _ = std::fs::write(path, text);
         }

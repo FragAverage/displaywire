@@ -17,6 +17,7 @@ use crate::app::UserEvent;
 pub enum Action {
     Connect,
     Disconnect,
+    SendFile,
     ToggleStats,
     Settings,
     Mute,
@@ -47,6 +48,11 @@ define_class!(
         #[unsafe(method(disconnect:))]
         fn disconnect(&self, _sender: Option<&AnyObject>) {
             send(Action::Disconnect);
+        }
+
+        #[unsafe(method(sendFile:))]
+        fn send_file(&self, _sender: Option<&AnyObject>) {
+            send(Action::SendFile);
         }
 
         #[unsafe(method(toggleStats:))]
@@ -128,6 +134,8 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
         vec![
             item(mtm, "Connect…", Some(sel!(connect:)), "", none, Some(t)),
             item(mtm, "Disconnect", Some(sel!(disconnect:)), "", none, Some(t)),
+            sep(),
+            item(mtm, "Send File to PC…", Some(sel!(sendFile:)), "", none, Some(t)),
         ],
     );
     let view = submenu(

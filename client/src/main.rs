@@ -25,6 +25,8 @@ mod overlay;
 mod receiver;
 #[cfg(target_os = "macos")]
 mod settings;
+#[cfg(target_os = "macos")]
+mod transfer;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -59,7 +61,7 @@ mod app {
     use winit::window::{CursorGrabMode, Window, WindowId};
 
     use crate::link::Link;
-    use crate::{dialog, display, input, keys, menu, overlay, receiver, settings};
+    use crate::{dialog, display, input, keys, menu, overlay, receiver, settings, transfer};
 
     #[derive(Parser)]
     #[command(about = "View a streamy server's screen")]
@@ -72,6 +74,9 @@ mod app {
         /// Save a pairing key without connecting: `--set-key <server> <key>`.
         #[arg(long, num_args = 2, value_names = ["SERVER", "KEY"])]
         set_key: Option<Vec<String>>,
+        /// Send these files to the PC once connected.
+        #[arg(long, value_name = "FILE")]
+        send: Vec<std::path::PathBuf>,
         /// Show one dialog and exit, for checking how it looks: connect, settings or shortcuts.
         #[arg(long, hide = true, value_name = "DIALOG")]
         preview: Option<String>,
@@ -86,6 +91,8 @@ mod app {
         Status(Option<String>),
         /// A menu item was chosen.
         Menu(menu::Action),
+        /// Transfer progress or outcome for the banner; `None` clears it.
+        Notice(Option<String>),
         Title(String),
         Fatal(String),
     }
@@ -98,16 +105,30 @@ mod app {
         telemetry: Arc<receiver::Telemetry>,
         overlay: overlay::Overlay,
         banner: overlay::Banner,
+        /// What the banner shows about the connection, and about transfers; the first wins.
+        conn_status: Option<String>,
+        notice: Option<String>,
         stop: Arc<AtomicBool>,
         receiver: Option<JoinHandle<()>>,
         sized: bool,
         video: Option<(u32, u32)>,
     }
 
+    impl Session {
+        /// Shows the connection status if there is one, else the transfer notice.
+        fn refresh_banner(&self) {
+            match self.conn_status.as_ref().or(self.notice.as_ref()) {
+                Some(text) => self.banner.show(text),
+                None => self.banner.hide(),
+            }
+        }
+    }
+
     impl Drop for Session {
         fn drop(&mut self) {
             // The receiver draws into the window's layer: stop it first.
             self.stop.store(true, Relaxed);
+            self.telemetry.transfers.shutdown();
             if let Some(r) = self.receiver.take() {
                 let _ = r.join();
             }
@@ -120,6 +141,8 @@ mod app {
         interactive: bool,
         /// `--key`, used for the first connection.
         key: Option<String>,
+        /// `--send`: files to send as soon as there is a connection.
+        pending_sends: Vec<std::path::PathBuf>,
         proxy: EventLoopProxy<UserEvent>,
         session: Option<Session>,
         modifiers: ModifiersState,
@@ -149,6 +172,9 @@ mod app {
                     Ok(session) => {
                         dialog::remember(&server);
                         self.session = Some(session);
+                        for path in std::mem::take(&mut self.pending_sends) {
+                            self.send_file(&path);
+                        }
                         return;
                     }
                     Err(e) => problem = Some(format!("Can't connect to {server}: {e}")),
@@ -179,7 +205,10 @@ mod app {
             let layer = display::Layer::attach(&window);
             let stop = Arc::new(AtomicBool::new(false));
             let graph = load_graph_pref();
-            let telemetry = Arc::new(receiver::Telemetry::new(graph, settings::Prefs::load()));
+            let prefs = settings::Prefs::load();
+            let transfers = transfer::Transfers::new(link.clone(), self.proxy.clone(), prefs.clipboard);
+            transfers.spawn();
+            let telemetry = Arc::new(receiver::Telemetry::new(graph, prefs, transfers));
             let overlay = overlay::Overlay::attach(&window, graph);
             let banner = overlay::Banner::attach(&window);
             let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
@@ -187,7 +216,29 @@ mod app {
                 .name("receiver".into())
                 .spawn(move || receiver::run(addr, link, input2, layer, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
-            Ok(Session { window, input, telemetry, overlay, banner, stop, receiver: Some(receiver), sized: false, video: None })
+            Ok(Session {
+                window,
+                input,
+                telemetry,
+                overlay,
+                banner,
+                conn_status: None,
+                notice: None,
+                stop,
+                receiver: Some(receiver),
+                sized: false,
+                video: None,
+            })
+        }
+
+        /// Sends a file to the PC, saying so in the banner if it can't.
+        fn send_file(&mut self, path: &std::path::Path) {
+            let Some(s) = &mut self.session else { return };
+            if let Err(e) = s.telemetry.transfers.send_file(path) {
+                eprintln!("{e}");
+                s.notice = Some(e);
+                s.refresh_banner();
+            }
         }
 
         fn on_menu(&mut self, el: &ActiveEventLoop, action: menu::Action) {
@@ -211,6 +262,11 @@ mod app {
                 menu::Action::Settings => self.edit_settings(),
                 menu::Action::Mute => self.change_prefs(|p| p.muted = !p.muted),
                 menu::Action::Shortcuts => dialog::show_shortcuts(),
+                menu::Action::SendFile => {
+                    for path in dialog::choose_files() {
+                        self.send_file(&path);
+                    }
+                }
             }
         }
 
@@ -301,6 +357,7 @@ mod app {
                         self.set_locked(false);
                     }
                 }
+                WindowEvent::DroppedFile(path) => self.send_file(&path),
                 WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
                 WindowEvent::KeyboardInput { event, .. } => {
                     let PhysicalKey::Code(code) = event.physical_key else { return };
@@ -353,8 +410,14 @@ mod app {
             let Some(s) = &mut self.session else { return };
             match event {
                 UserEvent::Menu(_) => {}
-                UserEvent::Status(Some(text)) => s.banner.show(&text),
-                UserEvent::Status(None) => s.banner.hide(),
+                UserEvent::Status(text) => {
+                    s.conn_status = text;
+                    s.refresh_banner();
+                }
+                UserEvent::Notice(text) => {
+                    s.notice = text;
+                    s.refresh_banner();
+                }
                 // One video pixel per screen pixel on first frame; the user can resize after.
                 UserEvent::VideoSize(w, h) => {
                     if !s.sized {
@@ -406,6 +469,7 @@ mod app {
         let mut app = App {
             interactive: cli.server.is_none(),
             key: cli.key,
+            pending_sends: cli.send,
             arg: cli.server,
             proxy: event_loop.create_proxy(),
             session: None,

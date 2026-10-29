@@ -8,6 +8,7 @@ proto.workspace = true
 timing.workspace = true
 transport.workspace = true
 secure.workspace = true
+xfer.workspace = true
 hevc.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 
@@ -27,6 +28,8 @@ windows = { version = "0.62.2", features = [
   "Win32_Media",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
   "Win32_System_LibraryLoader",
   "Win32_System_Ole",
   "Win32_System_RemoteDesktop",
@@ -35,6 +38,7 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Threading",
   "Win32_System_Variant",
   "Win32_UI_HiDpi",
+  "Win32_UI_Shell",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }

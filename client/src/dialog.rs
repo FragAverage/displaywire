@@ -6,8 +6,9 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSColor, NSComboBox, NSFont, NSPopUpButton,
-    NSSecureTextField, NSSlider, NSTextField, NSView,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSButton, NSColor, NSComboBox, NSControlStateValueOff,
+    NSControlStateValueOn, NSFont, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSSecureTextField, NSSlider,
+    NSTextField, NSView,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 
@@ -126,7 +127,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     alert.addButtonWithTitle(ns_string!("Save"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
 
-    let (w, h) = (360.0, 132.0);
+    let (w, h) = (360.0, 166.0);
     let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
     let rows = [h - 28.0, h - 62.0, h - 96.0, h - 128.0];
     let (lx, cx) = (0.0, 150.0);
@@ -153,6 +154,11 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     volume.setMaxValue(100.0);
     volume.setDoubleValue(current.volume as f64);
     view.addSubview(&volume);
+    let clipboard =
+        unsafe { NSButton::checkboxWithTitle_target_action(ns_string!("Share clipboard text with the PC"), None, None, mtm) };
+    clipboard.setFrame(rect(lx, 0.0, w, 20.0));
+    clipboard.setState(if current.clipboard { NSControlStateValueOn } else { NSControlStateValueOff });
+    view.addSubview(&clipboard);
     alert.setAccessoryView(Some(&view));
 
     NSApplication::sharedApplication(mtm).activate();
@@ -168,9 +174,24 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
             fec_percent: FEC_LEVELS.get(fec.indexOfSelectedItem().max(0) as usize).map_or(10, |&(p, _)| p),
             volume: volume.doubleValue().round().clamp(0.0, 100.0) as u8,
             muted: current.muted,
+            clipboard: clipboard.state() == NSControlStateValueOn,
         }
         .clamped(),
     )
+}
+
+/// Files chosen in an open panel, to send to the PC.
+pub fn choose_files() -> Vec<PathBuf> {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setAllowsMultipleSelection(true);
+    panel.setCanChooseDirectories(false);
+    panel.setMessage(Some(ns_string!("Choose files to send to the PC")));
+    NSApplication::sharedApplication(mtm).activate();
+    if panel.runModal() != NSModalResponseOK {
+        return Vec::new();
+    }
+    panel.URLs().iter().filter_map(|u| u.path().map(|p| PathBuf::from(p.to_string()))).collect()
 }
 
 /// The keyboard shortcuts, for the Help menu.

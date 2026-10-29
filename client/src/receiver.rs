@@ -21,6 +21,7 @@ use crate::display::Layer;
 use crate::input;
 use crate::link::Link;
 use crate::settings::Prefs;
+use crate::transfer::Transfers;
 use secure::{Initiator, ReplayWindow};
 
 const MS: u64 = 1_000_000;
@@ -65,11 +66,13 @@ pub struct Telemetry {
     /// The user's settings, and a counter the UI bumps when they change.
     pub prefs: Mutex<Prefs>,
     pub prefs_version: AtomicU32,
+    pub transfers: Arc<Transfers>,
 }
 
 impl Telemetry {
-    pub fn new(graph_on: bool, prefs: Prefs) -> Telemetry {
+    pub fn new(graph_on: bool, prefs: Prefs, transfers: Arc<Transfers>) -> Telemetry {
         Telemetry {
+            transfers,
             history: Mutex::new(History::new(HISTORY_BINS)),
             graph_on: AtomicBool::new(graph_on),
             prefs: Mutex::new(prefs),
@@ -215,6 +218,7 @@ impl Receiver {
                 if let Some(p) = &self.audio {
                     p.set_gain(prefs.gain());
                 }
+                self.telemetry.transfers.set_clipboard(prefs.clipboard);
                 (sent_prefs, sent_for_session) = (version, true);
             }
             if !alive {
@@ -302,6 +306,7 @@ impl Receiver {
                         p.push(a.seq, payload, age);
                     }
                 }
+                Some(m @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => self.telemetry.transfers.handle(&m),
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),
                 _ => {}
             }

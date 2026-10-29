@@ -7,6 +7,7 @@
 mod audio;
 mod auth;
 mod file;
+mod transfer;
 #[cfg(windows)]
 mod windows;
 
@@ -75,6 +76,15 @@ pub struct Cli {
     /// Replace the pairing key and exit. Every paired client needs the new one.
     #[arg(long)]
     new_key: bool,
+    /// Don't share the clipboard with the client.
+    #[arg(long)]
+    no_clipboard: bool,
+    /// Don't accept files from the client.
+    #[arg(long)]
+    no_files: bool,
+    /// Largest file accepted, in megabytes.
+    #[arg(long, default_value_t = 4096)]
+    max_upload_mb: u64,
     /// Don't answer discovery queries (clients then need the address typed in).
     #[arg(long)]
     no_discovery: bool,
@@ -227,7 +237,13 @@ fn run(cli: Cli) -> Result<(), String> {
             version: VERSION,
             name: std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "streamy-server".into()),
         });
-        std::thread::spawn(move || control(&sock, &shared, &key, announcement.as_ref()));
+        let transfers = transfer::Transfers::new(transfer::Options {
+            clipboard: !cli.no_clipboard,
+            files: !cli.no_files,
+            max_file_bytes: cli.max_upload_mb << 20,
+        });
+        transfers.spawn(sock.try_clone().map_err(|e| e.to_string())?, shared.clone());
+        std::thread::spawn(move || control(&sock, &shared, &key, announcement.as_ref(), &transfers));
     }
     if !cli.no_audio {
         let source: Option<Box<dyn audio::AudioSource>> = if cli.tone || cli.file.is_some() {
@@ -357,7 +373,13 @@ const PENDING_TTL_NS: u64 = 10 * SEC;
 
 /// Handles client datagrams: handshakes, then (encrypted) session start/stop,
 /// pings, keyframe requests and input. Anything else is dropped silently.
-fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key, announcement: Option<&proto::discover::Announcement>) {
+fn control(
+    sock: &UdpSocket,
+    shared: &Shared,
+    key: &secure::Key,
+    announcement: Option<&proto::discover::Announcement>,
+    transfers: &transfer::Transfers,
+) {
     let mut buf = [0u8; 2048];
     let mut plain = [0u8; 2048];
     let mut out = [0u8; proto::MAX_DATAGRAM];
@@ -461,6 +483,16 @@ fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key, announcement: O
                             || shared.fec_percent.swap(s.fec_percent, Relaxed) != s.fec_percent;
                         if changed {
                             println!("{from}: settings {} Mbps, fps cap {}, loss protection {}%", s.bitrate_kbps / 1000, s.fps_cap, s.fec_percent);
+                        }
+                    }
+                    Some(msg @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => {
+                        if let Some((link, _)) = &active {
+                            let mut reply = [0u8; proto::MAX_DATAGRAM];
+                            for r in transfers.handle(now_ns(), &msg) {
+                                let m = transport::transfer::encode(&r, &mut reply);
+                                let mut sealed = [0u8; proto::MAX_DATAGRAM];
+                                link.send(sock, &reply[..m], &mut sealed);
+                            }
                         }
                     }
                     Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),

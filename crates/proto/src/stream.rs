@@ -34,6 +34,9 @@ const INPUT: u8 = 7;
 const AUDIO: u8 = 8;
 const MIC: u8 = 9;
 const SETTINGS: u8 = 10;
+const XFER: u8 = 11;
+const XFER_ACK: u8 = 12;
+const XFER_CANCEL: u8 = 13;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -180,6 +183,12 @@ pub enum Msg<'a> {
     Mic(Audio, &'a [u8]),
     /// Client → server: apply these stream settings.
     Settings(Settings),
+    /// Either way: one block of a file or clipboard transfer (see the `xfer` crate).
+    Xfer { id: u32, index: u32, payload: &'a [u8] },
+    /// Either way: what the receiver of transfer `id` has (first missing block, bitmap after it).
+    XferAck { id: u32, next: u32, sack: u64 },
+    /// Either way: stop sending transfer `id`.
+    XferCancel { id: u32, reason: u8 },
 }
 
 impl<'a> Msg<'a> {
@@ -230,6 +239,23 @@ impl<'a> Msg<'a> {
                     w.u16(v as u16);
                 }
                 w.u16(i.repeat);
+            }
+            Msg::Xfer { id, index, payload } => {
+                w.u8(XFER);
+                w.u32(id);
+                w.u32(index);
+                w.bytes(payload);
+            }
+            Msg::XferAck { id, next, sack } => {
+                w.u8(XFER_ACK);
+                w.u32(id);
+                w.u32(next);
+                w.u64(sack);
+            }
+            Msg::XferCancel { id, reason } => {
+                w.u8(XFER_CANCEL);
+                w.u32(id);
+                w.u8(reason);
             }
             Msg::Settings(s) => {
                 w.u8(SETTINGS);
@@ -291,6 +317,9 @@ impl<'a> Msg<'a> {
                     repeat: r.u16()?,
                 })
             }
+            XFER => Msg::Xfer { id: r.u32()?, index: r.u32()?, payload: r.rest() },
+            XFER_ACK => Msg::XferAck { id: r.u32()?, next: r.u32()?, sack: r.u64()? },
+            XFER_CANCEL => Msg::XferCancel { id: r.u32()?, reason: r.u8()? },
             SETTINGS => Msg::Settings(Settings { bitrate_kbps: r.u32()?, fps_cap: r.u16()?, fec_percent: r.u8()? }),
             kind @ (AUDIO | MIC) => {
                 let format = match r.u8()? {
@@ -345,6 +374,10 @@ mod tests {
             Msg::Audio(Audio { seq: 5, format: AudioFormat::Pcm16, capture_ns: 99 }, &[1u8; 960]),
             Msg::Mic(Audio { seq: u32::MAX, format: AudioFormat::Pcm16, capture_ns: 0 }, &[]),
             Msg::Settings(Settings { bitrate_kbps: 80_000, fps_cap: 120, fec_percent: 15 }),
+            Msg::Xfer { id: 7, index: 0, payload: &[1, 2, 3] },
+            Msg::Xfer { id: u32::MAX, index: u32::MAX, payload: &[9; 1024] },
+            Msg::XferAck { id: 7, next: 12, sack: 0xDEAD_BEEF_0000_0001 },
+            Msg::XferCancel { id: 7, reason: 2 },
         ];
         let mut buf = [0u8; crate::MAX_DATAGRAM];
         for m in msgs {

@@ -11,6 +11,7 @@ proto = { path = "crates/proto" }
 timing = { path = "crates/timing" }
 transport = { path = "crates/transport" }
 secure = { path = "crates/secure" }
+xfer = { path = "crates/xfer" }
 hevc = { path = "crates/hevc" }
 videotoolbox = { path = "crates/videotoolbox" }
 

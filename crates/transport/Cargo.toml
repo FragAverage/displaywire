@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 proto.workspace = true
+xfer.workspace = true
 socket2 = { version = "0.6.5", features = ["all"] }
 reed-solomon-simd = "3"
 

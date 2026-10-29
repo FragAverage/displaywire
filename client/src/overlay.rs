@@ -67,10 +67,17 @@ impl Overlay {
         let scale = window.scale_factor();
 
         let panel = CALayer::new();
-        let top = root.bounds().size.height - PANEL_H - MARGIN;
+        // AppKit may give us a flipped layer (origin top left) or not (bottom left).
+        // Either way the panel sits in the top left and its own contents are y-up.
+        let flipped = root.isGeometryFlipped();
+        let top = if flipped { MARGIN } else { root.bounds().size.height - PANEL_H - MARGIN };
         panel.setFrame(rect(MARGIN, top, PANEL_W, PANEL_H));
-        // Stay in the top left when the window is resized (the origin is bottom left).
-        panel.setAutoresizingMask(CAAutoresizingMask::LayerMinYMargin);
+        panel.setGeometryFlipped(flipped);
+        panel.setAutoresizingMask(if flipped {
+            CAAutoresizingMask::LayerMaxYMargin
+        } else {
+            CAAutoresizingMask::LayerMinYMargin
+        });
         panel.setBackgroundColor(Some(&color((0.0, 0.0, 0.0, 0.6))));
         panel.setCornerRadius(8.0);
         panel.setHidden(!visible);
@@ -126,12 +133,12 @@ impl Overlay {
 
         let fps_scale = nice_ceil(max(|b| b.fps).max(30.0));
         set_text(&self.rows[0].label, &format!("FPS {:.0}   min {:.0}   lost {lost}", avg(|b| b.fps), min(|b| b.fps)));
-        set_path(&self.rows[0].lines[0], &bins, |b| b.fps / fps_scale);
+        set_path(&self.rows[0].lines[0], &bins, |b| Some(b.fps / fps_scale));
         set_ticks(&self.rows[0].lines[1], &bins);
 
         let mbps_scale = nice_ceil(max(|b| b.mbps).max(10.0));
         set_text(&self.rows[1].label, &format!("Bitrate {:.0} Mbps   peak {:.0}", avg(|b| b.mbps), max(|b| b.mbps)));
-        set_path(&self.rows[1].lines[0], &bins, |b| b.mbps / mbps_scale);
+        set_path(&self.rows[1].lines[0], &bins, |b| Some(b.mbps / mbps_scale));
 
         let ms_scale = nice_ceil(max(|b| b.latency_p99_ms).max(max(|b| b.rtt_ms)).max(10.0));
         set_text(
@@ -144,9 +151,11 @@ impl Overlay {
                 avg(|b| b.decode_ms)
             ),
         );
-        set_path(&self.rows[2].lines[0], &bins, |b| b.latency_p99_ms / ms_scale);
-        set_path(&self.rows[2].lines[1], &bins, |b| b.latency_p50_ms / ms_scale);
-        set_path(&self.rows[2].lines[2], &bins, |b| b.rtt_ms / ms_scale);
+        // Latency is only measured while frames arrive; an idle desktop leaves gaps.
+        let when_frames = |b: &Bin, v: f32| (b.fps > 0.0).then_some(v / ms_scale);
+        set_path(&self.rows[2].lines[0], &bins, |b| when_frames(b, b.latency_p99_ms));
+        set_path(&self.rows[2].lines[1], &bins, |b| when_frames(b, b.latency_p50_ms));
+        set_path(&self.rows[2].lines[2], &bins, |b| Some(b.rtt_ms / ms_scale));
 
         CATransaction::commit();
     }
@@ -168,18 +177,24 @@ fn x_at(i: usize, n: usize) -> f64 {
     GRAPH_W - (n - 1 - i) as f64 * GRAPH_W / (SHOWN - 1) as f64
 }
 
-/// A polyline through `value(bin)` (0..=1 of the graph height).
-fn set_path(layer: &CAShapeLayer, bins: &[Bin], value: impl Fn(&Bin) -> f32) {
+/// A polyline through `value(bin)` (0..=1 of the graph height); `None` leaves a gap.
+fn set_path(layer: &CAShapeLayer, bins: &[Bin], value: impl Fn(&Bin) -> Option<f32>) {
     let path = CGMutablePath::new();
+    let mut pen_down = false;
     for (i, b) in bins.iter().enumerate() {
-        let (x, y) = (x_at(i, bins.len()), (value(b) as f64).clamp(0.0, 1.0) * GRAPH_H);
+        let Some(v) = value(b) else {
+            pen_down = false;
+            continue;
+        };
+        let (x, y) = (x_at(i, bins.len()), (v as f64).clamp(0.0, 1.0) * GRAPH_H);
         unsafe {
-            if i == 0 {
-                CGMutablePath::move_to_point(Some(&path), std::ptr::null(), x, y);
-            } else {
+            if pen_down {
                 CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), x, y);
+            } else {
+                CGMutablePath::move_to_point(Some(&path), std::ptr::null(), x, y);
             }
         }
+        pen_down = true;
     }
     layer.setPath(Some(&path));
 }

@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
-    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMF2DBuffer,
+    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVEncVideoMaxKeyframeDistance, CODECAPI_AVLowLatencyMode, ICodecAPI, IMF2DBuffer,
     IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFMediaType, IMFTransform,
     METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
@@ -115,6 +115,7 @@ impl Encoder {
             set_codec(c, &CODECAPI_AVEncMPVDefaultBPictureCount, 0, "no B-frames");
             // Long GOP: keyframes come from client requests, not a schedule.
             set_codec(c, &CODECAPI_AVEncMPVGOPSize, fps * 60, "GOP size");
+            set_codec(c, &CODECAPI_AVEncVideoMaxKeyframeDistance, fps * 60, "max keyframe distance");
         } else {
             println!("encoder: no ICodecAPI, using defaults");
         }

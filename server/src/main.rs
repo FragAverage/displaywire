@@ -66,6 +66,10 @@ pub struct Cli {
     /// Send a test tone instead of the desktop's audio.
     #[arg(long)]
     tone: bool,
+    /// Windows: time each stage of the video pipeline (waits for the GPU after
+    /// each frame's conversion, so it costs a little latency) and print it every second.
+    #[arg(long)]
+    pub profile: bool,
     /// Windows: install and start a service that runs this server as SYSTEM
     /// (streams UAC prompts and the lock screen), with the other options given.
     #[arg(long)]

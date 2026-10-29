@@ -14,7 +14,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed};
 
-use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Security::{
     DuplicateTokenEx, SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TokenPrimary,
     TokenSessionId,
@@ -222,7 +222,7 @@ fn spawn(session: u32, args: &[OsString]) -> Result<Child, String> {
         let log = unsafe {
             CreateFileW(
                 PCWSTR(log.as_ptr()),
-                FILE_APPEND_DATA.0 | GENERIC_WRITE.0,
+                FILE_APPEND_DATA.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 Some(&inheritable),
                 OPEN_ALWAYS,

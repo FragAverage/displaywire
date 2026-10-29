@@ -8,11 +8,13 @@ pub mod input;
 pub mod loopback;
 pub mod service;
 
+use windows::Win32::Graphics::Direct3D11::{D3D11_QUERY_DESC, D3D11_QUERY_EVENT, ID3D11DeviceContext, ID3D11Query};
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, GetCurrentProcess};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use windows::core::w;
+use windows::core::{BOOL, s, w};
 
 use crate::{Cli, EncodedFrame, Source};
 use capture::Capture;
@@ -33,7 +35,85 @@ impl<T> Context<T> for windows::core::Result<T> {
     }
 }
 
+/// `--profile`: per-stage timings. The GPU wait makes the conversion's real
+/// cost visible, since the calls themselves only queue work.
+struct Profile {
+    query: ID3D11Query,
+    compose: timing::Samples,
+    convert: timing::Samples,
+    encode: timing::Samples,
+    since_ns: u64,
+}
+
+impl Profile {
+    fn new(device: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> Res<Profile> {
+        let mut query = None;
+        unsafe { device.CreateQuery(&D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 }, Some(&mut query)) }
+            .ctx("CreateQuery")?;
+        Ok(Profile {
+            query: query.ok_or("no query")?,
+            compose: Default::default(),
+            convert: Default::default(),
+            encode: Default::default(),
+            since_ns: timing::now_ns(),
+        })
+    }
+
+    /// Blocks until the GPU has finished everything queued so far.
+    fn wait_for_gpu(&self, context: &ID3D11DeviceContext) {
+        unsafe {
+            context.End(&self.query);
+            context.Flush();
+            let mut done = BOOL(0);
+            while !done.as_bool() {
+                let _ = context.GetData(&self.query, Some((&raw mut done).cast()), size_of::<BOOL>() as u32, 0);
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    fn report(&mut self, now: u64) {
+        if now - self.since_ns < 1_000_000_000 {
+            return;
+        }
+        let line = |s: &mut timing::Samples| {
+            let m = s.summary();
+            format!("{:.2}/{:.2}", timing::ms(m.p50), timing::ms(m.p99))
+        };
+        println!(
+            "profile (ms p50/p99): compose {}  convert+gpu {}  encode {}",
+            line(&mut self.compose),
+            line(&mut self.convert),
+            line(&mut self.encode)
+        );
+        self.compose.clear();
+        self.convert.clear();
+        self.encode.clear();
+        self.since_ns = now;
+    }
+}
+
+/// GPU scheduling priority class for this process, the way Sunshine does it:
+/// our capture, convert and encode work then preempts a game's. Needs SYSTEM or
+/// administrator rights with the right privilege; without them it's skipped.
+fn raise_gpu_priority() {
+    const D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME: i32 = 5;
+    type SetClass = unsafe extern "system" fn(windows::Win32::Foundation::HANDLE, i32) -> i32;
+    unsafe {
+        let Ok(gdi) = LoadLibraryW(w!("gdi32.dll")) else { return };
+        let Some(f) = GetProcAddress(gdi, s!("D3DKMTSetProcessSchedulingPriorityClass")) else { return };
+        let f: SetClass = std::mem::transmute(f);
+        let status = f(GetCurrentProcess(), D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME);
+        if status == 0 {
+            println!("gpu: real-time scheduling priority");
+        } else {
+            println!("gpu: couldn't raise scheduling priority (0x{status:08X}); run as SYSTEM or administrator");
+        }
+    }
+}
+
 pub struct ScreenSource {
+    profile: Option<Profile>,
     capture: Capture,
     converter: Converter,
     encoder: Encoder,
@@ -57,6 +137,7 @@ impl ScreenSource {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
             timeBeginPeriod(1);
+            raise_gpu_priority();
             let mut task = 0;
             let _ = AvSetMmThreadCharacteristicsW(w!("Games"), &mut task);
         }
@@ -67,8 +148,10 @@ impl ScreenSource {
             Converter::new(&capture.device, &capture.context, &capture.composed, (capture.width, capture.height), (w, h), cli.fps)?;
         let bitrate = (cli.mbps * 1e6) as u32;
         let encoder = Encoder::new(&capture.device, w, h, cli.fps, bitrate)?;
+        let profile = cli.profile.then(|| Profile::new(&capture.device)).transpose()?;
         println!("encoding {w}x{h} HEVC at {:.0} Mbps with {}", cli.mbps, encoder.name);
         Ok(ScreenSource {
+            profile,
             capture,
             converter,
             encoder,
@@ -98,12 +181,24 @@ impl ScreenSource {
         self.pointer_dirty = false;
         self.last_encode_ns = capture_ns;
         self.capture.compose()?;
+        let composed_ns = timing::now_ns();
         let nv12 = self.converter.convert()?;
+        if let Some(p) = &self.profile {
+            p.wait_for_gpu(&self.capture.context);
+        }
+        let converted_ns = timing::now_ns();
         let time_100ns = ((capture_ns - self.start_ns) / 100) as i64;
         self.in_flight.push_back(capture_ns);
         let Some(data) = self.encoder.encode(&nv12, time_100ns, force_keyframe)? else {
             return Ok(None);
         };
+        if let Some(p) = &mut self.profile {
+            let now = timing::now_ns();
+            p.compose.push((composed_ns - capture_ns) as i64);
+            p.convert.push((converted_ns - composed_ns) as i64);
+            p.encode.push((now - converted_ns) as i64);
+            p.report(now);
+        }
         let capture_ns = self.in_flight.pop_front().unwrap_or(capture_ns);
         let keyframe = hevc::is_keyframe(&data);
         Ok(Some(EncodedFrame { data, keyframe, capture_ns }))

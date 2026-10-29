@@ -73,9 +73,15 @@ pub struct Cli {
     /// Print the pairing key and exit.
     #[arg(long)]
     show_key: bool,
+    /// Wait for Enter before exiting (for a window opened just to show the key).
+    #[arg(long, hide = true)]
+    pause: bool,
     /// Replace the pairing key and exit. Every paired client needs the new one.
     #[arg(long)]
     new_key: bool,
+    /// Windows: no notification-area icon.
+    #[arg(long)]
+    no_tray: bool,
     /// Don't share the clipboard with the client.
     #[arg(long)]
     no_clipboard: bool,
@@ -109,6 +115,18 @@ pub struct Cli {
     /// Windows: stop and remove the service.
     #[arg(long)]
     uninstall_service: bool,
+    /// Windows: install to Program Files, with the service, firewall rule and an entry in Installed apps
+    /// (what double-clicking offers; needs administrator rights).
+    #[arg(long)]
+    setup: bool,
+    /// Windows: remove everything `--setup` added (`--purge` also deletes the pairing key and logs).
+    #[arg(long)]
+    uninstall: bool,
+    #[arg(long, requires = "uninstall")]
+    purge: bool,
+    /// Run the server in this window, without the installer prompt.
+    #[arg(long)]
+    run: bool,
     /// Run as the service (started by Windows; not for manual use).
     #[arg(long, hide = true)]
     service: bool,
@@ -142,6 +160,9 @@ struct Shared {
     fec_percent: AtomicU8,
     fps_cap: AtomicU16,
     bitrate_kbps: AtomicU32,
+    /// For the tray tooltip: what was sent over the last second.
+    fps: AtomicU32,
+    mbps_x10: AtomicU32,
 }
 
 fn main() {
@@ -151,6 +172,11 @@ fn main() {
         default_hook(info);
         wait_for_enter();
     }));
+    // Double-clicked (or typed with no options): offer to install instead of just running.
+    #[cfg(windows)]
+    if std::env::args_os().len() == 1 && !windows::setup::interactive() {
+        return;
+    }
     let cli = Cli::parse();
     now_ns();
     if let Err(e) = run(cli) {
@@ -177,14 +203,32 @@ fn key_command(cli: &Cli, path: &std::path::Path) -> Option<Result<(), String>> 
         let (k, created) = auth::load_or_create(path)?;
         println!("{}pairing key: {k}", if created { "created " } else { "" });
         println!("stored at {}", path.display());
+        if cli.pause {
+            wait_for_enter();
+        }
         Ok(())
     })
 }
 
 #[cfg(windows)]
 fn service_command(cli: &Cli, key_path: &std::path::Path) -> Option<Result<(), String>> {
-    use windows::service;
-    if cli.install_service {
+    use windows::{service, setup};
+    if cli.setup {
+        let r = setup::setup();
+        if cli.pause {
+            if let Err(e) = &r {
+                eprintln!("error: {e}");
+            }
+            wait_for_enter();
+        }
+        Some(r)
+    } else if cli.uninstall {
+        let r = setup::uninstall(cli.purge);
+        if cli.pause {
+            wait_for_enter();
+        }
+        Some(r)
+    } else if cli.install_service {
         let (key, created) = match auth::load_or_create(key_path) {
             Ok(k) => k,
             Err(e) => return Some(Err(e)),
@@ -243,6 +287,10 @@ fn run(cli: Cli) -> Result<(), String> {
             max_file_bytes: cli.max_upload_mb << 20,
         });
         transfers.spawn(sock.try_clone().map_err(|e| e.to_string())?, shared.clone());
+        #[cfg(windows)]
+        if !cli.no_tray && cli.file.is_none() {
+            windows::tray::start(shared.clone());
+        }
         std::thread::spawn(move || control(&sock, &shared, &key, announcement.as_ref(), &transfers));
     }
     if !cli.no_audio {
@@ -306,7 +354,7 @@ fn run(cli: Cli) -> Result<(), String> {
             next_send = next_send.max(now_ns()) + (wire as f64 * pace_ns_per_byte) as u64;
         });
         frame_id = frame_id.wrapping_add(1);
-        stats.frame(&frame, encoded_ns, now_ns());
+        stats.frame(&frame, encoded_ns, now_ns(), &shared);
     }
 }
 
@@ -525,7 +573,7 @@ impl Stats {
         Stats { window_start: now_ns(), frames: 0, keyframes: 0, bytes: 0, encode_ns: 0, send_ns: 0 }
     }
 
-    fn frame(&mut self, f: &EncodedFrame, encoded_ns: u64, sent_ns: u64) {
+    fn frame(&mut self, f: &EncodedFrame, encoded_ns: u64, sent_ns: u64, shared: &Shared) {
         self.frames += 1;
         self.keyframes += f.keyframe as u32;
         self.bytes += f.data.len() as u64;
@@ -533,6 +581,8 @@ impl Stats {
         self.send_ns += sent_ns - encoded_ns;
         let elapsed = sent_ns - self.window_start;
         if elapsed >= SEC {
+            shared.fps.store(self.frames, Relaxed);
+            shared.mbps_x10.store((self.bytes as f64 * 8.0 / elapsed as f64 * 1e4) as u32, Relaxed);
             let n = self.frames.max(1) as f64;
             println!(
                 "{:>4} fps  {:>6.1} Mbps  capture→encoded {:.2} ms  send {:.2} ms  keyframes {}",

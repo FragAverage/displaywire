@@ -8,7 +8,9 @@ mod nvenc;
 pub mod input;
 pub mod loopback;
 pub mod service;
+pub mod setup;
 pub mod shell;
+pub mod tray;
 
 use windows::Win32::Graphics::Direct3D11::{D3D11_QUERY_DESC, D3D11_QUERY_EVENT, ID3D11DeviceContext, ID3D11Query};
 use windows::Win32::Media::timeBeginPeriod;

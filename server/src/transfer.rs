@@ -122,6 +122,7 @@ impl Transfers {
                     Event::Received { meta, .. } => {
                         let dir = self.last_dir.lock().unwrap().clone().map(|d| d.display().to_string()).unwrap_or_default();
                         println!("received {} ({} bytes) in {dir}", meta.name, meta.size);
+                        platform::notify(&format!("Received {}", meta.name));
                     }
                     Event::ReceiveFailed { why, .. } => eprintln!("transfer from the client failed: {why}"),
                     Event::Sent { .. } | Event::SendFailed { .. } => {}
@@ -248,7 +249,12 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-use crate::windows::shell as platform;
+mod platform {
+    pub use crate::windows::shell::*;
+    pub fn notify(text: &str) {
+        crate::windows::tray::notify(text);
+    }
+}
 
 #[cfg(not(windows))]
 mod platform {
@@ -272,6 +278,7 @@ mod platform {
     pub fn as_user<T>(f: impl FnOnce() -> T) -> T {
         f()
     }
+    pub fn notify(_: &str) {}
 }
 
 #[cfg(test)]

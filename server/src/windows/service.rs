@@ -198,7 +198,8 @@ fn target_session() -> Option<u32> {
 
 fn spawn(session: u32, args: &[OsString]) -> Result<Child, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut cmdline = quote(exe.as_os_str());
+    // `--run`: this is the server itself, never the interactive installer.
+    let mut cmdline = format!("{} --run", quote(exe.as_os_str()));
     for a in args {
         cmdline += &format!(" {}", quote(a));
     }

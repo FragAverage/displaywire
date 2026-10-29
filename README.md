@@ -15,8 +15,14 @@ Download from the repo's Releases page:
   It asks for the server's address on launch and remembers it. From a
   terminal, `/Applications/Streamy.app/Contents/MacOS/streamy-client <server-ip>`
   connects directly and prints live stats.
-- **Windows server** (`streamy-server-windows.zip`): run `streamy-server.exe`
-  and allow it through the firewall (udp/9000).
+- **Windows server** (`streamy-server-windows.zip`): double-click
+  `streamy-server.exe` and answer **Y**. After a UAC prompt it installs itself to
+  `Program Files\Streamy` as a service (starts with Windows, streams UAC prompts and
+  the login screen), opens the firewall for it, adds an entry to *Installed apps*
+  and prints the pairing key to enter in the Mac client. A tray icon shows who is
+  connected; its menu opens the received-files folder and shows the pairing key
+  (after a permission prompt). Uninstall from *Installed apps*, or
+  `streamy-server.exe --uninstall` (`--purge` also deletes the key and logs).
 
 To publish a release, push a tag: `git tag v0.3.0 && git push origin v0.3.0`.
 

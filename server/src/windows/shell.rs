@@ -117,3 +117,49 @@ pub fn as_user<T>(f: impl FnOnce() -> T) -> T {
     let _ = unsafe { CloseHandle(token) };
     result
 }
+
+/// Starts `command_line` as the logged-in user (not as SYSTEM), on their desktop.
+pub fn spawn_as_user(command_line: &str) -> io::Result<()> {
+    use std::ffi::c_void;
+    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let token = user_token()?;
+    let mut env: *mut c_void = std::ptr::null_mut();
+    let have_env = unsafe { CreateEnvironmentBlock(&mut env, Some(token), false) }.is_ok();
+    let mut cmd: Vec<u16> = command_line.encode_utf16().chain(Some(0)).collect();
+    let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
+    let startup = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, lpDesktop: PWSTR(desktop.as_mut_ptr()), ..Default::default() };
+    let mut info = PROCESS_INFORMATION::default();
+    let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+    let created = unsafe {
+        CreateProcessAsUserW(
+            Some(token),
+            PCWSTR::null(),
+            Some(PWSTR(cmd.as_mut_ptr())),
+            None,
+            None,
+            false,
+            flags,
+            have_env.then_some(env.cast_const()),
+            PCWSTR::null(),
+            &startup,
+            &mut info,
+        )
+    };
+    unsafe {
+        if have_env {
+            let _ = DestroyEnvironmentBlock(env);
+        }
+        let _ = CloseHandle(token);
+    }
+    created.map_err(io::Error::other)?;
+    unsafe {
+        let _ = CloseHandle(info.hThread);
+        let _ = CloseHandle(info.hProcess);
+    }
+    Ok(())
+}

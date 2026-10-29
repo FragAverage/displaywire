@@ -51,6 +51,17 @@ impl AnyEncoder {
         }
     }
 
+    fn set_bitrate(&mut self, bps: u32) {
+        match self {
+            AnyEncoder::Mft(e) => e.set_bitrate(bps),
+            AnyEncoder::Nvenc(e) => {
+                if let Err(err) = e.set_bitrate(bps) {
+                    println!("encoder: can't change the bitrate: {err}");
+                }
+            }
+        }
+    }
+
     fn encode(&mut self, frame: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D, time_100ns: i64, keyframe: bool) -> Res<Option<Vec<u8>>> {
         match self {
             AnyEncoder::Mft(e) => e.encode(frame, time_100ns, keyframe),
@@ -241,6 +252,10 @@ impl ScreenSource {
 }
 
 impl Source for ScreenSource {
+    fn set_bitrate(&mut self, bps: u32) {
+        self.encoder.set_bitrate(bps);
+    }
+
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {
         self.next(force_keyframe, timeout_ms).map_err(|e| e.to_string())
     }

@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use crate::audio;
 use crate::display::Layer;
 use crate::input;
 use crate::link::Link;
+use crate::settings::Prefs;
 use secure::{Initiator, ReplayWindow};
 
 const MS: u64 = 1_000_000;
@@ -61,11 +62,19 @@ pub struct Telemetry {
     pub history: Mutex<History>,
     /// Set while the graph is showing: the UI is told about each new bin.
     pub graph_on: AtomicBool,
+    /// The user's settings, and a counter the UI bumps when they change.
+    pub prefs: Mutex<Prefs>,
+    pub prefs_version: AtomicU32,
 }
 
 impl Telemetry {
-    pub fn new(graph_on: bool) -> Telemetry {
-        Telemetry { history: Mutex::new(History::new(HISTORY_BINS)), graph_on: AtomicBool::new(graph_on) }
+    pub fn new(graph_on: bool, prefs: Prefs) -> Telemetry {
+        Telemetry {
+            history: Mutex::new(History::new(HISTORY_BINS)),
+            graph_on: AtomicBool::new(graph_on),
+            prefs: Mutex::new(prefs),
+            prefs_version: AtomicU32::new(1),
+        }
     }
 }
 
@@ -159,6 +168,9 @@ impl Receiver {
         let mut ever_connected = false;
         // What the banner says, so it's only sent when it changes.
         let mut status: Option<String> = None;
+        // Settings go to the server once a session exists and whenever they change.
+        let mut sent_prefs = 0u32;
+        let mut sent_for_session = false;
         let mut alive_since = 0u64;
         println!("connecting to {}", self.server);
 
@@ -195,6 +207,18 @@ impl Receiver {
             if want != status {
                 let _ = self.proxy.send_event(UserEvent::Status(want.clone()));
                 status = want;
+            }
+            let version = self.telemetry.prefs_version.load(Relaxed);
+            if alive && (version != sent_prefs || !sent_for_session) {
+                let prefs = *self.telemetry.prefs.lock().unwrap();
+                self.send(Msg::Settings(prefs.for_server()));
+                if let Some(p) = &self.audio {
+                    p.set_gain(prefs.gain());
+                }
+                (sent_prefs, sent_for_session) = (version, true);
+            }
+            if !alive {
+                sent_for_session = false;
             }
             if alive && !streaming && now >= next_hello {
                 self.send(Msg::Hello { version: VERSION, caps });

@@ -11,7 +11,7 @@ mod file;
 mod windows;
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,6 +116,8 @@ pub trait Source {
     /// the next frame returned must be a keyframe (re-encoding the last image if
     /// nothing changed).
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String>;
+    /// Changes the video bitrate while running. Sources that can't just ignore it.
+    fn set_bitrate(&mut self, _bps: u32) {}
 }
 
 #[derive(Default)]
@@ -126,6 +128,10 @@ struct Shared {
     keyframe: AtomicBool,
     /// `CAP_*` flags the client asked for in its hello.
     caps: AtomicU8,
+    /// The client's stream settings (see `proto::stream::Settings`); the command line's until it sends them.
+    fec_percent: AtomicU8,
+    fps_cap: AtomicU16,
+    bitrate_kbps: AtomicU32,
 }
 
 fn main() {
@@ -211,6 +217,8 @@ fn run(cli: Cli) -> Result<(), String> {
 
     let sock = udp_socket(SocketAddr::from(([0, 0, 0, 0], cli.port))).map_err(|e| format!("bind udp/{}: {e}", cli.port))?;
     let shared = Arc::new(Shared::default());
+    shared.fec_percent.store(cli.fec.min(proto::stream::Settings::MAX_FEC_PERCENT as u32) as u8, Relaxed);
+    shared.bitrate_kbps.store((cli.mbps * 1000.0) as u32, Relaxed);
     {
         let sock = sock.try_clone().map_err(|e| e.to_string())?;
         let shared = shared.clone();
@@ -237,6 +245,8 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut frame_id = 0u32;
     let mut stats = Stats::new();
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
+    let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
+    let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
         let Some(link) = link else {
@@ -249,7 +259,18 @@ fn run(cli: Cli) -> Result<(), String> {
             continue;
         }
 
+        let kbps = shared.bitrate_kbps.load(Relaxed);
+        if kbps != applied_kbps {
+            applied_kbps = kbps;
+            source.set_bitrate(kbps * 1000);
+        }
         let force = shared.keyframe.swap(false, Relaxed);
+        // Frame-rate cap: wait before taking the next frame (which is then the latest
+        // image), so skipped frames cost no encoding.
+        let cap = shared.fps_cap.load(Relaxed);
+        if cap > 0 && !force {
+            sleep_until(last_frame_ns + SEC / cap as u64);
+        }
         let Some(frame) = source.next_frame(force, 100)? else {
             if force {
                 shared.keyframe.store(true, Relaxed);
@@ -262,7 +283,8 @@ fn run(cli: Cli) -> Result<(), String> {
 
         let encoded_ns = now_ns();
         let mut next_send = encoded_ns;
-        video::packetize(frame_id, frame.keyframe, frame.capture_ns, &frame.data, cli.fec, |pkt| {
+        last_frame_ns = now_ns();
+        video::packetize(frame_id, frame.keyframe, frame.capture_ns, &frame.data, shared.fec_percent.load(Relaxed) as u32, |pkt| {
             sleep_until(next_send);
             let wire = link.send(&sock, pkt, &mut sealed);
             next_send = next_send.max(now_ns()) + (wire as f64 * pace_ns_per_byte) as u64;
@@ -430,6 +452,15 @@ fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key, announcement: O
                         let m = Msg::Pong { id, client_ns, server_ns: now_ns() }.encode(&mut pong);
                         if let Some((link, _)) = &active {
                             link.send(sock, &pong[..m], &mut out);
+                        }
+                    }
+                    Some(Msg::Settings(s)) => {
+                        let s = s.clamped();
+                        let changed = shared.bitrate_kbps.swap(s.bitrate_kbps, Relaxed) != s.bitrate_kbps
+                            || shared.fps_cap.swap(s.fps_cap, Relaxed) != s.fps_cap
+                            || shared.fec_percent.swap(s.fec_percent, Relaxed) != s.fec_percent;
+                        if changed {
+                            println!("{from}: settings {} Mbps, fps cap {}, loss protection {}%", s.bitrate_kbps / 1000, s.fps_cap, s.fec_percent);
                         }
                     }
                     Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),

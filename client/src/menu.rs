@@ -18,6 +18,8 @@ pub enum Action {
     Connect,
     Disconnect,
     ToggleStats,
+    Settings,
+    Mute,
     Shortcuts,
 }
 
@@ -50,6 +52,16 @@ define_class!(
         #[unsafe(method(toggleStats:))]
         fn toggle_stats(&self, _sender: Option<&AnyObject>) {
             send(Action::ToggleStats);
+        }
+
+        #[unsafe(method(settings:))]
+        fn settings(&self, _sender: Option<&AnyObject>) {
+            send(Action::Settings);
+        }
+
+        #[unsafe(method(mute:))]
+        fn mute(&self, _sender: Option<&AnyObject>) {
+            send(Action::Mute);
         }
 
         #[unsafe(method(shortcuts:))]
@@ -101,6 +113,7 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
         "Streamy",
         vec![
             item(mtm, "About Streamy", Some(sel!(orderFrontStandardAboutPanel:)), "", none, None),
+            item(mtm, "Settings…", Some(sel!(settings:)), ",", cmd, Some(t)),
             sep(),
             item(mtm, "Hide Streamy", Some(sel!(hide:)), "h", cmd, None),
             item(mtm, "Hide Others", Some(sel!(hideOtherApplications:)), "h", cmd | NSEventModifierFlags::Option, None),
@@ -123,6 +136,7 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
         vec![
             item(mtm, "Enter Full Screen", Some(sel!(toggleFullScreen:)), "f", cmd | NSEventModifierFlags::Control, None),
             item(mtm, "Show Stats", Some(sel!(toggleStats:)), "s", NSEventModifierFlags::Control | NSEventModifierFlags::Option, Some(t)),
+            item(mtm, "Mute Audio", Some(sel!(mute:)), "", none, Some(t)),
         ],
     );
     let window = submenu(

@@ -52,6 +52,10 @@ pub struct NvEncoder {
     registered: HashMap<usize, NV_ENC_REGISTERED_PTR>,
     width: u32,
     height: u32,
+    fps: u32,
+    /// Kept (with `init.encodeConfig` pointing at `cfg`) to reconfigure the bitrate later.
+    init: Option<Box<NV_ENC_INITIALIZE_PARAMS>>,
+    cfg: Option<Box<NV_ENC_CONFIG>>,
     pub name: String,
 }
 
@@ -87,6 +91,9 @@ impl NvEncoder {
                 registered: HashMap::new(),
                 width,
                 height,
+                fps,
+                init: None,
+                cfg: None,
                 name: "NVENC (direct)".into(),
             };
 
@@ -110,7 +117,7 @@ impl NvEncoder {
             preset_cfg.presetCfg.version = NV_ENC_CONFIG_VER;
             call!(enc, nvEncGetEncodePresetConfigEx, "get preset config", session, codec, preset, tuning, &mut preset_cfg);
 
-            let mut cfg = preset_cfg.presetCfg;
+            let mut cfg = Box::new(preset_cfg.presetCfg);
             cfg.version = NV_ENC_CONFIG_VER;
             cfg.profileGUID = NV_ENC_HEVC_PROFILE_MAIN_GUID;
             cfg.gopLength = NVENC_INFINITE_GOPLENGTH;
@@ -154,7 +161,7 @@ impl NvEncoder {
             init.frameRateDen = 1;
             init.enableEncodeAsync = 0;
             init.enablePTD = 1;
-            init.encodeConfig = &mut cfg;
+            init.encodeConfig = &mut *cfg;
             init.maxEncodeWidth = width;
             init.maxEncodeHeight = height;
             init.tuningInfo = tuning;
@@ -165,8 +172,30 @@ impl NvEncoder {
             out.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
             call!(enc, nvEncCreateBitstreamBuffer, "create bitstream buffer", session, &mut out);
             enc.output = out.bitstreamBuffer;
+            enc.init = Some(Box::new(init));
+            enc.cfg = Some(cfg);
             Ok(enc)
         }
+    }
+
+    /// Changes the target bitrate of the running encoder, without a keyframe.
+    pub fn set_bitrate(&mut self, bps: u32) -> Res<()> {
+        let session = self.session;
+        let fps = self.fps.max(1);
+        let (Some(cfg), Some(init)) = (self.cfg.as_mut(), self.init.as_mut()) else { return Ok(()) };
+        let rc = &mut cfg.rcParams;
+        rc.averageBitRate = bps;
+        rc.maxBitRate = bps;
+        rc.vbvBufferSize = bps / fps;
+        rc.vbvInitialDelay = rc.vbvBufferSize;
+        init.encodeConfig = &mut **cfg;
+        unsafe {
+            let mut re: NV_ENC_RECONFIGURE_PARAMS = std::mem::zeroed();
+            re.version = NV_ENC_RECONFIGURE_PARAMS_VER;
+            re.reInitEncodeParams = **init;
+            call!(self, nvEncReconfigureEncoder, "reconfigure bitrate", session, &mut re);
+        }
+        Ok(())
     }
 
     fn check(&self, status: NVENCSTATUS, what: &str) -> Res<()> {

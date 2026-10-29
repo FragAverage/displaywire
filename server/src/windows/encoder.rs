@@ -202,6 +202,13 @@ impl Encoder {
         Ok(Some(data))
     }
 
+    /// Changes the target bitrate of the running encoder.
+    pub fn set_bitrate(&mut self, bps: u32) {
+        if let Some(c) = &self.codec {
+            set_codec(c, &CODECAPI_AVEncCommonMeanBitRate, bps, "bitrate");
+        }
+    }
+
     /// Encodes one NV12 frame and returns its access unit, or `None` if the
     /// encoder hasn't produced it within `OUTPUT_WAIT_NS` (it'll come out of a later call).
     pub fn encode(&mut self, frame: &ID3D11Texture2D, time_100ns: i64, keyframe: bool) -> Res<Option<Vec<u8>>> {

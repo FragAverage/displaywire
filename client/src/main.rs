@@ -23,6 +23,8 @@ mod menu;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod receiver;
+#[cfg(target_os = "macos")]
+mod settings;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -57,7 +59,7 @@ mod app {
     use winit::window::{CursorGrabMode, Window, WindowId};
 
     use crate::link::Link;
-    use crate::{dialog, display, input, keys, menu, overlay, receiver};
+    use crate::{dialog, display, input, keys, menu, overlay, receiver, settings};
 
     #[derive(Parser)]
     #[command(about = "View a streamy server's screen")]
@@ -70,6 +72,9 @@ mod app {
         /// Save a pairing key without connecting: `--set-key <server> <key>`.
         #[arg(long, num_args = 2, value_names = ["SERVER", "KEY"])]
         set_key: Option<Vec<String>>,
+        /// Show one dialog and exit, for checking how it looks: connect, settings or shortcuts.
+        #[arg(long, hide = true, value_name = "DIALOG")]
+        preview: Option<String>,
     }
 
     /// Sent from the receiver thread to the UI thread.
@@ -174,7 +179,7 @@ mod app {
             let layer = display::Layer::attach(&window);
             let stop = Arc::new(AtomicBool::new(false));
             let graph = load_graph_pref();
-            let telemetry = Arc::new(receiver::Telemetry::new(graph));
+            let telemetry = Arc::new(receiver::Telemetry::new(graph, settings::Prefs::load()));
             let overlay = overlay::Overlay::attach(&window, graph);
             let banner = overlay::Banner::attach(&window);
             let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
@@ -203,7 +208,33 @@ mod app {
                     self.session = None;
                 }
                 menu::Action::ToggleStats => self.toggle_graph(),
+                menu::Action::Settings => self.edit_settings(),
+                menu::Action::Mute => self.change_prefs(|p| p.muted = !p.muted),
                 menu::Action::Shortcuts => dialog::show_shortcuts(),
+            }
+        }
+
+        /// Applies `change` to the settings, saves them and tells the receiver.
+        fn change_prefs(&mut self, change: impl FnOnce(&mut settings::Prefs)) {
+            let Some(s) = &self.session else { return };
+            let mut p = s.telemetry.prefs.lock().unwrap();
+            change(&mut p);
+            p.save();
+            drop(p);
+            s.telemetry.prefs_version.fetch_add(1, Relaxed);
+        }
+
+        fn edit_settings(&mut self) {
+            let current = match &self.session {
+                Some(s) => *s.telemetry.prefs.lock().unwrap(),
+                None => settings::Prefs::load(),
+            };
+            if let Some(new) = dialog::ask_settings(current) {
+                if self.session.is_some() {
+                    self.change_prefs(|p| *p = new);
+                } else {
+                    new.save();
+                }
             }
         }
 
@@ -356,6 +387,15 @@ mod app {
     }
 
     pub fn run(cli: Cli) -> Result<(), String> {
+        if let Some(which) = &cli.preview {
+            match which.as_str() {
+                "connect" => drop(dialog::ask_server(None)),
+                "settings" => drop(dialog::ask_settings(settings::Prefs::load())),
+                "shortcuts" => dialog::show_shortcuts(),
+                other => return Err(format!("unknown dialog {other}")),
+            }
+            return Ok(());
+        }
         if let Some(args) = &cli.set_key {
             let key = secure::Key::parse(&args[1]).map_err(|e| e.to_string())?;
             keys::save(&args[0], &key)?;

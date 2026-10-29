@@ -33,6 +33,7 @@ const BYE: u8 = 6;
 const INPUT: u8 = 7;
 const AUDIO: u8 = 8;
 const MIC: u8 = 9;
+const SETTINGS: u8 = 10;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -108,6 +109,40 @@ pub struct Video {
     pub capture_ns: u64,
 }
 
+/// Stream settings the client asks the server to apply (sent after connecting
+/// and whenever they change).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settings {
+    /// Video bitrate in kilobits per second.
+    pub bitrate_kbps: u32,
+    /// Most frames per second to send; 0 for no limit.
+    pub fps_cap: u16,
+    /// Repair packets per frame, as a percentage of its data packets.
+    pub fec_percent: u8,
+}
+
+impl Default for Settings {
+    /// The server's own defaults.
+    fn default() -> Self {
+        Settings { bitrate_kbps: 50_000, fps_cap: 0, fec_percent: 10 }
+    }
+}
+
+impl Settings {
+    pub const MIN_BITRATE_KBPS: u32 = 2_000;
+    pub const MAX_BITRATE_KBPS: u32 = 500_000;
+    pub const MAX_FEC_PERCENT: u8 = 50;
+
+    /// The same settings with every value brought into a range the server accepts.
+    pub fn clamped(self) -> Settings {
+        Settings {
+            bitrate_kbps: self.bitrate_kbps.clamp(Self::MIN_BITRATE_KBPS, Self::MAX_BITRATE_KBPS),
+            fps_cap: if self.fps_cap == 0 { 0 } else { self.fps_cap.clamp(1, 1000) },
+            fec_percent: self.fec_percent.min(Self::MAX_FEC_PERCENT),
+        }
+    }
+}
+
 /// How an `Audio`/`Mic` payload is encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioFormat {
@@ -143,6 +178,8 @@ pub enum Msg<'a> {
     Audio(Audio, &'a [u8]),
     /// Client → server: microphone.
     Mic(Audio, &'a [u8]),
+    /// Client → server: apply these stream settings.
+    Settings(Settings),
 }
 
 impl<'a> Msg<'a> {
@@ -193,6 +230,12 @@ impl<'a> Msg<'a> {
                     w.u16(v as u16);
                 }
                 w.u16(i.repeat);
+            }
+            Msg::Settings(s) => {
+                w.u8(SETTINGS);
+                w.u32(s.bitrate_kbps);
+                w.u16(s.fps_cap);
+                w.u8(s.fec_percent);
             }
             Msg::Audio(a, payload) | Msg::Mic(a, payload) => {
                 w.u8(if matches!(self, Msg::Audio(..)) { AUDIO } else { MIC });
@@ -248,6 +291,7 @@ impl<'a> Msg<'a> {
                     repeat: r.u16()?,
                 })
             }
+            SETTINGS => Msg::Settings(Settings { bitrate_kbps: r.u32()?, fps_cap: r.u16()?, fec_percent: r.u8()? }),
             kind @ (AUDIO | MIC) => {
                 let format = match r.u8()? {
                     0 => AudioFormat::Pcm16,
@@ -300,6 +344,7 @@ mod tests {
             Msg::Input(input),
             Msg::Audio(Audio { seq: 5, format: AudioFormat::Pcm16, capture_ns: 99 }, &[1u8; 960]),
             Msg::Mic(Audio { seq: u32::MAX, format: AudioFormat::Pcm16, capture_ns: 0 }, &[]),
+            Msg::Settings(Settings { bitrate_kbps: 80_000, fps_cap: 120, fec_percent: 15 }),
         ];
         let mut buf = [0u8; crate::MAX_DATAGRAM];
         for m in msgs {
@@ -307,6 +352,14 @@ mod tests {
             assert!(n <= crate::MAX_PLAIN);
             assert_eq!(Msg::decode(&buf[..n]), Some(m));
         }
+    }
+
+    #[test]
+    fn settings_are_clamped_to_what_the_server_accepts() {
+        let wild = Settings { bitrate_kbps: 1, fps_cap: 60_000, fec_percent: 255 };
+        assert_eq!(wild.clamped(), Settings { bitrate_kbps: 2_000, fps_cap: 1000, fec_percent: 50 });
+        assert_eq!(Settings::default().clamped(), Settings::default());
+        assert_eq!(Settings { bitrate_kbps: 9_999_999, fps_cap: 0, fec_percent: 0 }.clamped().bitrate_kbps, 500_000);
     }
 
     #[test]

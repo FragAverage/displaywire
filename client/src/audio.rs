@@ -36,6 +36,8 @@ struct Counters {
     /// Frames queued when the device last asked for audio.
     fill: AtomicU32,
     underruns: AtomicU32,
+    /// Output gain (an `f32` as bits): volume and mute.
+    gain: AtomicU32,
     /// Current cushion (`prefill`), in frames.
     cushion: AtomicU32,
     /// Frames per callback, as the device really asks for them.
@@ -70,6 +72,7 @@ impl Player {
         let config = cpal::StreamConfig { channels: CH as u16, sample_rate: AUDIO_RATE, buffer_size: buffer };
         let (producer, mut consumer) = rtrb::RingBuffer::<i16>::new(RING_FRAMES * CH);
         let counters = Arc::new(Counters::default());
+        counters.gain.store(1.0f32.to_bits(), Relaxed);
         let c = counters.clone();
         let mut playing = false;
         let mut prefill = PREFILL_START;
@@ -101,8 +104,9 @@ impl Player {
             let take = if playing { (avail * CH).min(data.len()) } else { 0 };
             if take > 0 && let Ok(chunk) = consumer.read_chunk(take) {
                 let (a, b) = chunk.as_slices();
+                let gain = f32::from_bits(c.gain.load(Relaxed)) / 32768.0;
                 for (o, s) in data.iter_mut().zip(a.iter().chain(b)) {
-                    *o = *s as f32 / 32768.0;
+                    *o = *s as f32 * gain;
                 }
                 chunk.commit_all();
             }
@@ -140,6 +144,11 @@ impl Player {
         stream.play().map_err(|e| e.to_string())?;
         println!("audio: playing on the default output");
         Ok(Player { producer, _stream: stream, counters, last_seq: None, lost_chunks: 0, last_report: (0, 0, 0), age: Samples::default() })
+    }
+
+    /// Volume and mute: a linear gain, 1.0 for unchanged.
+    pub fn set_gain(&self, gain: f32) {
+        self.counters.gain.store(gain.to_bits(), Relaxed);
     }
 
     /// Queues one chunk of PCM16 (little endian, interleaved stereo).

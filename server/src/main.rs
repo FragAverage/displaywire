@@ -66,6 +66,10 @@ pub struct Cli {
     /// Send a test tone instead of the desktop's audio.
     #[arg(long)]
     tone: bool,
+    /// Windows video encoder: `auto` (direct NVENC where possible, else Media Foundation),
+    /// `nvenc` (NVIDIA only) or `mft` (Media Foundation).
+    #[arg(long, default_value = "auto")]
+    pub encoder: String,
     /// Windows: time each stage of the video pipeline (waits for the GPU after
     /// each frame's conversion, so it costs a little latency) and print it every second.
     #[arg(long)]

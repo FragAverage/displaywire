@@ -11,6 +11,7 @@ hevc.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
+moq-nvenc = "0.1"
 windows = { version = "0.62.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Direct3D",

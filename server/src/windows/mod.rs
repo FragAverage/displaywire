@@ -4,6 +4,7 @@
 mod capture;
 mod convert;
 mod encoder;
+mod nvenc;
 pub mod input;
 pub mod loopback;
 pub mod service;
@@ -20,6 +21,7 @@ use crate::{Cli, EncodedFrame, Source};
 use capture::Capture;
 use convert::Converter;
 use encoder::Encoder;
+use nvenc::NvEncoder;
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -32,6 +34,28 @@ pub trait Context<T> {
 impl<T> Context<T> for windows::core::Result<T> {
     fn ctx(self, what: &str) -> Res<T> {
         self.map_err(|e| format!("{what}: {} (0x{:08X})", e.message().trim(), e.code().0 as u32).into())
+    }
+}
+
+/// The video encoder in use.
+enum AnyEncoder {
+    Mft(Encoder),
+    Nvenc(Box<NvEncoder>),
+}
+
+impl AnyEncoder {
+    fn name(&self) -> &str {
+        match self {
+            AnyEncoder::Mft(e) => &e.name,
+            AnyEncoder::Nvenc(e) => &e.name,
+        }
+    }
+
+    fn encode(&mut self, frame: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D, time_100ns: i64, keyframe: bool) -> Res<Option<Vec<u8>>> {
+        match self {
+            AnyEncoder::Mft(e) => e.encode(frame, time_100ns, keyframe),
+            AnyEncoder::Nvenc(e) => e.encode(frame, time_100ns, keyframe),
+        }
     }
 }
 
@@ -116,7 +140,7 @@ pub struct ScreenSource {
     profile: Option<Profile>,
     capture: Capture,
     converter: Converter,
-    encoder: Encoder,
+    encoder: AnyEncoder,
     /// Capture times of frames handed to the encoder but not yet returned.
     in_flight: std::collections::VecDeque<u64>,
     start_ns: u64,
@@ -147,9 +171,20 @@ impl ScreenSource {
         let converter =
             Converter::new(&capture.device, &capture.context, &capture.composed, (capture.width, capture.height), (w, h), cli.fps)?;
         let bitrate = (cli.mbps * 1e6) as u32;
-        let encoder = Encoder::new(&capture.device, w, h, cli.fps, bitrate)?;
+        let encoder = match cli.encoder.as_str() {
+            "mft" => AnyEncoder::Mft(Encoder::new(&capture.device, w, h, cli.fps, bitrate)?),
+            "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(&capture.device, w, h, cli.fps, bitrate)?)),
+            "auto" => match NvEncoder::new(&capture.device, w, h, cli.fps, bitrate) {
+                Ok(e) => AnyEncoder::Nvenc(Box::new(e)),
+                Err(e) => {
+                    println!("encoder: direct NVENC unavailable ({e}); using Media Foundation");
+                    AnyEncoder::Mft(Encoder::new(&capture.device, w, h, cli.fps, bitrate)?)
+                }
+            },
+            other => return Err(format!("unknown --encoder {other} (use auto, nvenc or mft)").into()),
+        };
         let profile = cli.profile.then(|| Profile::new(&capture.device)).transpose()?;
-        println!("encoding {w}x{h} HEVC at {:.0} Mbps with {}", cli.mbps, encoder.name);
+        println!("encoding {w}x{h} HEVC at {:.0} Mbps with {}", cli.mbps, encoder.name());
         Ok(ScreenSource {
             profile,
             capture,

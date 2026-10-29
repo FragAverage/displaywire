@@ -16,6 +16,7 @@ use videotoolbox::{Format, Image, Output, PIXEL_FORMAT_NV12, Session};
 use winit::event_loop::EventLoopProxy;
 
 use crate::app::UserEvent;
+use crate::audio;
 use crate::display::Layer;
 use crate::input;
 
@@ -83,6 +84,8 @@ struct Receiver {
     stats: Stats,
     binner: Binner,
     telemetry: Arc<Telemetry>,
+    /// None if no output device could be opened: video only then.
+    audio: Option<audio::Player>,
     /// `STREAMY_TRACE=file`: one CSV line per decoded frame, for timing analysis.
     trace: Option<std::io::BufWriter<std::fs::File>>,
 }
@@ -113,6 +116,7 @@ impl Receiver {
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
             telemetry,
+            audio: audio::Player::new().map_err(|e| eprintln!("audio disabled: {e}")).ok(),
             trace: std::env::var_os("STREAMY_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
                 use std::io::Write;
                 let _ = writeln!(f, "frame,keyframe,bytes,capture_ns,decoded_ns,decode_ns");
@@ -145,7 +149,7 @@ impl Receiver {
                         self.server.port()
                     ));
                 }
-                self.send(Msg::Hello { version: VERSION, caps: CAP_AUDIO });
+                self.send(Msg::Hello { version: VERSION, caps: if self.audio.is_some() { CAP_AUDIO } else { 0 } });
                 next_hello = now + HELLO_INTERVAL_NS;
             }
             if now >= next_ping {
@@ -173,7 +177,10 @@ impl Receiver {
                     }
                 }
             }
-            if let Some(line) = self.stats.tick(now, &self.clock) {
+            if let Some(mut line) = self.stats.tick(now, &self.clock) {
+                if let Some(p) = &mut self.audio {
+                    line += &format!("  {}", p.summary());
+                }
                 println!("{line}");
                 let _ = self.proxy.send_event(UserEvent::Title(format!("Streamy: {}  |  {line}", self.server)));
             }
@@ -191,6 +198,11 @@ impl Receiver {
                     self.binner.bytes(n);
                     if let Some(frame) = self.reassembler.push(v, payload, rx) {
                         self.on_frame(frame);
+                    }
+                }
+                Some(Msg::Audio(a, payload)) => {
+                    if let Some(p) = &mut self.audio {
+                        p.push(a.seq, payload);
                     }
                 }
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),

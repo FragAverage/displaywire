@@ -13,6 +13,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 videotoolbox.workspace = true
 winit = "0.30"
+cpal = "0.18"
+rtrb = "0.4"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"

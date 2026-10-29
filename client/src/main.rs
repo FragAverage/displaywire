@@ -4,6 +4,8 @@
 //!   streamy-client                # or Streamy.app: asks for the server
 
 #[cfg(target_os = "macos")]
+mod audio;
+#[cfg(target_os = "macos")]
 mod dialog;
 #[cfg(target_os = "macos")]
 mod display;

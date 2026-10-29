@@ -5,6 +5,7 @@ mod capture;
 mod convert;
 mod encoder;
 pub mod input;
+pub mod loopback;
 pub mod service;
 
 use windows::Win32::Media::timeBeginPeriod;

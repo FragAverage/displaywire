@@ -4,12 +4,13 @@
 //!   streamy-server                       # Windows: stream the primary monitor
 //!   streamy-server --file clip.h265      # any OS: loop an Annex B file (testing)
 
+mod audio;
 mod file;
 #[cfg(windows)]
 mod windows;
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -59,6 +60,12 @@ pub struct Cli {
     /// Leave Windows Wi-Fi background scanning and power settings alone.
     #[arg(long)]
     no_wifi_tuning: bool,
+    /// Don't send desktop audio.
+    #[arg(long)]
+    no_audio: bool,
+    /// Send a test tone instead of the desktop's audio.
+    #[arg(long)]
+    tone: bool,
     /// Windows: install and start a service that runs this server as SYSTEM
     /// (streams UAC prompts and the lock screen), with the other options given.
     #[arg(long)]
@@ -90,6 +97,8 @@ struct Shared {
     peer: Mutex<Option<SocketAddr>>,
     last_seen_ns: AtomicU64,
     keyframe: AtomicBool,
+    /// `CAP_*` flags the client asked for in its hello.
+    caps: AtomicU8,
 }
 
 fn main() {
@@ -151,6 +160,16 @@ fn run(cli: Cli) -> Result<(), String> {
         let shared = shared.clone();
         std::thread::spawn(move || control(&sock, &shared));
     }
+    if !cli.no_audio {
+        let source: Option<Box<dyn audio::AudioSource>> = if cli.tone || cli.file.is_some() {
+            Some(Box::new(audio::Tone::new()))
+        } else {
+            open_audio()
+        };
+        if let Some(source) = source {
+            audio::spawn(sock.try_clone().map_err(|e| e.to_string())?, shared.clone(), source);
+        }
+    }
     println!("streamy-server on udp/{}, waiting for a client", cli.port);
 
     let pace_ns_per_byte = 8e3 / cli.pace_mbps;
@@ -196,6 +215,22 @@ fn open_screen(cli: &Cli) -> Result<Box<dyn Source>, String> {
     Ok(Box::new(windows::ScreenSource::open(cli)?))
 }
 
+#[cfg(windows)]
+fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
+    match windows::loopback::Loopback::open() {
+        Ok(l) => Some(Box::new(l)),
+        Err(e) => {
+            eprintln!("audio capture unavailable, streaming video only: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
+    None
+}
+
 #[cfg(not(windows))]
 fn open_screen(_cli: &Cli) -> Result<Box<dyn Source>, String> {
     Err("screen capture is only implemented on Windows; use --file".into())
@@ -220,7 +255,7 @@ fn control(sock: &UdpSocket, shared: &Shared) {
         };
         let is_peer = *shared.peer.lock().unwrap() == Some(from);
         match Msg::decode(&buf[..n]) {
-            Some(Msg::Hello { version, .. }) => {
+            Some(Msg::Hello { version, caps }) => {
                 if version != VERSION {
                     eprintln!("{from}: protocol version {version}, expected {VERSION}; ignoring");
                     continue;
@@ -230,6 +265,7 @@ fn control(sock: &UdpSocket, shared: &Shared) {
                     *shared.peer.lock().unwrap() = Some(from);
                     injector.reset();
                 }
+                shared.caps.store(caps, Relaxed);
                 shared.last_seen_ns.store(now_ns(), Relaxed);
                 shared.keyframe.store(true, Relaxed);
             }

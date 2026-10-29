@@ -17,23 +17,20 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: Build universal client
+      - name: Build universal Streamy.app
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release -p streamy-client -p netprobe --target $t
+            cargo build --release -p streamy-client --target $t
           done
-          mkdir -p dist/streamy-client-macos
-          for bin in streamy-client netprobe; do
-            lipo -create -output dist/streamy-client-macos/$bin \
-              target/aarch64-apple-darwin/release/$bin target/x86_64-apple-darwin/release/$bin
-            codesign --force --sign - dist/streamy-client-macos/$bin
-          done
-          cp README.md dist/streamy-client-macos/
-          cd dist && zip -r streamy-client-macos.zip streamy-client-macos
+          mkdir -p dist
+          lipo -create -output dist/streamy-client \
+            target/aarch64-apple-darwin/release/streamy-client target/x86_64-apple-darwin/release/streamy-client
+          scripts/bundle-mac.sh dist/streamy-client dist
+          ditto -c -k --keepParent dist/Streamy.app dist/Streamy-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: client
-          path: dist/streamy-client-macos.zip
+          path: dist/Streamy-macos.zip
 
   server:
     runs-on: windows-2025
@@ -66,5 +63,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$GITHUB_REF_NAME" streamy-client-macos.zip streamy-server-windows.zip
+          gh release create "$GITHUB_REF_NAME" Streamy-macos.zip streamy-server-windows.zip
           --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

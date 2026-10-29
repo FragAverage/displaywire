@@ -6,12 +6,15 @@ Low-latency desktop streaming: Windows server (NVIDIA) → macOS client. See `PL
 
 Download from the repo's Releases page:
 
-- **Mac client** (`streamy-client-macos.zip`, Apple Silicon and Intel). It's
-  unsigned, so clear the download flag once:
+- **Mac client** (`Streamy-macos.zip`, Apple Silicon and Intel): unzip and
+  drag `Streamy.app` to Applications. It isn't notarized, so clear the
+  download flag once before opening it:
   ```
-  xattr -dr com.apple.quarantine streamy-client-macos
-  streamy-client-macos/streamy-client <server-ip>
+  xattr -dr com.apple.quarantine /Applications/Streamy.app
   ```
+  It asks for the server's address on launch and remembers it. From a
+  terminal, `/Applications/Streamy.app/Contents/MacOS/streamy-client <server-ip>`
+  connects directly and prints live stats.
 - **Windows server** (`streamy-server-windows.zip`): run `streamy-server.exe`
   and allow it through the firewall (udp/9000).
 

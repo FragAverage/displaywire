@@ -1,7 +1,10 @@
 //! streamy-client: receives the server's HEVC stream and shows it in a window.
 //!
 //!   streamy-client <server-ip>
+//!   streamy-client                # or Streamy.app: asks for the server
 
+#[cfg(target_os = "macos")]
+mod dialog;
 #[cfg(target_os = "macos")]
 mod display;
 #[cfg(target_os = "macos")]
@@ -27,7 +30,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod app {
-    use std::net::{SocketAddr, UdpSocket};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::thread::JoinHandle;
@@ -40,13 +43,13 @@ mod app {
     use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
     use winit::window::{CursorGrabMode, Window, WindowId};
 
-    use crate::{display, input, receiver};
+    use crate::{dialog, display, input, receiver};
 
     #[derive(Parser)]
     #[command(about = "View a streamy server's screen")]
     pub struct Cli {
-        /// Server address, `host` or `host:port`.
-        server: String,
+        /// Server address, `host` or `host:port`. Asked for in a dialog if omitted.
+        server: Option<String>,
     }
 
     /// Sent from the receiver thread to the UI thread.
@@ -56,17 +59,32 @@ mod app {
         Fatal(String),
     }
 
-    struct App {
-        server: SocketAddr,
-        /// Handed to the receiver thread when the window opens.
-        sock: Option<UdpSocket>,
+    /// One connection and its window.
+    struct Session {
+        window: Window,
         input: Arc<input::Sender>,
-        proxy: EventLoopProxy<UserEvent>,
         stop: Arc<AtomicBool>,
-        window: Option<Window>,
         receiver: Option<JoinHandle<()>>,
         sized: bool,
         video: Option<(u32, u32)>,
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            // The receiver draws into the window's layer: stop it first.
+            self.stop.store(true, Relaxed);
+            if let Some(r) = self.receiver.take() {
+                let _ = r.join();
+            }
+        }
+    }
+
+    struct App {
+        /// Server from the command line; without one, errors go back to the dialog.
+        arg: Option<String>,
+        interactive: bool,
+        proxy: EventLoopProxy<UserEvent>,
+        session: Option<Session>,
         modifiers: ModifiersState,
         /// Pointer captured: relative motion for games (toggled with ⌃⌥M).
         locked: bool,
@@ -74,18 +92,62 @@ mod app {
     }
 
     impl App {
+        /// Connects to the command-line server, or asks until a connection
+        /// starts or the user quits.
+        fn connect(&mut self, el: &ActiveEventLoop, mut problem: Option<String>) {
+            loop {
+                let server = match self.arg.take() {
+                    Some(s) => s,
+                    None if self.interactive => match dialog::ask_server(problem.as_deref()) {
+                        Some(s) => s,
+                        None => return el.exit(),
+                    },
+                    None => {
+                        self.error = problem;
+                        return el.exit();
+                    }
+                };
+                match self.start(el, &server) {
+                    Ok(session) => {
+                        self.session = Some(session);
+                        return;
+                    }
+                    Err(e) => problem = Some(format!("Can't connect to {server}: {e}")),
+                }
+            }
+        }
+
+        fn start(&self, el: &ActiveEventLoop, server: &str) -> Result<Session, String> {
+            let addr: SocketAddr = transport::resolve(server, 9000).map_err(|e| e.to_string())?;
+            let sock = transport::udp_socket(transport::any_local(addr)).map_err(|e| e.to_string())?;
+            sock.connect(addr).map_err(|e| e.to_string())?;
+            let input = Arc::new(input::Sender::new(sock.try_clone().map_err(|e| e.to_string())?));
+            let attrs = Window::default_attributes()
+                .with_title(format!("Streamy: {server}"))
+                .with_inner_size(LogicalSize::new(1280.0, 720.0));
+            let window = el.create_window(attrs).map_err(|e| format!("create window: {e}"))?;
+            let layer = display::Layer::attach(&window);
+            let stop = Arc::new(AtomicBool::new(false));
+            let (proxy, stop2, input2) = (self.proxy.clone(), stop.clone(), input.clone());
+            let receiver = std::thread::Builder::new()
+                .name("receiver".into())
+                .spawn(move || receiver::run(addr, sock, input2, layer, proxy, stop2))
+                .map_err(|e| e.to_string())?;
+            Ok(Session { window, input, stop, receiver: Some(receiver), sized: false, video: None })
+        }
+
         fn set_locked(&mut self, locked: bool) {
-            let Some(window) = &self.window else { return };
+            let Some(s) = &self.session else { return };
             if locked {
-                let grabbed = window.set_cursor_grab(CursorGrabMode::Locked);
+                let grabbed = s.window.set_cursor_grab(CursorGrabMode::Locked);
                 if let Err(e) = grabbed {
                     eprintln!("can't capture the pointer: {e}");
                     return;
                 }
             } else {
-                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                let _ = s.window.set_cursor_grab(CursorGrabMode::None);
             }
-            window.set_cursor_visible(!locked);
+            s.window.set_cursor_visible(!locked);
             self.locked = locked;
             println!("pointer {}", if locked { "captured (⌃⌥M to release)" } else { "released" });
         }
@@ -93,8 +155,9 @@ mod app {
         /// Window position (physical pixels) → fraction of the video, which
         /// is letterboxed to keep its aspect ratio.
         fn to_video(&self, pos: PhysicalPosition<f64>) -> Option<(f64, f64)> {
-            let (vw, vh) = self.video?;
-            let size = self.window.as_ref()?.inner_size();
+            let s = self.session.as_ref()?;
+            let (vw, vh) = s.video?;
+            let size = s.window.inner_size();
             let scale = (size.width as f64 / vw as f64).min(size.height as f64 / vh as f64);
             let (w, h) = (vw as f64 * scale, vh as f64 * scale);
             let (x0, y0) = ((size.width as f64 - w) / 2.0, (size.height as f64 - h) / 2.0);
@@ -104,37 +167,17 @@ mod app {
 
     impl ApplicationHandler<UserEvent> for App {
         fn resumed(&mut self, el: &ActiveEventLoop) {
-            if self.window.is_some() {
-                return;
+            if self.session.is_none() {
+                self.connect(el, None);
             }
-            let attrs = Window::default_attributes()
-                .with_title(format!("Streamy: {}", self.server))
-                .with_inner_size(LogicalSize::new(1280.0, 720.0));
-            let window = match el.create_window(attrs) {
-                Ok(w) => w,
-                Err(e) => {
-                    self.error = Some(format!("create window: {e}"));
-                    el.exit();
-                    return;
-                }
-            };
-            let layer = display::Layer::attach(&window);
-            let (server, proxy, stop, input) = (self.server, self.proxy.clone(), self.stop.clone(), self.input.clone());
-            let sock = self.sock.take().expect("socket");
-            self.receiver = Some(
-                std::thread::Builder::new()
-                    .name("receiver".into())
-                    .spawn(move || receiver::run(server, sock, input, layer, proxy, stop))
-                    .expect("spawn receiver"),
-            );
-            self.window = Some(window);
         }
 
         fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+            let Some(input) = self.session.as_ref().map(|s| s.input.clone()) else { return };
             match event {
                 WindowEvent::CloseRequested => el.exit(),
                 WindowEvent::Focused(false) => {
-                    self.input.release_all();
+                    input.release_all();
                     if self.locked {
                         self.set_locked(false);
                     }
@@ -150,18 +193,18 @@ mod app {
                         }
                         return;
                     }
-                    self.input.key(code, down, event.repeat);
+                    input.key(code, down, event.repeat);
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    self.input.button(button, state == ElementState::Pressed);
+                    input.button(button, state == ElementState::Pressed);
                 }
                 WindowEvent::MouseWheel { delta, .. } => match delta {
-                    MouseScrollDelta::LineDelta(x, y) => self.input.wheel_lines(-x as f64, y as f64),
-                    MouseScrollDelta::PixelDelta(p) => self.input.wheel_pixels(-p.x, p.y),
+                    MouseScrollDelta::LineDelta(x, y) => input.wheel_lines(-x as f64, y as f64),
+                    MouseScrollDelta::PixelDelta(p) => input.wheel_pixels(-p.x, p.y),
                 },
                 WindowEvent::CursorMoved { position, .. } if !self.locked => {
                     if let Some((x, y)) = self.to_video(position) {
-                        self.input.absolute(x, y);
+                        input.absolute(x, y);
                     }
                 }
                 _ => {}
@@ -171,56 +214,47 @@ mod app {
         fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
             if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
                 && self.locked
+                && let Some(s) = &self.session
             {
-                self.input.motion(dx, dy);
+                s.input.motion(dx, dy);
             }
         }
 
         fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-            let Some(window) = &self.window else { return };
+            let Some(s) = &mut self.session else { return };
             match event {
                 // One video pixel per screen pixel on first frame; the user can resize after.
                 UserEvent::VideoSize(w, h) => {
-                    if !self.sized {
-                        let _ = window.request_inner_size(PhysicalSize::new(w, h));
-                        self.sized = true;
+                    if !s.sized {
+                        let _ = s.window.request_inner_size(PhysicalSize::new(w, h));
+                        s.sized = true;
                     }
-                    self.video = Some((w, h));
+                    s.video = Some((w, h));
                 }
-                UserEvent::Title(t) => window.set_title(&t),
+                UserEvent::Title(t) => s.window.set_title(&t),
                 UserEvent::Fatal(e) => {
-                    self.error = Some(e);
-                    el.exit();
+                    eprintln!("error: {e}");
+                    self.locked = false;
+                    self.session = None;
+                    self.connect(el, Some(e));
                 }
             }
         }
     }
 
     pub fn run(cli: Cli) -> Result<(), String> {
-        let server = transport::resolve(&cli.server, 9000).map_err(|e| e.to_string())?;
-        let sock = transport::udp_socket(transport::any_local(server)).map_err(|e| e.to_string())?;
-        sock.connect(server).map_err(|e| e.to_string())?;
-        let input = Arc::new(input::Sender::new(sock.try_clone().map_err(|e| e.to_string())?));
         let event_loop = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| e.to_string())?;
         let mut app = App {
-            server,
-            sock: Some(sock),
-            input,
+            interactive: cli.server.is_none(),
+            arg: cli.server,
             proxy: event_loop.create_proxy(),
-            stop: Arc::new(AtomicBool::new(false)),
-            window: None,
-            receiver: None,
-            sized: false,
-            video: None,
+            session: None,
             modifiers: ModifiersState::empty(),
             locked: false,
             error: None,
         };
         event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
-        app.stop.store(true, Relaxed);
-        if let Some(r) = app.receiver.take() {
-            let _ = r.join();
-        }
+        app.session = None;
         app.error.map_or(Ok(()), Err)
     }
 }

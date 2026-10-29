@@ -347,7 +347,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "decodebench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "hevc",
@@ -518,7 +518,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hevc"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "indexmap"
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "netprobe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "proto",
@@ -969,6 +969,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
  "objc2-core-foundation",
 ]
@@ -1213,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "quick-xml"
@@ -1453,13 +1455,14 @@ dependencies = [
 
 [[package]]
 name = "streamy-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "hevc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "proto",
  "timing",
@@ -1470,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "streamy-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "hevc",
@@ -1556,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "timing"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "tiny-skia"
@@ -1640,7 +1643,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proto",
  "socket2",
@@ -1679,7 +1682,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videotoolbox"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "walkdir"

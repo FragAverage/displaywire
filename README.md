@@ -18,7 +18,7 @@ Download from the repo's Releases page:
 - **Windows server** (`streamy-server-windows.zip`): run `streamy-server.exe`
   and allow it through the firewall (udp/9000).
 
-To publish a release, push a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+To publish a release, push a tag: `git tag v0.3.0 && git push origin v0.3.0`.
 
 ## Build (on the Mac)
 ```

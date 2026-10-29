@@ -50,7 +50,7 @@ impl History {
         self.bins.is_empty()
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Bin> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Bin> + ExactSizeIterator {
         self.bins.iter()
     }
 }

@@ -40,17 +40,18 @@ pub fn ask_server(problem: Option<&str>) -> Option<String> {
     Some(server)
 }
 
-fn state_file() -> Option<PathBuf> {
+/// A small settings file in `~/Library/Application Support/Streamy`.
+pub fn state_file(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Streamy/server"))
+    Some(PathBuf::from(home).join("Library/Application Support/Streamy").join(name))
 }
 
 fn last_server() -> Option<String> {
-    Some(std::fs::read_to_string(state_file()?).ok()?.trim().to_string())
+    Some(std::fs::read_to_string(state_file("server")?).ok()?.trim().to_string())
 }
 
 fn save_server(server: &str) {
-    if let Some(path) = state_file() {
+    if let Some(path) = state_file("server") {
         let _ = path.parent().map(std::fs::create_dir_all);
         let _ = std::fs::write(path, server);
     }

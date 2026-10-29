@@ -25,7 +25,7 @@ const PING_INTERVAL_NS: u64 = 20 * MS;
 const HELLO_INTERVAL_NS: u64 = 200 * MS;
 /// Width of one graph sample, and how many to keep (60 s).
 const BIN_NS: u64 = 100 * MS;
-pub const HISTORY_BINS: usize = 600;
+const HISTORY_BINS: usize = 600;
 const KEYFRAME_RETRY_NS: u64 = 100 * MS;
 /// Incomplete frames older than this are given up on.
 const PARTIAL_MAX_AGE_NS: u64 = 100 * MS;
@@ -39,11 +39,24 @@ pub fn run(
     input: Arc<input::Sender>,
     layer: Layer,
     proxy: EventLoopProxy<UserEvent>,
-    history: Arc<Mutex<History>>,
+    telemetry: Arc<Telemetry>,
     stop: Arc<AtomicBool>,
 ) {
-    if let Err(e) = Receiver::new(server, sock, input, layer, proxy.clone(), history).and_then(|mut r| r.run(&stop)) {
+    if let Err(e) = Receiver::new(server, sock, input, layer, proxy.clone(), telemetry).and_then(|mut r| r.run(&stop)) {
         let _ = proxy.send_event(UserEvent::Fatal(e));
+    }
+}
+
+/// Stream health shared with the UI thread for the graph overlay.
+pub struct Telemetry {
+    pub history: Mutex<History>,
+    /// Set while the graph is showing: the UI is told about each new bin.
+    pub graph_on: AtomicBool,
+}
+
+impl Telemetry {
+    pub fn new(graph_on: bool) -> Telemetry {
+        Telemetry { history: Mutex::new(History::new(HISTORY_BINS)), graph_on: AtomicBool::new(graph_on) }
     }
 }
 
@@ -69,7 +82,7 @@ struct Receiver {
     clock: Clock,
     stats: Stats,
     binner: Binner,
-    history: Arc<Mutex<History>>,
+    telemetry: Arc<Telemetry>,
 }
 
 impl Receiver {
@@ -79,7 +92,7 @@ impl Receiver {
         input: Arc<input::Sender>,
         layer: Layer,
         proxy: EventLoopProxy<UserEvent>,
-        history: Arc<Mutex<History>>,
+        telemetry: Arc<Telemetry>,
     ) -> Result<Receiver, String> {
         sock.set_read_timeout(Some(Duration::from_millis(2))).map_err(|e| e.to_string())?;
         Ok(Receiver {
@@ -97,7 +110,7 @@ impl Receiver {
             clock: Clock::default(),
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
-            history,
+            telemetry,
         })
     }
 
@@ -147,7 +160,10 @@ impl Receiver {
                     self.binner.rtt(rtt);
                 }
                 if let Some(bin) = self.binner.tick(now) {
-                    self.history.lock().unwrap().push(bin);
+                    self.telemetry.history.lock().unwrap().push(bin);
+                    if self.telemetry.graph_on.load(Relaxed) {
+                        let _ = self.proxy.send_event(UserEvent::Graph);
+                    }
                 }
             }
             if let Some(line) = self.stats.tick(now, &self.clock) {

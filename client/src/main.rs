@@ -10,6 +10,8 @@ mod display;
 #[cfg(target_os = "macos")]
 mod input;
 #[cfg(target_os = "macos")]
+mod overlay;
+#[cfg(target_os = "macos")]
 mod receiver;
 
 #[cfg(not(target_os = "macos"))]
@@ -31,11 +33,10 @@ fn main() {
 #[cfg(target_os = "macos")]
 mod app {
     use std::net::SocketAddr;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::thread::JoinHandle;
 
-    use timing::history::History;
 
     use clap::Parser;
     use winit::application::ApplicationHandler;
@@ -45,7 +46,7 @@ mod app {
     use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
     use winit::window::{CursorGrabMode, Window, WindowId};
 
-    use crate::{dialog, display, input, receiver};
+    use crate::{dialog, display, input, overlay, receiver};
 
     #[derive(Parser)]
     #[command(about = "View a streamy server's screen")]
@@ -57,6 +58,8 @@ mod app {
     /// Sent from the receiver thread to the UI thread.
     pub enum UserEvent {
         VideoSize(u32, u32),
+        /// A new graph sample is ready (only sent while the graph is showing).
+        Graph,
         Title(String),
         Fatal(String),
     }
@@ -65,9 +68,9 @@ mod app {
     struct Session {
         window: Window,
         input: Arc<input::Sender>,
-        /// Stream health over the last minute, for the graph overlay.
-        #[allow(dead_code)]
-        history: Arc<Mutex<History>>,
+        /// Stream health over the last minute, drawn by `overlay`.
+        telemetry: Arc<receiver::Telemetry>,
+        overlay: overlay::Overlay,
         stop: Arc<AtomicBool>,
         receiver: Option<JoinHandle<()>>,
         sized: bool,
@@ -133,13 +136,26 @@ mod app {
             let window = el.create_window(attrs).map_err(|e| format!("create window: {e}"))?;
             let layer = display::Layer::attach(&window);
             let stop = Arc::new(AtomicBool::new(false));
-            let history = Arc::new(Mutex::new(History::new(receiver::HISTORY_BINS)));
-            let (proxy, stop2, input2, history2) = (self.proxy.clone(), stop.clone(), input.clone(), history.clone());
+            let graph = load_graph_pref();
+            let telemetry = Arc::new(receiver::Telemetry::new(graph));
+            let overlay = overlay::Overlay::attach(&window, graph);
+            let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
-                .spawn(move || receiver::run(addr, sock, input2, layer, proxy, history2, stop2))
+                .spawn(move || receiver::run(addr, sock, input2, layer, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
-            Ok(Session { window, input, history, stop, receiver: Some(receiver), sized: false, video: None })
+            Ok(Session { window, input, telemetry, overlay, stop, receiver: Some(receiver), sized: false, video: None })
+        }
+
+        fn toggle_graph(&mut self) {
+            let Some(s) = &self.session else { return };
+            let on = !s.telemetry.graph_on.load(Relaxed);
+            s.telemetry.graph_on.store(on, Relaxed);
+            s.overlay.set_visible(on);
+            if on {
+                s.overlay.update(&s.telemetry.history.lock().unwrap());
+            }
+            save_graph_pref(on);
         }
 
         fn set_locked(&mut self, locked: bool) {
@@ -199,6 +215,13 @@ mod app {
                         }
                         return;
                     }
+                    // ⌃⌥G: show or hide the stats graph.
+                    if self.modifiers.control_key() && self.modifiers.alt_key() && code == KeyCode::KeyG {
+                        if down && !event.repeat {
+                            self.toggle_graph();
+                        }
+                        return;
+                    }
                     input.key(code, down, event.repeat);
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
@@ -237,6 +260,7 @@ mod app {
                     }
                     s.video = Some((w, h));
                 }
+                UserEvent::Graph => s.overlay.update(&s.telemetry.history.lock().unwrap()),
                 UserEvent::Title(t) => s.window.set_title(&t),
                 UserEvent::Fatal(e) => {
                     eprintln!("error: {e}");
@@ -245,6 +269,17 @@ mod app {
                     self.connect(el, Some(e));
                 }
             }
+        }
+    }
+
+    fn load_graph_pref() -> bool {
+        dialog::state_file("graph").and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|s| s.trim() == "on")
+    }
+
+    fn save_graph_pref(on: bool) {
+        if let Some(path) = dialog::state_file("graph") {
+            let _ = path.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(path, if on { "on" } else { "off" });
         }
     }
 

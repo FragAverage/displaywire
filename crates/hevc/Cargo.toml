@@ -1,0 +1,6 @@
+[package]
+name = "hevc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

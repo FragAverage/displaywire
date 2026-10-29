@@ -1,0 +1,10 @@
+[package]
+name = "decodebench"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+timing.workspace = true
+hevc.workspace = true
+videotoolbox.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }

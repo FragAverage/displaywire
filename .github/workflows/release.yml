@@ -1,0 +1,70 @@
+name: Release
+
+# Push a tag like v0.2.0 to build and publish the Mac client and Windows server.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  client:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build universal client
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release -p streamy-client -p netprobe --target $t
+          done
+          mkdir -p dist/streamy-client-macos
+          for bin in streamy-client netprobe; do
+            lipo -create -output dist/streamy-client-macos/$bin \
+              target/aarch64-apple-darwin/release/$bin target/x86_64-apple-darwin/release/$bin
+            codesign --force --sign - dist/streamy-client-macos/$bin
+          done
+          cp README.md dist/streamy-client-macos/
+          cd dist && zip -r streamy-client-macos.zip streamy-client-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client
+          path: dist/streamy-client-macos.zip
+
+  server:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build server
+        shell: pwsh
+        run: |
+          cargo build --release -p streamy-server -p netprobe
+          New-Item -ItemType Directory dist/streamy-server-windows | Out-Null
+          Copy-Item target/release/streamy-server.exe, target/release/netprobe.exe, README.md dist/streamy-server-windows/
+          Compress-Archive dist/streamy-server-windows dist/streamy-server-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server
+          path: dist/streamy-server-windows.zip
+
+  publish:
+    needs: [client, server]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" streamy-client-macos.zip streamy-server-windows.zip
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

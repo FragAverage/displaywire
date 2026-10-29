@@ -1,0 +1,11 @@
+[package]
+name = "netprobe"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto.workspace = true
+timing.workspace = true
+transport.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }
+

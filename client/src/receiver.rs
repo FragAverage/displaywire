@@ -157,6 +157,9 @@ impl Receiver {
         let mut window = ReplayWindow::default();
         let mut last_rx = 0u64;
         let mut ever_connected = false;
+        // What the banner says, so it's only sent when it changes.
+        let mut status: Option<String> = None;
+        let mut alive_since = 0u64;
         println!("connecting to {}", self.server);
 
         while !stop.load(Relaxed) {
@@ -182,6 +185,17 @@ impl Receiver {
                 }
             }
             let streaming = last_video > 0 && now - last_video < VIDEO_STALL_NS;
+            let want = if !alive {
+                Some(if ever_connected { "Connection lost: reconnecting…".to_string() } else { format!("Connecting to {}…", self.server) })
+            } else if !streaming && now - alive_since > 700 * MS {
+                Some("Waiting for video…".to_string())
+            } else {
+                None
+            };
+            if want != status {
+                let _ = self.proxy.send_event(UserEvent::Status(want.clone()));
+                status = want;
+            }
             if alive && !streaming && now >= next_hello {
                 self.send(Msg::Hello { version: VERSION, caps });
                 next_hello = now + HELLO_INTERVAL_NS;
@@ -236,7 +250,7 @@ impl Receiver {
                         }
                         self.link.set_session(Some(Arc::new(session)));
                         window = ReplayWindow::default();
-                        (last_rx, ever_connected) = (rx, true);
+                        (last_rx, ever_connected, alive_since) = (rx, true, rx);
                         // The server starts again from a keyframe; don't wait for the stall timer.
                         next_hello = 0;
                     }

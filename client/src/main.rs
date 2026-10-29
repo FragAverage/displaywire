@@ -18,6 +18,8 @@ mod keys;
 #[cfg(target_os = "macos")]
 mod link;
 #[cfg(target_os = "macos")]
+mod menu;
+#[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod receiver;
@@ -55,7 +57,7 @@ mod app {
     use winit::window::{CursorGrabMode, Window, WindowId};
 
     use crate::link::Link;
-    use crate::{dialog, display, input, keys, overlay, receiver};
+    use crate::{dialog, display, input, keys, menu, overlay, receiver};
 
     #[derive(Parser)]
     #[command(about = "View a streamy server's screen")]
@@ -75,6 +77,10 @@ mod app {
         VideoSize(u32, u32),
         /// A new graph sample is ready (only sent while the graph is showing).
         Graph,
+        /// What the banner should say; `None` hides it.
+        Status(Option<String>),
+        /// A menu item was chosen.
+        Menu(menu::Action),
         Title(String),
         Fatal(String),
     }
@@ -86,6 +92,7 @@ mod app {
         /// Stream health over the last minute, drawn by `overlay`.
         telemetry: Arc<receiver::Telemetry>,
         overlay: overlay::Overlay,
+        banner: overlay::Banner,
         stop: Arc<AtomicBool>,
         receiver: Option<JoinHandle<()>>,
         sized: bool,
@@ -114,6 +121,7 @@ mod app {
         /// Pointer captured: relative motion for games (toggled with ⌃⌥M).
         locked: bool,
         error: Option<String>,
+        menu_installed: bool,
     }
 
     impl App {
@@ -168,12 +176,35 @@ mod app {
             let graph = load_graph_pref();
             let telemetry = Arc::new(receiver::Telemetry::new(graph));
             let overlay = overlay::Overlay::attach(&window, graph);
+            let banner = overlay::Banner::attach(&window);
             let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
                 .spawn(move || receiver::run(addr, link, input2, layer, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
-            Ok(Session { window, input, telemetry, overlay, stop, receiver: Some(receiver), sized: false, video: None })
+            Ok(Session { window, input, telemetry, overlay, banner, stop, receiver: Some(receiver), sized: false, video: None })
+        }
+
+        fn on_menu(&mut self, el: &ActiveEventLoop, action: menu::Action) {
+            match action {
+                menu::Action::Connect => {
+                    // Cancelling keeps the current connection.
+                    if let Some(entered) = dialog::ask_server(None) {
+                        self.locked = false;
+                        self.session = None;
+                        self.arg = Some(entered.server);
+                        self.key = entered.key;
+                        self.interactive = true;
+                        self.connect(el, None);
+                    }
+                }
+                menu::Action::Disconnect => {
+                    self.locked = false;
+                    self.session = None;
+                }
+                menu::Action::ToggleStats => self.toggle_graph(),
+                menu::Action::Shortcuts => dialog::show_shortcuts(),
+            }
         }
 
         fn toggle_graph(&mut self) {
@@ -218,6 +249,12 @@ mod app {
 
     impl ApplicationHandler<UserEvent> for App {
         fn resumed(&mut self, el: &ActiveEventLoop) {
+            if !self.menu_installed {
+                self.menu_installed = true;
+                if let Some(mtm) = objc2::MainThreadMarker::new() {
+                    menu::install(mtm, self.proxy.clone());
+                }
+            }
             if self.session.is_none() {
                 self.connect(el, None);
             }
@@ -279,8 +316,14 @@ mod app {
         }
 
         fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+            if let UserEvent::Menu(action) = event {
+                return self.on_menu(el, action);
+            }
             let Some(s) = &mut self.session else { return };
             match event {
+                UserEvent::Menu(_) => {}
+                UserEvent::Status(Some(text)) => s.banner.show(&text),
+                UserEvent::Status(None) => s.banner.hide(),
                 // One video pixel per screen pixel on first frame; the user can resize after.
                 UserEvent::VideoSize(w, h) => {
                     if !s.sized {
@@ -329,6 +372,7 @@ mod app {
             modifiers: ModifiersState::empty(),
             locked: false,
             error: None,
+            menu_installed: false,
         };
         event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
         app.session = None;

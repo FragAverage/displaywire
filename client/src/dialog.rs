@@ -98,6 +98,23 @@ pub fn ask_server(problem: Option<&str>) -> Option<Entered> {
     Some(Entered { server, key: (!typed.is_empty()).then_some(typed) })
 }
 
+/// The keyboard shortcuts, for the Help menu.
+pub fn show_shortcuts() {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(ns_string!("Keyboard shortcuts"));
+    alert.setInformativeText(ns_string!(
+        "⌃⌥M    Capture or release the pointer (for games)\n\
+         ⌃⌥S    Show or hide the stats graph\n\
+         ⌃⌘F    Full screen\n\
+         ⌘Q     Quit Streamy\n\n\
+         Everything else goes to the PC while this window has focus. The ⌘ key is the Windows key there."
+    ));
+    alert.addButtonWithTitle(ns_string!("OK"));
+    NSApplication::sharedApplication(mtm).activate();
+    alert.runModal();
+}
+
 /// A small settings file in `~/Library/Application Support/Streamy`.
 pub fn state_file(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;

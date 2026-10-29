@@ -11,7 +11,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGMutablePath};
 use objc2_foundation::NSString;
 use objc2_quartz_core::{
-    CAAutoresizingMask, CALayer, CAShapeLayer, CATextLayer, CATransaction, kCAAlignmentLeft,
+    CAAutoresizingMask, CALayer, CAShapeLayer, CATextLayer, CATransaction, kCAAlignmentCenter, kCAAlignmentLeft,
 };
 use timing::history::{Bin, History};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -40,6 +40,64 @@ const RED: Rgba = (1.0, 0.3, 0.3, 1.0);
 struct Row {
     label: Retained<CATextLayer>,
     lines: Vec<Retained<CAShapeLayer>>,
+}
+
+/// A centred pill at the top of the window with a short status line
+/// ("Connecting…"). Only real state goes here, never quality warnings.
+pub struct Banner {
+    pill: Retained<CALayer>,
+    text: Retained<CATextLayer>,
+}
+
+const BANNER_W: f64 = 380.0;
+const BANNER_H: f64 = 30.0;
+
+impl Banner {
+    /// Main thread only.
+    pub fn attach(window: &Window) -> Banner {
+        let RawWindowHandle::AppKit(handle) = window.window_handle().expect("window handle").as_raw() else {
+            panic!("not an AppKit window");
+        };
+        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+        let root = view.layer().expect("layer-backed view");
+        let flipped = root.isGeometryFlipped();
+        let bounds = root.bounds().size;
+        let x = (bounds.width - BANNER_W) / 2.0;
+        let y = if flipped { 12.0 } else { bounds.height - BANNER_H - 12.0 };
+        let pill = CALayer::new();
+        pill.setFrame(rect(x, y, BANNER_W, BANNER_H));
+        pill.setGeometryFlipped(flipped);
+        // Centred, and kept at the top, when the window is resized.
+        let top = if flipped { CAAutoresizingMask::LayerMaxYMargin } else { CAAutoresizingMask::LayerMinYMargin };
+        pill.setAutoresizingMask(top | CAAutoresizingMask::LayerMinXMargin | CAAutoresizingMask::LayerMaxXMargin);
+        pill.setBackgroundColor(Some(&color((0.0, 0.0, 0.0, 0.7))));
+        pill.setCornerRadius(BANNER_H / 2.0);
+        pill.setHidden(true);
+        let text = CATextLayer::new();
+        text.setFrame(rect(0.0, 7.0, BANNER_W, BANNER_H - 7.0));
+        text.setFontSize(13.0);
+        text.setContentsScale(window.scale_factor());
+        text.setForegroundColor(Some(&color(WHITE)));
+        text.setAlignmentMode(unsafe { kCAAlignmentCenter });
+        pill.addSublayer(&text);
+        root.addSublayer(&pill);
+        Banner { pill, text }
+    }
+
+    pub fn show(&self, message: &str) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        set_text(&self.text, message);
+        self.pill.setHidden(false);
+        CATransaction::commit();
+    }
+
+    pub fn hide(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.pill.setHidden(true);
+        CATransaction::commit();
+    }
 }
 
 pub struct Overlay {

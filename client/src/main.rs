@@ -8,6 +8,8 @@ mod audio;
 #[cfg(target_os = "macos")]
 mod dialog;
 #[cfg(target_os = "macos")]
+mod discovery;
+#[cfg(target_os = "macos")]
 mod display;
 #[cfg(target_os = "macos")]
 mod input;
@@ -119,10 +121,10 @@ mod app {
         /// starts or the user quits.
         fn connect(&mut self, el: &ActiveEventLoop, mut problem: Option<String>) {
             loop {
-                let server = match self.arg.take() {
-                    Some(s) => s,
+                let (server, key) = match self.arg.take() {
+                    Some(s) => (s, self.key.take()),
                     None if self.interactive => match dialog::ask_server(problem.as_deref()) {
-                        Some(s) => s,
+                        Some(entered) => (entered.server, entered.key),
                         None => return el.exit(),
                     },
                     None => {
@@ -130,8 +132,9 @@ mod app {
                         return el.exit();
                     }
                 };
-                match self.start(el, &server) {
+                match self.start(el, &server, key.as_deref()) {
                     Ok(session) => {
+                        dialog::remember(&server);
                         self.session = Some(session);
                         return;
                     }
@@ -140,11 +143,11 @@ mod app {
             }
         }
 
-        fn start(&self, el: &ActiveEventLoop, server: &str) -> Result<Session, String> {
+        fn start(&self, el: &ActiveEventLoop, server: &str, typed_key: Option<&str>) -> Result<Session, String> {
             let addr: SocketAddr = transport::resolve(server, 9000).map_err(|e| e.to_string())?;
             let sock = transport::udp_socket(transport::any_local(addr)).map_err(|e| e.to_string())?;
             sock.connect(addr).map_err(|e| e.to_string())?;
-            let key = match &self.key {
+            let key = match typed_key {
                 Some(k) => {
                     let key = secure::Key::parse(k).map_err(|e| e.to_string())?;
                     keys::save(server, &key)?;

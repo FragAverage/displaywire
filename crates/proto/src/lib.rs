@@ -1,5 +1,6 @@
 //! Streamy wire format. All integers are little-endian.
 
+pub mod discover;
 pub mod probe;
 pub mod stream;
 

@@ -8,6 +8,7 @@ proto.workspace = true
 timing.workspace = true
 transport.workspace = true
 secure.workspace = true
+if-addrs = "0.13"
 hevc.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 

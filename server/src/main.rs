@@ -75,6 +75,9 @@ pub struct Cli {
     /// Replace the pairing key and exit. Every paired client needs the new one.
     #[arg(long)]
     new_key: bool,
+    /// Don't answer discovery queries (clients then need the address typed in).
+    #[arg(long)]
+    no_discovery: bool,
     /// Don't send desktop audio.
     #[arg(long)]
     no_audio: bool,
@@ -211,7 +214,12 @@ fn run(cli: Cli) -> Result<(), String> {
     {
         let sock = sock.try_clone().map_err(|e| e.to_string())?;
         let shared = shared.clone();
-        std::thread::spawn(move || control(&sock, &shared, &key));
+        let announcement = (!cli.no_discovery).then(|| proto::discover::Announcement {
+            port: cli.port,
+            version: VERSION,
+            name: std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "streamy-server".into()),
+        });
+        std::thread::spawn(move || control(&sock, &shared, &key, announcement.as_ref()));
     }
     if !cli.no_audio {
         let source: Option<Box<dyn audio::AudioSource>> = if cli.tone || cli.file.is_some() {
@@ -327,7 +335,7 @@ const PENDING_TTL_NS: u64 = 10 * SEC;
 
 /// Handles client datagrams: handshakes, then (encrypted) session start/stop,
 /// pings, keyframe requests and input. Anything else is dropped silently.
-fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key) {
+fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key, announcement: Option<&proto::discover::Announcement>) {
     let mut buf = [0u8; 2048];
     let mut plain = [0u8; 2048];
     let mut out = [0u8; proto::MAX_DATAGRAM];
@@ -336,6 +344,7 @@ fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key) {
     let mut pending: Vec<Pending> = Vec::new();
     let mut limiter = HandshakeLimiter { tokens: HandshakeLimiter::BURST, last_ns: now_ns() };
     let mut last_reject_log = 0u64;
+    let mut discovery_limiter = HandshakeLimiter { tokens: HandshakeLimiter::BURST, last_ns: now_ns() };
     // Wake up regularly so held keys are released if the client goes quiet.
     let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
     loop {
@@ -354,6 +363,13 @@ fn control(sock: &UdpSocket, shared: &Shared, key: &secure::Key) {
             }
         };
         let datagram = &buf[..n];
+        if let Some(nonce) = proto::discover::parse_query(datagram) {
+            if let Some(a) = announcement.filter(|_| discovery_limiter.allow(now)) {
+                let m = proto::discover::reply(nonce, a, &mut out);
+                let _ = sock.send_to(&out[..m], from);
+            }
+            continue;
+        }
         match secure::kind(datagram) {
             Some(secure::HS1) => {
                 if !limiter.allow(now) {

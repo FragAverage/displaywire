@@ -202,7 +202,8 @@ impl Receiver {
                 }
                 Some(Msg::Audio(a, payload)) => {
                     if let Some(p) = &mut self.audio {
-                        p.push(a.seq, payload);
+                        let age = self.clock.offset().map(|o| rx as i64 + o - a.capture_ns as i64);
+                        p.push(a.seq, payload, age);
                     }
                 }
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),

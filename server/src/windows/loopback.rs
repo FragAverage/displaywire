@@ -6,14 +6,14 @@ use std::collections::VecDeque;
 use proto::stream::{AUDIO_CHANNELS, AUDIO_RATE};
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, IAudioClient3, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-    IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, eConsole,
+    IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, eConsole,
     eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, CreateEventW, WaitForSingleObject};
-use windows::core::w;
+use windows::core::{Interface, w};
 
 use super::{Context, Res};
 use crate::audio::{AudioSource, CHUNK_FRAMES, CHUNK_SAMPLES};
@@ -25,6 +25,10 @@ const ONE_FRAME_NS: u64 = 1_000_000_000 / AUDIO_RATE as u64;
 
 pub struct Loopback {
     client: IAudioClient,
+    /// An idle render stream at the engine's shortest period: the engine runs at
+    /// the shortest period any client asks for, and loopback is delivered at the
+    /// engine's period. Kept open while capturing.
+    _pin: Option<IAudioClient>,
     capture: IAudioCaptureClient,
     event: HANDLE,
     /// Captured samples not yet sent: whole chunks are taken from the front.
@@ -42,7 +46,38 @@ impl Loopback {
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ctx("MMDeviceEnumerator")?;
             let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ctx("no default audio output")?;
+            let pin = Self::pin_engine_period(&device).map_err(|e| println!("audio: can't shorten the engine period ({e}); capture will be ~10 ms behind")).ok();
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ctx("activate audio client")?;
+            Self::default_period(&client)?;
+            let event = CreateEventW(None, false, false, None).ctx("create event")?;
+            client.SetEventHandle(event).ctx("set event handle")?;
+            let capture: IAudioCaptureClient = client.GetService().ctx("capture client")?;
+            client.Start().ctx("start capture")?;
+            Ok(Loopback { client, _pin: pin, capture, event, pending: VecDeque::new(), front_ns: 0 })
+        }
+    }
+
+    /// Starts a silent render stream at the engine's minimum period.
+    unsafe fn pin_engine_period(device: &IMMDevice) -> Res<IAudioClient> {
+        unsafe {
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ctx("activate render client")?;
+            let client3: IAudioClient3 = client.cast()?;
+            let mix = client.GetMixFormat().ctx("mix format")?;
+            let (mut default, mut fundamental, mut min, mut max) = (0u32, 0u32, 0u32, 0u32);
+            client3.GetSharedModeEnginePeriod(mix, &mut default, &mut fundamental, &mut min, &mut max).ctx("engine period")?;
+            client3.InitializeSharedAudioStream(0, min, mix, None).ctx("initialize low-latency render stream")?;
+            client.Start().ctx("start render stream")?;
+            println!(
+                "audio: engine period pinned to {:.1} ms (default {:.1} ms)",
+                min as f64 * 1e3 / AUDIO_RATE as f64,
+                default as f64 * 1e3 / AUDIO_RATE as f64
+            );
+            Ok(client)
+        }
+    }
+
+    unsafe fn default_period(client: &IAudioClient) -> Res<()> {
+        unsafe {
             let format = WAVEFORMATEX {
                 wFormatTag: WAVE_FORMAT_PCM as u16,
                 nChannels: AUDIO_CHANNELS as u16,
@@ -65,12 +100,8 @@ impl Loopback {
                     None,
                 )
                 .ctx("initialize loopback")?;
-            let event = CreateEventW(None, false, false, None).ctx("create event")?;
-            client.SetEventHandle(event).ctx("set event handle")?;
-            let capture: IAudioCaptureClient = client.GetService().ctx("capture client")?;
-            client.Start().ctx("start capture")?;
             println!("audio: capturing the default output (loopback)");
-            Ok(Loopback { client, capture, event, pending: VecDeque::new(), front_ns: 0 })
+            Ok(())
         }
     }
 

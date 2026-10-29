@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, SupportedBufferSize};
 use proto::stream::{AUDIO_CHANNELS, AUDIO_RATE};
-use timing::now_ns;
+use timing::{Samples, now_ns};
 
 const CH: usize = AUDIO_CHANNELS;
 const MS: usize = AUDIO_RATE as usize / 1000;
@@ -36,6 +36,8 @@ struct Counters {
     /// Frames queued when the device last asked for audio.
     fill: AtomicU32,
     underruns: AtomicU32,
+    /// Current cushion (`prefill`), in frames.
+    cushion: AtomicU32,
     /// Frames per callback, as the device really asks for them.
     block: AtomicU32,
     /// `now_ns` of the last packet, to tell lateness from silence.
@@ -51,6 +53,8 @@ pub struct Player {
     last_seq: Option<u32>,
     lost_chunks: u32,
     last_report: (u32, u32, u32),
+    /// Server capture → arrival here, per chunk, in the last second.
+    age: Samples,
 }
 
 impl Player {
@@ -83,6 +87,7 @@ impl Player {
                 avail = prefill;
             }
             c.fill.store(avail as u32, Relaxed);
+            c.cushion.store(prefill as u32, Relaxed);
             c.block.store((data.len() / CH) as u32, Relaxed);
             let idle = now_ns().saturating_sub(c.last_packet_ns.load(Relaxed)) > IDLE_NS;
             if !playing && avail >= prefill {
@@ -107,7 +112,7 @@ impl Player {
                 if !idle {
                     c.underruns.fetch_add(1, Relaxed);
                     win_ok = false;
-                    prefill = (prefill + 5 * MS).min(PREFILL_MAX);
+                    prefill = (prefill + 3 * MS).min(PREFILL_MAX);
                     calm = 0;
                 }
             }
@@ -117,7 +122,7 @@ impl Player {
                     let excess = win_min.saturating_sub(prefill + SLACK);
                     drop_frames(&mut consumer, excess);
                     calm += 1;
-                    if calm >= 10 {
+                    if calm >= 3 {
                         prefill = prefill.saturating_sub(MS).max(PREFILL_MIN);
                         calm = 0;
                     }
@@ -134,11 +139,15 @@ impl Player {
         }
         stream.play().map_err(|e| e.to_string())?;
         println!("audio: playing on the default output");
-        Ok(Player { producer, _stream: stream, counters, last_seq: None, lost_chunks: 0, last_report: (0, 0, 0) })
+        Ok(Player { producer, _stream: stream, counters, last_seq: None, lost_chunks: 0, last_report: (0, 0, 0), age: Samples::default() })
     }
 
     /// Queues one chunk of PCM16 (little endian, interleaved stereo).
-    pub fn push(&mut self, seq: u32, payload: &[u8]) {
+    /// `age_ns` is how old it was on arrival, once the clocks are synced.
+    pub fn push(&mut self, seq: u32, payload: &[u8], age_ns: Option<i64>) {
+        if let Some(a) = age_ns {
+            self.age.push(a);
+        }
         if let Some(prev) = self.last_seq {
             self.lost_chunks += seq.wrapping_sub(prev).wrapping_sub(1).min(1000);
         }
@@ -159,11 +168,11 @@ impl Player {
     pub fn summary(&mut self) -> String {
         let (under, dropped, lost) = (self.counters.underruns.load(Relaxed), self.counters.dropped.load(Relaxed), self.lost_chunks);
         let (pu, pd, pl) = std::mem::replace(&mut self.last_report, (under, dropped, lost));
-        let mut s = format!(
-            "audio {:.1} ms (device block {})",
-            self.counters.fill.load(Relaxed) as f64 * 1e3 / AUDIO_RATE as f64,
-            self.counters.block.load(Relaxed)
-        );
+        let queued = self.counters.fill.load(Relaxed) as f64 * 1e3 / AUDIO_RATE as f64;
+        let age = timing::ms(self.age.summary().p50);
+        self.age.clear();
+        let cushion = self.counters.cushion.load(Relaxed) as f64 * 1e3 / AUDIO_RATE as f64;
+        let mut s = format!("audio {:.0} ms (arrived {age:.0} + queued {queued:.0}, cushion {cushion:.0})", age + queued);
         if under != pu || dropped != pd || lost != pl {
             s += &format!(" (underruns {} trimmed {} lost {})", under - pu, (dropped - pd) / (AUDIO_RATE / 1000), lost - pl);
         }

@@ -24,7 +24,7 @@ Download from the repo's Releases page:
   (after a permission prompt). Uninstall from *Installed apps*, or
   `streamy-server.exe --uninstall` (`--purge` also deletes the key and logs).
 
-To publish a release, push a tag: `git tag v0.3.0 && git push origin v0.3.0`.
+To publish a release, push a tag: `git tag v0.4.0 && git push origin v0.4.0`.
 
 ## Build (on the Mac)
 ```

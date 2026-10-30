@@ -158,6 +158,9 @@ impl Receiver {
         let begin = now_ns();
         let (mut next_hello, mut next_ping, mut next_bin, mut ping_id) = (0, 0, 0, 0u32);
         let mut last_video = 0u64;
+        // Whether video has arrived on this session. The server sends frames only when
+        // the screen changes, so a quiet screen is not a stall once video has started.
+        let mut got_video = false;
         let mut buf = [0u8; 2048];
         let mut plain = [0u8; 2048];
         let caps = if self.audio.is_some() { CAP_AUDIO } else { 0 };
@@ -202,7 +205,7 @@ impl Receiver {
             let streaming = last_video > 0 && now - last_video < VIDEO_STALL_NS;
             let want = if !alive {
                 Some(if ever_connected { "Connection lost: reconnecting…".to_string() } else { format!("Connecting to {}…", self.server) })
-            } else if !streaming && now - alive_since > 700 * MS {
+            } else if !got_video && now - alive_since > 700 * MS {
                 Some("Waiting for video…".to_string())
             } else {
                 None
@@ -224,7 +227,9 @@ impl Receiver {
             if !alive {
                 sent_for_session = false;
             }
-            if alive && !streaming && now >= next_hello {
+            // Hello makes the server send a frame (a keyframe of an unchanged screen too):
+            // needed to get the first one, not while the screen is just still.
+            if alive && !got_video && now >= next_hello {
                 self.send(Msg::Hello { version: VERSION, caps });
                 next_hello = now + HELLO_INTERVAL_NS;
             }
@@ -278,7 +283,7 @@ impl Receiver {
                         }
                         self.link.set_session(Some(Arc::new(session)));
                         window = ReplayWindow::default();
-                        (last_rx, ever_connected, alive_since) = (rx, true, rx);
+                        (last_rx, ever_connected, alive_since, got_video) = (rx, true, rx, false);
                         // The server starts again from a keyframe; don't wait for the stall timer.
                         next_hello = 0;
                     }
@@ -294,6 +299,7 @@ impl Receiver {
                 Some(Msg::Video(..)) if self.sim_loss.as_mut().is_some_and(SimLoss::drop_this) => {}
                 Some(Msg::Video(v, payload)) => {
                     last_video = rx;
+                    got_video = true;
                     self.stats.bytes += n as u64;
                     self.binner.bytes(n);
                     if let Some(frame) = self.reassembler.push(v, payload, rx) {

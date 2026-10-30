@@ -96,7 +96,7 @@ pub struct Reassembler {
     delivered: Option<u32>,
 }
 
-const MAX_PARTIALS: usize = 8;
+const MAX_PARTIALS: usize = 32;
 /// A frame id this far below the last delivered one means a new stream, not reordering.
 const RESTART_GAP: u32 = 1024;
 

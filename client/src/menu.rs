@@ -21,6 +21,7 @@ pub enum Action {
     ToggleStats,
     Settings,
     Mute,
+    Microphone,
     Shortcuts,
 }
 
@@ -68,6 +69,11 @@ define_class!(
         #[unsafe(method(mute:))]
         fn mute(&self, _sender: Option<&AnyObject>) {
             send(Action::Mute);
+        }
+
+        #[unsafe(method(microphone:))]
+        fn microphone(&self, _sender: Option<&AnyObject>) {
+            send(Action::Microphone);
         }
 
         #[unsafe(method(shortcuts:))]
@@ -145,6 +151,7 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
             item(mtm, "Enter Full Screen", Some(sel!(toggleFullScreen:)), "f", cmd | NSEventModifierFlags::Control, None),
             item(mtm, "Show Stats", Some(sel!(toggleStats:)), "s", NSEventModifierFlags::Control | NSEventModifierFlags::Option, Some(t)),
             item(mtm, "Mute Audio", Some(sel!(mute:)), "", none, Some(t)),
+            item(mtm, "Microphone On/Off", Some(sel!(microphone:)), "v", NSEventModifierFlags::Control | NSEventModifierFlags::Option, Some(t)),
         ],
     );
     let window = submenu(

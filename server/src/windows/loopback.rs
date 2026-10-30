@@ -6,14 +6,19 @@ use std::collections::VecDeque;
 use proto::stream::{AUDIO_CHANNELS, AUDIO_RATE};
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
+    ActivateAudioInterfaceAsync, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, IAudioClient3, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
     IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, eConsole,
     eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, IAgileObject, IAgileObject_Impl};
+use windows::Win32::System::Variant::VT_BLOB;
 use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, CreateEventW, WaitForSingleObject};
-use windows::core::{Interface, w};
+use windows::core::{IUnknown, Interface, Ref, implement, w};
 
 use super::{Context, Res};
 use crate::audio::{AudioSource, CHUNK_FRAMES, CHUNK_SAMPLES};
@@ -22,6 +27,19 @@ use crate::audio::{AudioSource, CHUNK_FRAMES, CHUNK_SAMPLES};
 /// (about 10 ms) regardless.
 const BUFFER_100NS: i64 = 200_000;
 const ONE_FRAME_NS: u64 = 1_000_000_000 / AUDIO_RATE as u64;
+
+/// Tells the opener that process-loopback activation has finished.
+#[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
+struct ActivateDone(std::sync::mpsc::Sender<()>);
+
+impl IAgileObject_Impl for ActivateDone_Impl {}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivateDone_Impl {
+    fn ActivateCompleted(&self, _op: Ref<IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
+        let _ = self.0.send(());
+        Ok(())
+    }
+}
 
 pub struct Loopback {
     client: IAudioClient,
@@ -41,19 +59,68 @@ pub struct Loopback {
 unsafe impl Send for Loopback {}
 
 impl Loopback {
+    /// Captures every app's audio (but not our own, which includes the client's microphone being
+    /// played out), whatever output device each one uses. Falls back to the default output's
+    /// loopback where Windows doesn't offer that (before Windows 10 2004), or with
+    /// `STREAMY_DEVICE_LOOPBACK=1`.
     pub fn open() -> Res<Loopback> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ctx("MMDeviceEnumerator")?;
             let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ctx("no default audio output")?;
             let pin = Self::pin_engine_period(&device).map_err(|e| println!("audio: can't shorten the engine period ({e}); capture will be ~10 ms behind")).ok();
+            if std::env::var_os("STREAMY_DEVICE_LOOPBACK").is_none() {
+                match Self::process_client() {
+                    Ok(client) => return Self::start(client, pin, "audio: capturing every app's output (process loopback)"),
+                    Err(e) => println!("audio: process loopback unavailable ({e}); using the default output instead"),
+                }
+            }
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ctx("activate audio client")?;
-            Self::default_period(&client)?;
+            Self::default_period(&client, AUDCLNT_STREAMFLAGS_LOOPBACK, false)?;
+            Self::start(client, pin, "audio: capturing the default output (loopback)")
+        }
+    }
+
+    unsafe fn start(client: IAudioClient, pin: Option<IAudioClient>, what: &str) -> Res<Loopback> {
+        unsafe {
             let event = CreateEventW(None, false, false, None).ctx("create event")?;
             client.SetEventHandle(event).ctx("set event handle")?;
             let capture: IAudioCaptureClient = client.GetService().ctx("capture client")?;
             client.Start().ctx("start capture")?;
+            println!("{what}");
             Ok(Loopback { client, _pin: pin, capture, event, pending: VecDeque::new(), front_ns: 0 })
+        }
+    }
+
+    /// An audio client capturing all processes except this one.
+    unsafe fn process_client() -> Res<IAudioClient> {
+        unsafe {
+            let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+                ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+                Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                    ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                        TargetProcessId: std::process::id(),
+                        ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                    },
+                },
+            };
+            // The blob points at `params` on our stack: PROPVARIANT's drop would try to free it.
+            let mut arg = std::mem::ManuallyDrop::new(PROPVARIANT::default());
+            {
+                let inner = &mut *arg.Anonymous.Anonymous;
+                inner.vt = VT_BLOB;
+                inner.Anonymous.blob = BLOB { cbSize: size_of_val(&params) as u32, pBlobData: (&raw mut params).cast() };
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handler: IActivateAudioInterfaceCompletionHandler = ActivateDone(tx).into();
+            let op = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&*arg), &handler).ctx("activate process loopback")?;
+            rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| "activation timed out")?;
+            let (mut result, mut client) = (windows::core::HRESULT(0), None::<IUnknown>);
+            op.GetActivateResult(&mut result, &mut client).ctx("activation result")?;
+            result.ok().ctx("activation failed")?;
+            let client: IAudioClient = client.ok_or("no audio client")?.cast().ctx("audio client")?;
+            Self::default_period(&client, AUDCLNT_STREAMFLAGS_LOOPBACK, true)?;
+            Ok(client)
         }
     }
 
@@ -76,7 +143,7 @@ impl Loopback {
         }
     }
 
-    unsafe fn default_period(client: &IAudioClient) -> Res<()> {
+    unsafe fn default_period(client: &IAudioClient, loopback: u32, process: bool) -> Res<()> {
         unsafe {
             let format = WAVEFORMATEX {
                 wFormatTag: WAVE_FORMAT_PCM as u16,
@@ -90,17 +157,18 @@ impl Loopback {
             client
                 .Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_LOOPBACK
-                        | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                        | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-                        | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                    BUFFER_100NS,
+                    if process {
+                        // The process-loopback client takes the format as given.
+                        loopback | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+                    } else {
+                        loopback | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+                    },
+                    if process { 0 } else { BUFFER_100NS },
                     0,
                     &format,
                     None,
                 )
                 .ctx("initialize loopback")?;
-            println!("audio: capturing the default output (loopback)");
             Ok(())
         }
     }

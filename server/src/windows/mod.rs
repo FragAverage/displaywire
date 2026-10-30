@@ -7,6 +7,7 @@ mod encoder;
 mod nvenc;
 pub mod input;
 pub mod loopback;
+pub mod micout;
 pub mod service;
 pub mod setup;
 pub mod shell;

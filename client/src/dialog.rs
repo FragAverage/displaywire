@@ -202,6 +202,7 @@ pub fn show_shortcuts() {
     alert.setInformativeText(ns_string!(
         "⌃⌥M    Capture or release the pointer (for games)\n\
          ⌃⌥S    Show or hide the stats graph\n\
+         ⌃⌥V    Microphone on or off (off at every start)\n\
          ⌃⌘F    Full screen\n\
          ⌘Q     Quit Streamy\n\n\
          Everything else goes to the PC while this window has focus. The ⌘ key is the Windows key there."

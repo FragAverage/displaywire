@@ -20,6 +20,7 @@ use crate::audio;
 use crate::display::Layer;
 use crate::input;
 use crate::link::Link;
+use crate::mic;
 use crate::settings::Prefs;
 use crate::transfer::Transfers;
 use secure::{Initiator, ReplayWindow};
@@ -33,7 +34,7 @@ const BIN_NS: u64 = 100 * MS;
 const HISTORY_BINS: usize = 600;
 const KEYFRAME_RETRY_NS: u64 = 100 * MS;
 /// Incomplete frames older than this are given up on.
-const PARTIAL_MAX_AGE_NS: u64 = 100 * MS;
+const PARTIAL_MAX_AGE_NS: u64 = 300 * MS;
 /// No video for this long: assume the server dropped us and say hello again.
 const VIDEO_STALL_NS: u64 = 2 * SEC;
 /// Nothing that verifies for this long (pongs come every 20 ms): the session is gone.
@@ -67,12 +68,15 @@ pub struct Telemetry {
     pub prefs: Mutex<Prefs>,
     pub prefs_version: AtomicU32,
     pub transfers: Arc<Transfers>,
+    /// The user's microphone switch (off at every start).
+    pub mic_on: AtomicBool,
 }
 
 impl Telemetry {
     pub fn new(graph_on: bool, prefs: Prefs, transfers: Arc<Transfers>) -> Telemetry {
         Telemetry {
             transfers,
+            mic_on: AtomicBool::new(false),
             history: Mutex::new(History::new(HISTORY_BINS)),
             graph_on: AtomicBool::new(graph_on),
             prefs: Mutex::new(prefs),
@@ -106,6 +110,11 @@ struct Receiver {
     telemetry: Arc<Telemetry>,
     /// None if no output device could be opened: video only then.
     audio: Option<audio::Player>,
+    /// Open only while the microphone is on.
+    mic: Option<mic::Capture>,
+    mic_seq: u32,
+    /// Chunks sent and peak level since the last report, and when that was.
+    mic_stats: (u32, i16, u64),
     /// `STREAMY_SIM_LOSS=<percent>`: drop that share of incoming video packets, to test recovery.
     sim_loss: Option<SimLoss>,
     /// `STREAMY_TRACE=file`: one CSV line per decoded frame, for timing analysis.
@@ -139,6 +148,9 @@ impl Receiver {
             binner: Binner::new(now_ns(), BIN_NS),
             telemetry,
             sim_loss: std::env::var("STREAMY_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
+            mic: None,
+            mic_seq: 0,
+            mic_stats: (0, 0, 0),
             audio: audio::Player::new().map_err(|e| eprintln!("audio disabled: {e}")).ok(),
             trace: std::env::var_os("STREAMY_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
                 use std::io::Write;
@@ -152,6 +164,44 @@ impl Receiver {
         let mut buf = [0u8; 64];
         let n = msg.encode(&mut buf);
         self.link.send(&buf[..n]);
+    }
+
+    /// Opens or closes the microphone to match the switch, and sends what it has captured.
+    fn pump_mic(&mut self, alive: bool) {
+        let want = alive && self.telemetry.mic_on.load(Relaxed);
+        if want && self.mic.is_none() {
+            match mic::Capture::new() {
+                Ok(m) => self.mic = Some(m),
+                Err(e) => {
+                    eprintln!("microphone: {e}");
+                    self.telemetry.mic_on.store(false, Relaxed);
+                    let _ = self.proxy.send_event(UserEvent::Notice(Some(format!("Microphone unavailable: {e}"))));
+                    return;
+                }
+            }
+        } else if !want && self.mic.is_some() {
+            self.mic = None;
+            self.mic_stats = (0, 0, 0);
+        }
+        let Some(m) = &mut self.mic else { return };
+        let mut bytes = [0u8; mic::CHUNK_SAMPLES * 2];
+        let mut plain = [0u8; 2048];
+        let now = now_ns();
+        if now - self.mic_stats.2 >= 1_000_000_000 {
+            if self.mic_stats.2 != 0 {
+                println!("mic: sent {} chunks, peak level {}%", self.mic_stats.0, self.mic_stats.1 as u32 * 100 / 32767);
+            }
+            self.mic_stats = (0, 0, now);
+        }
+        while m.next_chunk(&mut bytes) {
+            let audio = proto::stream::Audio { seq: self.mic_seq, format: proto::stream::AudioFormat::Pcm16, capture_ns: now_ns() };
+            let n = Msg::Mic(audio, &bytes).encode(&mut plain);
+            self.link.send(&plain[..n]);
+            let peak = bytes.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b).saturating_abs()).max().unwrap_or(0);
+            self.mic_stats.0 += 1;
+            self.mic_stats.1 = self.mic_stats.1.max(peak);
+            self.mic_seq = self.mic_seq.wrapping_add(1);
+        }
     }
 
     fn run(&mut self, stop: &AtomicBool) -> Result<(), String> {
@@ -238,6 +288,7 @@ impl Receiver {
                 ping_id = ping_id.wrapping_add(1);
                 next_ping = now + PING_INTERVAL_NS;
             }
+            self.pump_mic(alive);
             self.input.heartbeat();
             if self.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
                 self.need_keyframe = true;
@@ -251,6 +302,8 @@ impl Receiver {
                 if let Some(rtt) = self.clock.recent_rtt() {
                     self.binner.rtt(rtt);
                 }
+                let (delay, cushion) = self.audio.as_ref().and_then(|a| a.delay()).unwrap_or((0.0, 0.0));
+                self.binner.audio(delay, cushion);
                 if let Some(bin) = self.binner.tick(now) {
                     self.telemetry.history.lock().unwrap().push(bin);
                     if self.telemetry.graph_on.load(Relaxed) {

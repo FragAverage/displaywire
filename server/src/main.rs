@@ -7,6 +7,7 @@
 mod audio;
 mod auth;
 mod file;
+mod mic;
 mod transfer;
 #[cfg(windows)]
 mod windows;
@@ -97,6 +98,14 @@ pub struct Cli {
     /// Don't send desktop audio.
     #[arg(long)]
     no_audio: bool,
+    /// Don't play the client's microphone.
+    #[arg(long)]
+    no_mic: bool,
+    /// Windows: the audio output the client's microphone is played into, by (part of) its name; `|` separates
+    /// alternatives, tried in order. A virtual cable such as VB-Cable ("CABLE Input", whose other end,
+    /// "CABLE Output", apps then record from) or Steam's virtual microphone.
+    #[arg(long, default_value = "CABLE Input|Steam Streaming Microphone")]
+    mic_device: String,
     /// Send a test tone instead of the desktop's audio.
     #[arg(long)]
     tone: bool,
@@ -287,11 +296,12 @@ fn run(cli: Cli) -> Result<(), String> {
             max_file_bytes: cli.max_upload_mb << 20,
         });
         transfers.spawn(sock.try_clone().map_err(|e| e.to_string())?, shared.clone());
+        let mic = open_mic(&cli);
         #[cfg(windows)]
         if !cli.no_tray && cli.file.is_none() {
             windows::tray::start(shared.clone());
         }
-        std::thread::spawn(move || control(&sock, &shared, &key, announcement.as_ref(), &transfers));
+        std::thread::spawn(move || control(&sock, &shared, &key, announcement.as_ref(), &transfers, mic));
     }
     if !cli.no_audio {
         let source: Option<Box<dyn audio::AudioSource>> = if cli.tone || cli.file.is_some() {
@@ -363,6 +373,27 @@ fn open_screen(cli: &Cli) -> Result<Box<dyn Source>, String> {
     Ok(Box::new(windows::ScreenSource::open(cli)?))
 }
 
+/// Starts playing the client's microphone, if there's somewhere to play it.
+#[cfg(windows)]
+fn open_mic(cli: &Cli) -> Option<mic::Sink> {
+    if cli.no_mic || cli.file.is_some() {
+        return None;
+    }
+    let (sink, consumer) = mic::channel();
+    match windows::micout::start(&cli.mic_device, consumer) {
+        Ok(()) => Some(sink),
+        Err(e) => {
+            eprintln!("microphone passthrough unavailable: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn open_mic(_cli: &Cli) -> Option<mic::Sink> {
+    None
+}
+
 #[cfg(windows)]
 fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     match windows::loopback::Loopback::open() {
@@ -427,6 +458,7 @@ fn control(
     key: &secure::Key,
     announcement: Option<&proto::discover::Announcement>,
     transfers: &transfer::Transfers,
+    mut mic: Option<mic::Sink>,
 ) {
     let mut buf = [0u8; 2048];
     let mut plain = [0u8; 2048];
@@ -545,6 +577,12 @@ fn control(
                     }
                     Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),
                     Some(Msg::Input(input)) => injector.apply(&input, now_ns()),
+                    Some(Msg::Mic(a, payload)) => {
+                        shared.last_seen_ns.store(now_ns(), Relaxed);
+                        if let Some(m) = &mut mic {
+                            m.push(a.seq, payload);
+                        }
+                    }
                     Some(Msg::Bye) => {
                         println!("{from}: disconnected");
                         *shared.link.lock().unwrap() = None;

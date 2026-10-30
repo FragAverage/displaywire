@@ -27,6 +27,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Streamy sends your microphone to the PC you stream from, when you turn it on (Control-Option-V).</string>
   <key>NSLocalNetworkUsageDescription</key><string>Streamy finds and connects to the PC you stream from on your local network.</string>
 </dict>
 </plist>

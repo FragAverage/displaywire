@@ -1,4 +1,4 @@
-//! Graph overlay: frame rate, bitrate and latency over the last 20 seconds.
+//! Graph overlay: frame rate, bitrate, latency and audio delay over the last 20 seconds.
 //!
 //! A panel of CoreAnimation layers above the video. Nothing is drawn while it
 //! is hidden, and it never touches the decode/present path: the UI thread
@@ -26,7 +26,7 @@ const GRAPH_W: f64 = PANEL_W - 2.0 * PAD;
 const GRAPH_H: f64 = 38.0;
 const LABEL_H: f64 = 14.0;
 const GAP: f64 = 6.0;
-const ROWS: usize = 3;
+const ROWS: usize = 4;
 const ROW_H: f64 = LABEL_H + GRAPH_H + GAP;
 const PANEL_H: f64 = ROWS as f64 * ROW_H + PAD;
 
@@ -102,7 +102,7 @@ impl Banner {
 
 pub struct Overlay {
     panel: Retained<CALayer>,
-    /// FPS (+ loss ticks), bitrate, latency.
+    /// FPS (+ loss ticks), bitrate, latency, audio delay.
     rows: [Row; ROWS],
 }
 
@@ -141,7 +141,7 @@ impl Overlay {
         panel.setHidden(!visible);
         root.addSublayer(&panel);
 
-        let colors: [&[Rgba]; ROWS] = [&[WHITE, RED], &[CYAN], &[ORANGE, WHITE, GREEN]];
+        let colors: [&[Rgba]; ROWS] = [&[WHITE, RED], &[CYAN], &[ORANGE, WHITE, GREEN], &[CYAN, ORANGE]];
         let rows = std::array::from_fn(|i| {
             // Row 0 is at the top.
             let y = PANEL_H - (i as f64 + 1.0) * ROW_H;
@@ -214,6 +214,16 @@ impl Overlay {
         set_path(&self.rows[2].lines[0], &bins, |b| when_frames(b, b.latency_p99_ms));
         set_path(&self.rows[2].lines[1], &bins, |b| when_frames(b, b.latency_p50_ms));
         set_path(&self.rows[2].lines[2], &bins, |b| Some(b.rtt_ms / ms_scale));
+
+        // Audio: total delay, and the cushion the player is aiming for. Gaps while silent.
+        let audio_scale = nice_ceil(max(|b| b.audio_ms).max(20.0));
+        set_text(
+            &self.rows[3].label,
+            &format!("Audio {:.0} ms   cushion {:.0}   peak {:.0}", avg(|b| b.audio_ms), avg(|b| b.audio_cushion_ms), max(|b| b.audio_ms)),
+        );
+        let when_audio = |b: &Bin, v: f32| (b.audio_ms > 0.0).then_some(v / audio_scale);
+        set_path(&self.rows[3].lines[0], &bins, |b| when_audio(b, b.audio_ms));
+        set_path(&self.rows[3].lines[1], &bins, |b| when_audio(b, b.audio_cushion_ms));
 
         CATransaction::commit();
     }

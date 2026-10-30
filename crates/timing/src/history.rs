@@ -21,6 +21,9 @@ pub struct Bin {
     pub decode_ms: f32,
     /// Frames lost or dropped in this bin.
     pub lost: u32,
+    /// Desktop audio: age on arrival plus what is queued for playback, and the target cushion. 0 without audio.
+    pub audio_ms: f32,
+    pub audio_cushion_ms: f32,
 }
 
 /// The last `capacity` bins, oldest first.
@@ -65,6 +68,8 @@ pub struct Binner {
     rtt_ns: Option<u64>,
     latency: Samples,
     decode: Samples,
+    /// Latest audio delay and cushion, in ms.
+    audio: (f32, f32),
 }
 
 impl Binner {
@@ -78,6 +83,7 @@ impl Binner {
             rtt_ns: None,
             latency: Samples::default(),
             decode: Samples::default(),
+            audio: (0.0, 0.0),
         }
     }
 
@@ -96,6 +102,11 @@ impl Binner {
 
     pub fn lost(&mut self, n: u32) {
         self.lost += n;
+    }
+
+    /// Latest audio delay and playback cushion; reported by the bin it was set in and kept after.
+    pub fn audio(&mut self, delay_ms: f32, cushion_ms: f32) {
+        self.audio = (delay_ms, cushion_ms);
     }
 
     /// Latest round-trip time; reported by the bin it was set in and kept after.
@@ -119,6 +130,8 @@ impl Binner {
             latency_p99_ms: ms(lat.p99) as f32,
             decode_ms: ms(dec.p50) as f32,
             lost: self.lost,
+            audio_ms: self.audio.0,
+            audio_cushion_ms: self.audio.1,
         };
         self.start_ns = now_ns;
         self.frames = 0;

@@ -99,6 +99,21 @@ the key can't see or do anything, and the server doesn't answer it at all
   `--max-upload-mb` (default 4096) limits their size. Transfers ride the same
   encrypted session, with their own retransmission (`crates/xfer`).
 
+## Audio and microphone
+
+- **Desktop audio** is captured from every app on the PC, whichever output device it
+  uses (Windows 10 2004 or later; older Windows falls back to the default output).
+  Streamy's own audio is left out. The Mac plays it with a small adaptive cushion, and
+  the stats graph (`⌃⌥S`) has an audio-delay row.
+- **Microphone** (Mac to PC): `⌃⌥V` or View ▸ Microphone On/Off. It is off at every
+  connection, and macOS shows its recording indicator while it is on. The server plays
+  it into a virtual audio cable, so install one on the PC, such as the free
+  [VB-Cable](https://vb-audio.com/Cable/) (the server finds "CABLE Input" by itself, or
+  use `--mic-device <part of an output's name>`), then pick **CABLE Output** as the
+  microphone in the PC app that should hear you. `--no-mic` turns it off on the server.
+  A driver of its own is not part of Streamy yet: Windows only lists devices that a
+  signed driver provides.
+
 ## Settings
 
 Settings (⌘,) on the Mac: video bitrate, a frame-rate cap, loss protection (FEC),

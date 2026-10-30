@@ -20,6 +20,8 @@ mod link;
 #[cfg(target_os = "macos")]
 mod menu;
 #[cfg(target_os = "macos")]
+mod mic;
+#[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod receiver;
@@ -260,6 +262,7 @@ mod app {
                 }
                 menu::Action::ToggleStats => self.toggle_graph(),
                 menu::Action::Settings => self.edit_settings(),
+                menu::Action::Microphone => self.toggle_mic(),
                 menu::Action::Mute => self.change_prefs(|p| p.muted = !p.muted),
                 menu::Action::Shortcuts => dialog::show_shortcuts(),
                 menu::Action::SendFile => {
@@ -292,6 +295,19 @@ mod app {
                     new.save();
                 }
             }
+        }
+
+        /// Turns the microphone on or off, and says which for a moment.
+        fn toggle_mic(&mut self) {
+            let Some(s) = &self.session else { return };
+            let on = !s.telemetry.mic_on.load(Relaxed);
+            s.telemetry.mic_on.store(on, Relaxed);
+            let proxy = self.proxy.clone();
+            let _ = proxy.send_event(UserEvent::Notice(Some(if on { "Microphone on".into() } else { "Microphone off".into() })));
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let _ = proxy.send_event(UserEvent::Notice(None));
+            });
         }
 
         fn toggle_graph(&mut self) {
@@ -373,6 +389,13 @@ mod app {
                     if self.modifiers.control_key() && self.modifiers.alt_key() && code == KeyCode::KeyS {
                         if down && !event.repeat {
                             self.toggle_graph();
+                        }
+                        return;
+                    }
+                    // ⌃⌥V: microphone on or off.
+                    if self.modifiers.control_key() && self.modifiers.alt_key() && code == KeyCode::KeyV {
+                        if down && !event.repeat {
+                            self.toggle_mic();
                         }
                         return;
                     }

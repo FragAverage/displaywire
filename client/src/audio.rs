@@ -19,13 +19,16 @@ const MS: usize = AUDIO_RATE as usize / 1000;
 /// Cushion before playback starts, to begin with / at least / at most.
 const PREFILL_START: usize = 10 * MS;
 const PREFILL_MIN: usize = 5 * MS;
-const PREFILL_MAX: usize = 40 * MS;
+const PREFILL_MAX: usize = 160 * MS;
+/// How often the unused backlog is shed: 1 s of playback. Shorter windows (250 ms) shed audio the
+/// player then turns out to need, and the cushion climbs instead.
+const WINDOW: usize = AUDIO_RATE as usize;
 /// Kept on top of the cushion before the unused part is dropped.
 const SLACK: usize = 5 * MS;
 /// A burst beyond this is dropped at once.
-const HARD_MAX: usize = 60 * MS;
+const HARD_MAX: usize = 100 * MS;
 /// Ring capacity.
-const RING_FRAMES: usize = 4800;
+const RING_FRAMES: usize = 12_000;
 /// No packet for this long: the server is idle (silence), not late.
 const IDLE_NS: u64 = 60_000_000;
 /// Device buffer requested: ~2.7 ms.
@@ -57,6 +60,10 @@ pub struct Player {
     last_report: (u32, u32, u32),
     /// Server capture → arrival here, per chunk, in the last second.
     age: Samples,
+    /// Smoothed arrival age, in ms, for the graph.
+    age_ms: f32,
+    /// Loudest sample received since the last stats line.
+    peak: i16,
 }
 
 impl Player {
@@ -116,18 +123,18 @@ impl Player {
                 if !idle {
                     c.underruns.fetch_add(1, Relaxed);
                     win_ok = false;
-                    prefill = (prefill + 3 * MS).min(PREFILL_MAX);
+                    prefill = (prefill + 6 * MS).min(PREFILL_MAX);
                     calm = 0;
                 }
             }
-            if playing && win_frames >= AUDIO_RATE as usize {
-                // A second without an underrun: shed what was never used.
+            if playing && win_frames >= WINDOW {
+                // A window without an underrun: shed what was never used.
                 if win_ok {
                     let excess = win_min.saturating_sub(prefill + SLACK);
                     drop_frames(&mut consumer, excess);
                     calm += 1;
-                    if calm >= 3 {
-                        prefill = prefill.saturating_sub(MS).max(PREFILL_MIN);
+                    if calm >= 2 {
+                        prefill = prefill.saturating_sub(2 * MS).max(PREFILL_MIN);
                         calm = 0;
                     }
                 }
@@ -143,7 +150,7 @@ impl Player {
         }
         stream.play().map_err(|e| e.to_string())?;
         println!("audio: playing on the default output");
-        Ok(Player { producer, _stream: stream, counters, last_seq: None, lost_chunks: 0, last_report: (0, 0, 0), age: Samples::default() })
+        Ok(Player { producer, _stream: stream, counters, last_seq: None, lost_chunks: 0, last_report: (0, 0, 0), age: Samples::default(), age_ms: 0.0, peak: 0 })
     }
 
     /// Volume and mute: a linear gain, 1.0 for unchanged.
@@ -156,6 +163,7 @@ impl Player {
     pub fn push(&mut self, seq: u32, payload: &[u8], age_ns: Option<i64>) {
         if let Some(a) = age_ns {
             self.age.push(a);
+            self.age_ms += (a as f32 / 1e6 - self.age_ms) * 0.05;
         }
         if let Some(prev) = self.last_seq {
             self.lost_chunks += seq.wrapping_sub(prev).wrapping_sub(1).min(1000);
@@ -163,6 +171,7 @@ impl Player {
         self.last_seq = Some(seq);
         self.counters.last_packet_ns.store(now_ns(), Relaxed);
         let samples = payload.len() / 2;
+        self.peak = payload.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b).saturating_abs()).fold(self.peak, i16::max);
         match self.producer.write_chunk_uninit(samples) {
             Ok(chunk) => {
                 chunk.fill_from_iter(payload.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)));
@@ -173,6 +182,15 @@ impl Player {
         }
     }
 
+    /// Total audio delay and the target cushion, in ms, or `None` while nothing is playing.
+    pub fn delay(&self) -> Option<(f32, f32)> {
+        if now_ns().saturating_sub(self.counters.last_packet_ns.load(Relaxed)) > IDLE_NS {
+            return None;
+        }
+        let ms = |frames: u32| frames as f32 * 1e3 / AUDIO_RATE as f32;
+        Some((self.age_ms + ms(self.counters.fill.load(Relaxed)), ms(self.counters.cushion.load(Relaxed))))
+    }
+
     /// For the once-a-second stats line: queued audio and what went wrong since the last call.
     pub fn summary(&mut self) -> String {
         let (under, dropped, lost) = (self.counters.underruns.load(Relaxed), self.counters.dropped.load(Relaxed), self.lost_chunks);
@@ -181,7 +199,8 @@ impl Player {
         let age = timing::ms(self.age.summary().p50);
         self.age.clear();
         let cushion = self.counters.cushion.load(Relaxed) as f64 * 1e3 / AUDIO_RATE as f64;
-        let mut s = format!("audio {:.0} ms (arrived {age:.0} + queued {queued:.0}, cushion {cushion:.0})", age + queued);
+        let mut s = format!("audio {:.0} ms (arrived {age:.0} + queued {queued:.0}, cushion {cushion:.0}, level {}%)", age + queued, self.peak as u32 * 100 / 32767);
+        self.peak = 0;
         if under != pu || dropped != pd || lost != pl {
             s += &format!(" (underruns {} trimmed {} lost {})", under - pu, (dropped - pd) / (AUDIO_RATE / 1000), lost - pl);
         }

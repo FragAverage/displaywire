@@ -1989,10 +1989,12 @@ dependencies = [
  "hevc",
  "moq-nvenc",
  "proto",
+ "rtrb",
  "secure",
  "timing",
  "transport",
  "windows",
+ "windows-core",
  "xfer",
 ]
 

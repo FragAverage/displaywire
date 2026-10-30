@@ -253,12 +253,12 @@ impl Receiver {
                     }
                 }
             }
-            if let Some(mut line) = self.stats.tick(now, &self.clock) {
+            if let Some((mut line, title)) = self.stats.tick(now, &self.clock) {
                 if let Some(p) = &mut self.audio {
                     line += &format!("  {}", p.summary());
                 }
                 println!("{line}");
-                let _ = self.proxy.send_event(UserEvent::Title(format!("Streamy: {}  |  {line}", self.server)));
+                let _ = self.proxy.send_event(UserEvent::Title(format!("Streamy: {}  ·  {title}", self.server)));
             }
 
             let n = match self.link.recv(&mut buf) {
@@ -494,21 +494,23 @@ impl Stats {
         }
     }
 
-    fn tick(&mut self, now: u64, clock: &Clock) -> Option<String> {
+    /// Once a second: the full stats line for the console, and the short one for the title bar.
+    fn tick(&mut self, now: u64, clock: &Clock) -> Option<(String, String)> {
         let elapsed = now - self.window_start;
         if elapsed < SEC {
             return None;
         }
         let lat = self.latency.summary();
         let dec = self.decode.summary();
+        let mbps = self.bytes as f64 * 8.0 / elapsed as f64 * 1e3;
+        let rtt = clock.recent_rtt().map_or(0.0, |r| ms(r as i64));
+        let title = format!("{} fps  ·  {mbps:.0} Mbps  ·  rtt {rtt:.0} ms", self.frames);
         let mut line = format!(
-            "{} fps  {:.0} Mbps  capture→decoded {:.1} ms (p99 {:.1})  decode {:.1} ms  rtt {:.1} ms",
+            "{} fps  {mbps:.0} Mbps  capture→decoded {:.1} ms (p99 {:.1})  decode {:.1} ms  rtt {rtt:.1} ms",
             self.frames,
-            self.bytes as f64 * 8.0 / elapsed as f64 * 1e3,
             ms(lat.p50),
             ms(lat.p99),
             ms(dec.p50),
-            clock.recent_rtt().map_or(0.0, |r| ms(r as i64)),
         );
         if self.lost + self.dropped + self.errors > 0 {
             line += &format!("  lost {} dropped {} errors {}", self.lost, self.dropped, self.errors);
@@ -517,6 +519,6 @@ impl Stats {
             line += &format!("  fec-repaired {}", self.repaired);
         }
         *self = Stats { window_start: now, ..Stats::new() };
-        Some(line)
+        Some((line, title))
     }
 }

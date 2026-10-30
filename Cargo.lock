@@ -575,7 +575,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decodebench"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "clap",
  "hevc",
@@ -800,7 +800,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hevc"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "if-addrs"
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "netprobe"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "clap",
  "proto",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "quick-xml"
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "secure"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "getrandom 0.3.4",
  "proto",
@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "streamy-client"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "clap",
  "cpal",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "streamy-server"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "clap",
  "hevc",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "timing"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "tiny-skia"
@@ -2164,7 +2164,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "transport"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "proto",
  "reed-solomon-simd",
@@ -2227,7 +2227,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videotoolbox"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "walkdir"
@@ -2756,7 +2756,7 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
 name = "xfer"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "xkbcommon-dl"

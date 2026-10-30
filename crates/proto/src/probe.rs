@@ -155,6 +155,6 @@ mod tests {
     fn rejects_garbage() {
         assert_eq!(Msg::decode(b""), None);
         assert_eq!(Msg::decode(b"XX\x01"), None);
-        assert_eq!(Msg::decode(b"SY\x02\x00"), None);
+        assert_eq!(Msg::decode(b"DW\x02\x00"), None);
     }
 }

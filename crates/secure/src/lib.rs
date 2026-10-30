@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use snow::{Builder, StatelessTransportState};
 
 const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
-const MAGIC: [u8; 2] = *b"SY";
+const MAGIC: [u8; 2] = *b"DW";
 pub const HS1: u8 = 0x20;
 pub const HS2: u8 = 0x21;
 pub const SEC: u8 = 0x22;
 const TAG: usize = 16;
-/// "SY", type, session id, counter.
+/// "DW", type, session id, counter.
 const HEADER: usize = 2 + 1 + 4 + 8;
 /// Bytes added to every datagram.
 pub const OVERHEAD: usize = HEADER + TAG;
@@ -32,7 +32,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Error::BadKey => "not a valid pairing key (expected sy1- followed by 64 hex digits)",
+            Error::BadKey => "not a valid pairing key (expected dw1- followed by 64 hex digits)",
             Error::Rejected => "handshake rejected",
             Error::Crypto => "crypto error",
         })
@@ -41,7 +41,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The 32-byte pairing key, written `sy1-<64 hex digits>`.
+/// The 32-byte pairing key, written `dw1-<64 hex digits>`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Key([u8; 32]);
 
@@ -53,7 +53,7 @@ impl Key {
     }
 
     pub fn parse(s: &str) -> Result<Key, Error> {
-        let hex = s.trim().strip_prefix("sy1-").ok_or(Error::BadKey)?;
+        let hex = s.trim().strip_prefix("dw1-").ok_or(Error::BadKey)?;
         if hex.len() != 64 || !hex.is_ascii() {
             return Err(Error::BadKey);
         }
@@ -67,7 +67,7 @@ impl Key {
 
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("sy1-")?;
+        f.write_str("dw1-")?;
         self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
     }
 }
@@ -295,7 +295,7 @@ mod tests {
         let k = Key::generate();
         assert_eq!(Key::parse(&k.to_string()).unwrap(), k);
         assert_eq!(Key::parse(&format!("  {k}\n")).unwrap(), k);
-        for bad in ["", "sy1-", "sy1-zz", &format!("sy2-{}", &k.to_string()[4..]), &k.to_string()[..40], &format!("{k}00")] {
+        for bad in ["", "dw1-", "dw1-zz", &format!("dw2-{}", &k.to_string()[4..]), &k.to_string()[..40], &format!("{k}00")] {
             assert_eq!(Key::parse(bad), Err(Error::BadKey), "{bad}");
         }
         assert_eq!(format!("{k:?}"), "Key(..)");

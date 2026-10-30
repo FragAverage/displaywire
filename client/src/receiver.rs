@@ -115,9 +115,9 @@ struct Receiver {
     mic_seq: u32,
     /// Chunks sent and peak level since the last report, and when that was.
     mic_stats: (u32, i16, u64),
-    /// `STREAMY_SIM_LOSS=<percent>`: drop that share of incoming video packets, to test recovery.
+    /// `DISPLAYWIRE_SIM_LOSS=<percent>`: drop that share of incoming video packets, to test recovery.
     sim_loss: Option<SimLoss>,
-    /// `STREAMY_TRACE=file`: one CSV line per decoded frame, for timing analysis.
+    /// `DISPLAYWIRE_TRACE=file`: one CSV line per decoded frame, for timing analysis.
     trace: Option<std::io::BufWriter<std::fs::File>>,
 }
 
@@ -147,12 +147,12 @@ impl Receiver {
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
             telemetry,
-            sim_loss: std::env::var("STREAMY_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
+            sim_loss: std::env::var("DISPLAYWIRE_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
             mic: None,
             mic_seq: 0,
             mic_stats: (0, 0, 0),
             audio: audio::Player::new().map_err(|e| eprintln!("audio disabled: {e}")).ok(),
-            trace: std::env::var_os("STREAMY_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
+            trace: std::env::var_os("DISPLAYWIRE_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
                 use std::io::Write;
                 let _ = writeln!(f, "frame,keyframe,bytes,capture_ns,decoded_ns,decode_ns");
                 std::io::BufWriter::new(f)
@@ -236,7 +236,7 @@ impl Receiver {
             if !alive {
                 if !ever_connected && now - begin > 5 * SEC {
                     return Err(format!(
-                        "no reply from {}: is streamy-server running, is udp/{} allowed through its firewall, and is the pairing key right?",
+                        "no reply from {}: is displaywire-server running, is udp/{} allowed through its firewall, and is the pairing key right?",
                         self.server,
                         self.server.port()
                     ));
@@ -316,7 +316,7 @@ impl Receiver {
                     line += &format!("  {}", p.summary());
                 }
                 println!("{line}");
-                let _ = self.proxy.send_event(UserEvent::Title(format!("Streamy: {}  ·  {title}", self.server)));
+                let _ = self.proxy.send_event(UserEvent::Title(format!("DisplayWire: {}  ·  {title}", self.server)));
             }
 
             let n = match self.link.recv(&mut buf) {

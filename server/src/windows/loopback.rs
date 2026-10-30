@@ -62,14 +62,14 @@ impl Loopback {
     /// Captures every app's audio (but not our own, which includes the client's microphone being
     /// played out), whatever output device each one uses. Falls back to the default output's
     /// loopback where Windows doesn't offer that (before Windows 10 2004), or with
-    /// `STREAMY_DEVICE_LOOPBACK=1`.
+    /// `DISPLAYWIRE_DEVICE_LOOPBACK=1`.
     pub fn open() -> Res<Loopback> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ctx("MMDeviceEnumerator")?;
             let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ctx("no default audio output")?;
             let pin = Self::pin_engine_period(&device).map_err(|e| println!("audio: can't shorten the engine period ({e}); capture will be ~10 ms behind")).ok();
-            if std::env::var_os("STREAMY_DEVICE_LOOPBACK").is_none() {
+            if std::env::var_os("DISPLAYWIRE_DEVICE_LOOPBACK").is_none() {
                 match Self::process_client() {
                     Ok(client) => return Self::start(client, pin, "audio: capturing every app's output (process loopback)"),
                     Err(e) => println!("audio: process loopback unavailable ({e}); using the default output instead"),

@@ -26,11 +26,11 @@ impl Link {
 pub fn default_key_path() -> PathBuf {
     #[cfg(windows)]
     {
-        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("Streamy").join("key")
+        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("DisplayWire").join("key")
     }
     #[cfg(not(windows))]
     {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config/streamy/key")
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config/displaywire/key")
     }
 }
 

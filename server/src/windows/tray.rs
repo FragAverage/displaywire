@@ -122,13 +122,13 @@ unsafe fn run(shared: Arc<Shared>) {
             println!("tray: no module handle");
             return;
         };
-        let class = w!("StreamyTray");
+        let class = w!("DisplayWireTray");
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: module.into(), lpszClassName: class, ..Default::default() };
         if RegisterClassW(&wc) == 0 {
             println!("tray: can't register the window class: {}", windows::core::Error::from_thread());
             return;
         }
-        let hwnd = match CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("Streamy"), WS_POPUP, 0, 0, 0, 0, None, None, Some(module.into()), None) {
+        let hwnd = match CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("DisplayWire"), WS_POPUP, 0, 0, 0, 0, None, None, Some(module.into()), None) {
             Ok(h) => h,
             Err(e) => {
                 println!("tray: can't create the window: {e}");
@@ -168,9 +168,9 @@ fn tooltip(st: &State) -> String {
         Some(link) => {
             let fps = st.shared.fps.load(Relaxed);
             let mbps = st.shared.mbps_x10.load(Relaxed) as f32 / 10.0;
-            format!("Streamy Server\nConnected: {}\n{fps} fps, {mbps:.0} Mbps", link.addr.ip())
+            format!("DisplayWire Server\nConnected: {}\n{fps} fps, {mbps:.0} Mbps", link.addr.ip())
         }
-        None => "Streamy Server\nWaiting for a client".to_string(),
+        None => "DisplayWire Server\nWaiting for a client".to_string(),
     }
 }
 
@@ -258,7 +258,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_BALLOON => {
                 if let Some(text) = BALLOON.lock().unwrap().take() {
                     let mut nid = data(hwnd, NIF_INFO);
-                    nid.szInfoTitle = wide("Streamy");
+                    nid.szInfoTitle = wide("DisplayWire");
                     nid.szInfo = wide(&text);
                     nid.dwInfoFlags = NIIF_INFO;
                     let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);

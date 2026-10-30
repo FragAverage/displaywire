@@ -1,7 +1,7 @@
-//! streamy-client: receives the server's HEVC stream and shows it in a window.
+//! displaywire-client: receives the server's HEVC stream and shows it in a window.
 //!
-//!   streamy-client <server-ip>
-//!   streamy-client                # or Streamy.app: asks for the server
+//!   displaywire-client <server-ip>
+//!   displaywire-client                # or DisplayWire.app: asks for the server
 
 #[cfg(target_os = "macos")]
 mod audio;
@@ -32,7 +32,7 @@ mod transfer;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("streamy-client currently runs on macOS only");
+    eprintln!("displaywire-client currently runs on macOS only");
 }
 
 #[cfg(target_os = "macos")]
@@ -66,7 +66,7 @@ mod app {
     use crate::{dialog, display, input, keys, menu, overlay, receiver, settings, transfer};
 
     #[derive(Parser)]
-    #[command(about = "View a streamy server's screen")]
+    #[command(about = "View a displaywire server's screen")]
     pub struct Cli {
         /// Server address, `host` or `host:port`. Asked for in a dialog if omitted.
         server: Option<String>,
@@ -195,13 +195,13 @@ mod app {
                     key
                 }
                 None => keys::load(server).ok_or_else(|| {
-                    format!("no pairing key for {server}: get it from the PC (streamy-server --show-key) and run  streamy-client --set-key {server} <key>")
+                    format!("no pairing key for {server}: get it from the PC (displaywire-server --show-key) and run  displaywire-client --set-key {server} <key>")
                 })?,
             };
             let link = Arc::new(Link::new(sock, key));
             let input = Arc::new(input::Sender::new(link.clone()));
             let attrs = Window::default_attributes()
-                .with_title(format!("Streamy: {server}"))
+                .with_title(format!("DisplayWire: {server}"))
                 .with_inner_size(LogicalSize::new(1280.0, 720.0));
             let window = el.create_window(attrs).map_err(|e| format!("create window: {e}"))?;
             let layer = display::Layer::attach(&window);

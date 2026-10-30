@@ -1,4 +1,4 @@
-# Streamy — Plan
+# DisplayWire — Plan
 
 Low-latency game streaming. Windows server (NVIDIA) → macOS client (M5 Max). LAN + Tailscale.
 Rust throughout.

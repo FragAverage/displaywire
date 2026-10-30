@@ -1,4 +1,4 @@
-//! Streaming protocol between `streamy-server` and `streamy-client`.
+//! Streaming protocol between `displaywire-server` and `displaywire-client`.
 
 use crate::{Reader, Writer};
 

@@ -1,8 +1,8 @@
-//! streamy-server: captures the desktop, encodes HEVC and streams it to one
+//! displaywire-server: captures the desktop, encodes HEVC and streams it to one
 //! client over UDP.
 //!
-//!   streamy-server                       # Windows: stream the primary monitor
-//!   streamy-server --file clip.h265      # any OS: loop an Annex B file (testing)
+//!   displaywire-server                       # Windows: stream the primary monitor
+//!   displaywire-server --file clip.h265      # any OS: loop an Annex B file (testing)
 
 mod audio;
 mod auth;
@@ -46,7 +46,7 @@ impl Injector {
 }
 
 #[derive(Parser)]
-#[command(about = "Stream this machine's screen to a streamy client")]
+#[command(about = "Stream this machine's screen to a displaywire client")]
 pub struct Cli {
     #[arg(long, default_value_t = 9000)]
     port: u16,
@@ -243,7 +243,7 @@ fn service_command(cli: &Cli, key_path: &std::path::Path) -> Option<Result<(), S
             Err(e) => return Some(Err(e)),
         };
         println!("{}pairing key: {key}", if created { "created " } else { "" });
-        println!("Enter it once in Streamy on each client (or: streamy-client --set-key <this PC> <key>).");
+        println!("Enter it once in DisplayWire on each client (or: displaywire-client --set-key <this PC> <key>).");
         let args: Vec<_> = std::env::args_os().skip(1).filter(|a| a != "--install-service").collect();
         Some(service::install(&args))
     } else if cli.uninstall_service {
@@ -288,7 +288,7 @@ fn run(cli: Cli) -> Result<(), String> {
         let announcement = (!cli.no_discovery).then(|| proto::discover::Announcement {
             port: cli.port,
             version: VERSION,
-            name: std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "streamy-server".into()),
+            name: std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "displaywire-server".into()),
         });
         let transfers = transfer::Transfers::new(transfer::Options {
             clipboard: !cli.no_clipboard,
@@ -313,7 +313,7 @@ fn run(cli: Cli) -> Result<(), String> {
             audio::spawn(sock.try_clone().map_err(|e| e.to_string())?, shared.clone(), source);
         }
     }
-    println!("streamy-server on udp/{}, waiting for a client", cli.port);
+    println!("displaywire-server on udp/{}, waiting for a client", cli.port);
 
     let pace_ns_per_byte = 8e3 / cli.pace_mbps;
     let mut frame_id = 0u32;

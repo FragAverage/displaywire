@@ -37,7 +37,7 @@ define_class!(
     // SAFETY: NSObject has no subclassing requirements and this class has no ivars or Drop.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "StreamyMenuTarget"]
+    #[name = "DisplayWireMenuTarget"]
     struct Target;
 
     impl Target {
@@ -122,16 +122,16 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
 
     let app_menu = submenu(
         mtm,
-        "Streamy",
+        "DisplayWire",
         vec![
-            item(mtm, "About Streamy", Some(sel!(orderFrontStandardAboutPanel:)), "", none, None),
+            item(mtm, "About DisplayWire", Some(sel!(orderFrontStandardAboutPanel:)), "", none, None),
             item(mtm, "Settings…", Some(sel!(settings:)), ",", cmd, Some(t)),
             sep(),
-            item(mtm, "Hide Streamy", Some(sel!(hide:)), "h", cmd, None),
+            item(mtm, "Hide DisplayWire", Some(sel!(hide:)), "h", cmd, None),
             item(mtm, "Hide Others", Some(sel!(hideOtherApplications:)), "h", cmd | NSEventModifierFlags::Option, None),
             item(mtm, "Show All", Some(sel!(unhideAllApplications:)), "", none, None),
             sep(),
-            item(mtm, "Quit Streamy", Some(sel!(terminate:)), "q", cmd, None),
+            item(mtm, "Quit DisplayWire", Some(sel!(terminate:)), "q", cmd, None),
         ],
     );
     let connection = submenu(

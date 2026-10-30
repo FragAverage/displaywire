@@ -1,4 +1,4 @@
-# Streamy authentication and encryption (protocol v5)
+# DisplayWire authentication and encryption (protocol v5)
 
 Status: implemented in `crates/secure` and used by the server and client (protocol
 v5). Replaces the unauthenticated protocol of v4 and earlier.
@@ -22,16 +22,16 @@ pairing UI, certificate-style identity for the server. See "Later".
 
 ## Pairing key
 
-32 random bytes, written as `sy1-` plus 64 hex characters.
+32 random bytes, written as `dw1-` plus 64 hex characters.
 
 - Server: created on first run or by `--install-service`, stored in
-  `C:\ProgramData\Streamy\key` readable only by SYSTEM and Administrators.
-  `streamy-server --show-key` prints it, `--new-key` replaces it (which
+  `C:\ProgramData\DisplayWire\key` readable only by SYSTEM and Administrators.
+  `displaywire-server --show-key` prints it, `--new-key` replaces it (which
   disconnects and revokes every client).
-- Client: `Streamy.app` asks for it in the connect dialog the first time (and
+- Client: `DisplayWire.app` asks for it in the connect dialog the first time (and
   whenever the server rejects it). It is kept per server address in
-  `~/Library/Application Support/Streamy/keys/` with mode 0600.
-  `streamy-client --set-key <server> <key>` stores one without the dialog.
+  `~/Library/Application Support/DisplayWire/keys/` with mode 0600.
+  `displaywire-client --set-key <server> <key>` stores one without the dialog.
 
 Anyone holding the key can connect. Treat it like a password.
 
@@ -43,9 +43,9 @@ authentication (only a holder of the key can produce a valid message, either
 way), forward secrecy, and two directional keys.
 
 ```
-client -> server   HS1: "SY" 0x20 | noise msg 1
+client -> server   HS1: "DW" 0x20 | noise msg 1
                         payload (encrypted): version u16, caps u8, unix_ms u64
-server -> client   HS2: "SY" 0x21 | noise msg 2
+server -> client   HS2: "DW" 0x21 | noise msg 2
                         payload (encrypted): version u16, session u32
 ```
 
@@ -67,7 +67,7 @@ server -> client   HS2: "SY" 0x21 | noise msg 2
 After the handshake every datagram is:
 
 ```
-"SY" | 0x22 | session u32 | counter u64 | ciphertext | tag(16)
+"DW" | 0x22 | session u32 | counter u64 | ciphertext | tag(16)
 ```
 
 - Plaintext is a message as `Msg::encode` writes it. The header is sent in the

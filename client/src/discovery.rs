@@ -1,4 +1,4 @@
-//! Finds streamy servers on the local network: broadcasts a query (see
+//! Finds displaywire servers on the local network: broadcasts a query (see
 //! `proto::discover`) and collects the answers.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};

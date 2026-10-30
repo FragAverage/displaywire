@@ -1,11 +1,11 @@
-//! Streamy wire format. All integers are little-endian.
+//! DisplayWire wire format. All integers are little-endian.
 
 pub mod discover;
 pub mod probe;
 pub mod stream;
 
 /// First two bytes of every datagram.
-pub const MAGIC: [u8; 2] = *b"SY";
+pub const MAGIC: [u8; 2] = *b"DW";
 
 /// Largest datagram we send. Fits Tailscale/WireGuard's 1280-byte MTU after
 /// IPv6 (40) + UDP (8) headers, so nothing ever fragments.

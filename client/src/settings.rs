@@ -1,4 +1,4 @@
-//! The user's stream settings, kept in `~/Library/Application Support/Streamy/settings`
+//! The user's stream settings, kept in `~/Library/Application Support/DisplayWire/settings`
 //! (one `key=value` per line). Most go to the server; volume and mute are local.
 
 use proto::stream::Settings;

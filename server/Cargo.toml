@@ -1,5 +1,5 @@
 [package]
-name = "streamy-server"
+name = "displaywire-server"
 version.workspace = true
 edition.workspace = true
 

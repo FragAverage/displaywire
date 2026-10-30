@@ -28,5 +28,5 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p streamy-server -p netprobe -- -D warnings
+      - run: cargo clippy -p displaywire-server -p netprobe -- -D warnings
       - run: cargo test -p proto -p transport -p hevc -p timing

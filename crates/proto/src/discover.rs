@@ -83,9 +83,9 @@ mod tests {
 
     #[test]
     fn rejects_other_datagrams() {
-        assert_eq!(parse_query(b"SY\x30"), None);
+        assert_eq!(parse_query(b"DW\x30"), None);
         assert_eq!(parse_query(&[0u8; QUERY_LEN]), None);
-        assert_eq!(parse_reply(b"SY\x31short"), None);
+        assert_eq!(parse_reply(b"DW\x31short"), None);
         let q = query([0; 8]);
         assert_eq!(parse_reply(&q), None);
     }

@@ -1,7 +1,7 @@
 //! Clipboard sharing and file upload: the server's side of `xfer`.
 //!
 //! Text copied on either machine appears on the other. Files sent from the
-//! client are saved in the logged-in user's `Downloads\Streamy` folder.
+//! client are saved in the logged-in user's `Downloads\DisplayWire` folder.
 //! Everything arrives through the authenticated session; `--no-files` and
 //! `--no-clipboard` turn the two features off.
 
@@ -258,7 +258,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    //! Off Windows (the `--file` test mode): files go to `~/Downloads/Streamy`, no clipboard.
+    //! Off Windows (the `--file` test mode): files go to `~/Downloads/DisplayWire`, no clipboard.
     use std::io;
     use std::path::PathBuf;
 
@@ -273,7 +273,7 @@ mod platform {
     }
     pub fn uploads_dir() -> io::Result<PathBuf> {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no home directory"))?;
-        Ok(PathBuf::from(home).join("Downloads/Streamy"))
+        Ok(PathBuf::from(home).join("Downloads/DisplayWire"))
     }
     pub fn as_user<T>(f: impl FnOnce() -> T) -> T {
         f()
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn unique_names_count_up() {
-        let dir = std::env::temp_dir().join(format!("streamy-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("displaywire-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(unique_path(&dir, "a.txt"), dir.join("a.txt"));
         std::fs::write(dir.join("a.txt"), "x").unwrap();

@@ -1,4 +1,4 @@
-//! Pairing keys, kept in `~/Library/Application Support/Streamy/keys`, one file
+//! Pairing keys, kept in `~/Library/Application Support/DisplayWire/keys`, one file
 //! per server address (mode 0600) plus `default`, the key used last. See
 //! `docs/AUTH.md`.
 
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use secure::Key;
 
 fn dir() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/Streamy/keys"))
+    Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/DisplayWire/keys"))
 }
 
 /// The server's address without a port, as a file name.

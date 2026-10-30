@@ -6,8 +6,8 @@
 //! into the active session (the way Sunshine does it) and restarts it when
 //! that session changes.
 //!
-//!   streamy-server --install-service [server options]   # as administrator
-//!   streamy-server --uninstall-service
+//!   displaywire-server --install-service [server options]   # as administrator
+//!   displaywire-server --uninstall-service
 
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStrExt;
@@ -39,7 +39,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
-const NAME: &str = "StreamyServer";
+const NAME: &str = "DisplayWireServer";
 const SEC_MS: u32 = 1000;
 /// A child that exits sooner than this after starting is retried only after `RESTART_DELAY_MS`.
 const RESTART_DELAY_MS: u64 = 2000;
@@ -64,7 +64,7 @@ fn sc(args: &[&str]) -> Result<String, String> {
 }
 
 fn log_path() -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("Streamy");
+    let dir = std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("DisplayWire");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("server.log")
 }
@@ -81,16 +81,16 @@ pub fn install(args: &[OsString]) -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(1000));
     let _ = sc(&["delete", NAME]);
     std::thread::sleep(std::time::Duration::from_millis(500));
-    sc(&["create", NAME, "binPath=", &bin, "start=", "auto", "DisplayName=", "Streamy Server"])
+    sc(&["create", NAME, "binPath=", &bin, "start=", "auto", "DisplayName=", "DisplayWire Server"])
         .map_err(|e| format!("{e}\n(run this from an administrator terminal)"))?;
-    let _ = sc(&["description", NAME, "Streams this PC's screen to a Streamy client, including UAC prompts and the lock screen."]);
+    let _ = sc(&["description", NAME, "Streams this PC's screen to a DisplayWire client, including UAC prompts and the lock screen."]);
     let _ = sc(&["failure", NAME, "reset=", "86400", "actions=", "restart/5000"]);
     // udp/9000 and friends: allow the program itself.
     let _ = Command::new("netsh")
-        .args(["advfirewall", "firewall", "delete", "rule", "name=Streamy Server"])
+        .args(["advfirewall", "firewall", "delete", "rule", "name=DisplayWire Server"])
         .output();
     let _ = Command::new("netsh")
-        .args(["advfirewall", "firewall", "add", "rule", "name=Streamy Server", "dir=in", "action=allow", "protocol=UDP"])
+        .args(["advfirewall", "firewall", "add", "rule", "name=DisplayWire Server", "dir=in", "action=allow", "protocol=UDP"])
         .arg(format!("program={}", exe.display()))
         .output();
     sc(&["start", NAME])?;
@@ -103,7 +103,7 @@ pub fn uninstall() -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(1000));
     sc(&["delete", NAME]).map_err(|e| format!("{e}\n(run this from an administrator terminal)"))?;
     let _ = Command::new("netsh")
-        .args(["advfirewall", "firewall", "delete", "rule", "name=Streamy Server"])
+        .args(["advfirewall", "firewall", "delete", "rule", "name=DisplayWire Server"])
         .output();
     println!("service {NAME} removed");
     Ok(())
@@ -155,7 +155,7 @@ unsafe extern "system" fn handler(control: u32, _event: u32, _data: *mut c_void,
 }
 
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
-    let Ok(status) = (unsafe { RegisterServiceCtrlHandlerExW(w!("StreamyServer"), Some(handler), None) }) else {
+    let Ok(status) = (unsafe { RegisterServiceCtrlHandlerExW(w!("DisplayWireServer"), Some(handler), None) }) else {
         return;
     };
     STATUS.store(status.0 as isize, Relaxed);

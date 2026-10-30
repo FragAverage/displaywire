@@ -17,20 +17,20 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: Build universal Streamy.app
+      - name: Build universal DisplayWire.app
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release -p streamy-client --target $t
+            cargo build --release -p displaywire-client --target $t
           done
           mkdir -p dist
-          lipo -create -output dist/streamy-client \
-            target/aarch64-apple-darwin/release/streamy-client target/x86_64-apple-darwin/release/streamy-client
-          scripts/bundle-mac.sh dist/streamy-client dist
-          ditto -c -k --keepParent dist/Streamy.app dist/Streamy-macos.zip
+          lipo -create -output dist/displaywire-client \
+            target/aarch64-apple-darwin/release/displaywire-client target/x86_64-apple-darwin/release/displaywire-client
+          scripts/bundle-mac.sh dist/displaywire-client dist
+          ditto -c -k --keepParent dist/DisplayWire.app dist/DisplayWire-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: client
-          path: dist/Streamy-macos.zip
+          path: dist/DisplayWire-macos.zip
 
   server:
     runs-on: windows-2025
@@ -41,14 +41,14 @@ jobs:
       - name: Build server
         shell: pwsh
         run: |
-          cargo build --release -p streamy-server -p netprobe
-          New-Item -ItemType Directory dist/streamy-server-windows | Out-Null
-          Copy-Item target/release/streamy-server.exe, target/release/netprobe.exe, README.md dist/streamy-server-windows/
-          Compress-Archive dist/streamy-server-windows dist/streamy-server-windows.zip
+          cargo build --release -p displaywire-server -p netprobe
+          New-Item -ItemType Directory dist/displaywire-server-windows | Out-Null
+          Copy-Item target/release/displaywire-server.exe, target/release/netprobe.exe, README.md dist/displaywire-server-windows/
+          Compress-Archive dist/displaywire-server-windows dist/displaywire-server-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: server
-          path: dist/streamy-server-windows.zip
+          path: dist/displaywire-server-windows.zip
 
   publish:
     needs: [client, server]
@@ -63,5 +63,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$GITHUB_REF_NAME" Streamy-macos.zip streamy-server-windows.zip
+          gh release create "$GITHUB_REF_NAME" DisplayWire-macos.zip displaywire-server-windows.zip
           --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

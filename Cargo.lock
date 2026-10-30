@@ -611,6 +611,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "displaywire-client"
+version = "0.5.0"
+dependencies = [
+ "clap",
+ "cpal",
+ "hevc",
+ "if-addrs",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "proto",
+ "rtrb",
+ "secure",
+ "timing",
+ "transport",
+ "videotoolbox",
+ "winit",
+ "xfer",
+]
+
+[[package]]
+name = "displaywire-server"
+version = "0.5.0"
+dependencies = [
+ "clap",
+ "hevc",
+ "moq-nvenc",
+ "proto",
+ "rtrb",
+ "secure",
+ "timing",
+ "transport",
+ "windows",
+ "windows-core",
+ "xfer",
+]
+
+[[package]]
 name = "dlib"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1955,47 +1996,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "streamy-client"
-version = "0.5.0"
-dependencies = [
- "clap",
- "cpal",
- "hevc",
- "if-addrs",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
- "proto",
- "rtrb",
- "secure",
- "timing",
- "transport",
- "videotoolbox",
- "winit",
- "xfer",
-]
-
-[[package]]
-name = "streamy-server"
-version = "0.5.0"
-dependencies = [
- "clap",
- "hevc",
- "moq-nvenc",
- "proto",
- "rtrb",
- "secure",
- "timing",
- "transport",
- "windows",
- "windows-core",
- "xfer",
 ]
 
 [[package]]

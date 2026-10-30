@@ -14,8 +14,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{PCWSTR, w};
 
-const SERVICE: &str = "StreamyServer";
-const UNINSTALL_KEY: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\StreamyServer";
+const SERVICE: &str = "DisplayWireServer";
+const UNINSTALL_KEY: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\DisplayWireServer";
 
 pub fn is_installed() -> bool {
     Command::new("sc").args(["query", SERVICE]).output().is_ok_and(|o| o.status.success())
@@ -45,7 +45,7 @@ fn relaunch_elevated(args: &str) -> Result<(), String> {
 }
 
 fn install_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into())).join("Streamy")
+    PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into())).join("DisplayWire")
 }
 
 fn run(cmd: &str, args: &[&str]) {
@@ -55,7 +55,7 @@ fn run(cmd: &str, args: &[&str]) {
 /// The elevated install: needs administrator rights.
 pub fn setup() -> Result<(), String> {
     let dir = install_dir();
-    let dest = dir.join("streamy-server.exe");
+    let dest = dir.join("displaywire-server.exe");
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     if me != dest {
@@ -72,9 +72,9 @@ pub fn setup() -> Result<(), String> {
     let version = env!("CARGO_PKG_VERSION");
     let uninstall = format!("\"{}\" --uninstall --pause", dest.display());
     let entries: [(&str, &str, &str); 7] = [
-        ("DisplayName", "REG_SZ", "Streamy Server"),
+        ("DisplayName", "REG_SZ", "DisplayWire Server"),
         ("DisplayVersion", "REG_SZ", version),
-        ("Publisher", "REG_SZ", "Streamy"),
+        ("Publisher", "REG_SZ", "DisplayWire"),
         ("InstallLocation", "REG_SZ", &dir.display().to_string()),
         ("DisplayIcon", "REG_SZ", &dest.display().to_string()),
         ("UninstallString", "REG_SZ", &uninstall),
@@ -83,7 +83,7 @@ pub fn setup() -> Result<(), String> {
     for (name, ty, value) in entries {
         run("reg", &["add", UNINSTALL_KEY, "/v", name, "/t", ty, "/d", value, "/f"]);
     }
-    println!("\nStreamy Server is installed and running. To remove it: Settings > Apps > Installed apps, or --uninstall.");
+    println!("\nDisplayWire Server is installed and running. To remove it: Settings > Apps > Installed apps, or --uninstall.");
     Ok(())
 }
 
@@ -93,17 +93,17 @@ pub fn uninstall(purge: bool) -> Result<(), String> {
     run("sc", &["stop", SERVICE]);
     std::thread::sleep(std::time::Duration::from_millis(2000));
     run("sc", &["delete", SERVICE]);
-    run("netsh", &["advfirewall", "firewall", "delete", "rule", "name=Streamy Server"]);
+    run("netsh", &["advfirewall", "firewall", "delete", "rule", "name=DisplayWire Server"]);
     run("reg", &["delete", UNINSTALL_KEY, "/f"]);
     // This exe may be the one being deleted: finish the job from a helper once it has exited.
     let mut paths = vec![install_dir()];
     if purge {
-        paths.push(PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("Streamy"));
+        paths.push(PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("DisplayWire"));
     }
     let remove: Vec<String> = paths.iter().map(|p| format!("rmdir /s /q \"{}\"", p.display())).collect();
     // `ping` is the delay (`timeout` needs a console); raw_arg keeps cmd's own quoting intact.
     let _ = Command::new("cmd").raw_arg(format!("/c ping -n 4 127.0.0.1 >nul & {}", remove.join(" & "))).spawn();
-    println!("Streamy Server has been removed.{}", if purge { "" } else { " Its pairing key and logs were kept in ProgramData\\Streamy." });
+    println!("DisplayWire Server has been removed.{}", if purge { "" } else { " Its pairing key and logs were kept in ProgramData\\DisplayWire." });
     Ok(())
 }
 
@@ -122,9 +122,9 @@ pub fn interactive() -> bool {
     if !std::io::stdin().is_terminal() {
         return true; // started by the service or another program: just run
     }
-    println!("Streamy Server {}\n", env!("CARGO_PKG_VERSION"));
+    println!("DisplayWire Server {}\n", env!("CARGO_PKG_VERSION"));
     if is_installed() {
-        println!("Streamy Server is installed as a Windows service.");
+        println!("DisplayWire Server is installed as a Windows service.");
         println!("  u = uninstall it    k = show the pairing key    r = run a copy in this window instead    Enter = close");
         match ask("> ").as_str() {
             "u" => finish(if is_elevated() { uninstall(false) } else { relaunch_elevated("--uninstall --pause") }, false),
@@ -134,7 +134,7 @@ pub fn interactive() -> bool {
         }
         return false;
     }
-    println!("Streamy Server streams this PC's screen to your Mac. Installing it as a Windows service starts it with");
+    println!("DisplayWire Server streams this PC's screen to your Mac. Installing it as a Windows service starts it with");
     println!("Windows and lets it show UAC prompts and the login screen. It needs administrator permission.\n");
     match ask("Install now? [Y]es / [n]o / [r]un once in this window: ").as_str() {
         "" | "y" | "yes" => {

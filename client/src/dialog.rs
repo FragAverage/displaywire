@@ -1,4 +1,4 @@
-//! Native prompts for when the client runs as Streamy.app, with no terminal.
+//! Native prompts for when the client runs as DisplayWire.app, with no terminal.
 
 use std::path::PathBuf;
 
@@ -44,13 +44,13 @@ pub fn ask_server(problem: Option<&str>) -> Option<Entered> {
     let found = discovery::browse(std::time::Duration::from_millis(700));
 
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(ns_string!("Connect to Streamy"));
+    alert.setMessageText(ns_string!("Connect to DisplayWire"));
     let mut info = String::new();
     if let Some(p) = problem {
         info += &format!("{p}\n\n");
         alert.setAlertStyle(NSAlertStyle::Warning);
     }
-    info += "Address of the PC running streamy-server.";
+    info += "Address of the PC running displaywire-server.";
     if !found.is_empty() {
         let list: Vec<String> = found.iter().map(|f| format!("{} ({})", f.name, f.address)).collect();
         info += &format!("\nFound on this network: {}", list.join(", "));
@@ -85,7 +85,7 @@ pub fn ask_server(problem: Option<&str>) -> Option<Entered> {
     key.setPlaceholderString(Some(if saved {
         ns_string!("Saved: leave empty to use it")
     } else {
-        ns_string!("sy1-… from streamy-server --show-key")
+        ns_string!("dw1-… from displaywire-server --show-key")
     }));
     view.addSubview(&key);
     alert.setAccessoryView(Some(&view));
@@ -204,7 +204,7 @@ pub fn show_shortcuts() {
          ⌃⌥S    Show or hide the stats graph\n\
          ⌃⌥V    Microphone on or off (off at every start)\n\
          ⌃⌘F    Full screen\n\
-         ⌘Q     Quit Streamy\n\n\
+         ⌘Q     Quit DisplayWire\n\n\
          Everything else goes to the PC while this window has focus. The ⌘ key is the Windows key there."
     ));
     alert.addButtonWithTitle(ns_string!("OK"));
@@ -212,10 +212,10 @@ pub fn show_shortcuts() {
     alert.runModal();
 }
 
-/// A small settings file in `~/Library/Application Support/Streamy`.
+/// A small settings file in `~/Library/Application Support/DisplayWire`.
 pub fn state_file(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Streamy").join(name))
+    Some(PathBuf::from(home).join("Library/Application Support/DisplayWire").join(name))
 }
 
 /// Servers connected to before, most recent first.

@@ -95,7 +95,7 @@ fn user_token() -> io::Result<HANDLE> {
     Ok(token)
 }
 
-/// `Downloads\Streamy` of the logged-in user.
+/// `Downloads\DisplayWire` of the logged-in user.
 pub fn uploads_dir() -> io::Result<PathBuf> {
     let token = user_token()?;
     let path = unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_CREATE, Some(token)) };
@@ -103,7 +103,7 @@ pub fn uploads_dir() -> io::Result<PathBuf> {
     let path = path.map_err(io::Error::other)?;
     let dir = PathBuf::from(unsafe { path.to_string() }.map_err(io::Error::other)?);
     unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(path.0 as *const _)) };
-    Ok(dir.join("Streamy"))
+    Ok(dir.join("DisplayWire"))
 }
 
 /// Runs `f` as the logged-in user, so what it creates is theirs.

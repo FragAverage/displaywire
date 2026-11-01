@@ -26,6 +26,8 @@ pairing UI, certificate-style identity for the server. See "Later".
 
 - Server: created on first run or by `--install-service`, stored in
   `C:\ProgramData\DisplayWire\key` readable only by SYSTEM and Administrators.
+  The server locks that folder down to them before using it, and refuses a
+  key file owned by anyone else, so a standard user can't plant their own key.
   `displaywire-server --show-key` prints it, `--new-key` replaces it (which
   disconnects and revokes every client).
 - Client: `DisplayWire.app` asks for it in the connect dialog the first time (and

@@ -194,17 +194,19 @@ impl Sink for FileSink {
         self.file.write_all(data)
     }
 
+    // Renaming and deleting happen as the user too: as SYSTEM, a junction in
+    // their folder could turn these into moving or deleting any file.
     fn finish(self: Box<Self>) -> io::Result<()> {
         let FileSink { mut file, part, dest } = *self;
         file.flush()?;
         drop(file);
-        std::fs::rename(&part, &dest)
+        platform::as_user(|| std::fs::rename(&part, &dest))
     }
 
     fn abort(self: Box<Self>) {
         let FileSink { file, part, .. } = *self;
         drop(file);
-        let _ = std::fs::remove_file(part);
+        let _ = platform::as_user(|| std::fs::remove_file(&part));
     }
 }
 
@@ -275,7 +277,7 @@ mod platform {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no home directory"))?;
         Ok(PathBuf::from(home).join("Downloads/DisplayWire"))
     }
-    pub fn as_user<T>(f: impl FnOnce() -> T) -> T {
+    pub fn as_user<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
         f()
     }
     pub fn notify(_: &str) {}

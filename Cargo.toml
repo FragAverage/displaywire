@@ -5,6 +5,11 @@ members = ["crates/*", "tools/*", "server", "client"]
 [workspace.package]
 edition = "2024"
 version = "0.5.0"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Low-latency game streaming from a Windows PC (NVIDIA) to a Mac"
+repository = "https://github.com/FragAverage/displaywire"
+publish = false
 
 [workspace.dependencies]
 proto = { path = "crates/proto" }

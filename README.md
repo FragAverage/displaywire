@@ -27,6 +27,7 @@ Download from the repo's Releases page:
 To publish a release, push a tag: `git tag v0.5.0 && git push origin v0.5.0`.
 
 ## Build (on the Mac)
+Needs Rust 1.88+, and for the server `cargo install cargo-xwin` plus LLVM (`brew install llvm`, for `llvm-lib`).
 ```
 cargo build --release                                                          # Mac client + tools
 cargo xwin build --release -p displaywire-server --target x86_64-pc-windows-msvc   # Windows server
@@ -156,3 +157,11 @@ target/release/displaywire-client 127.0.0.1
 | `crates/timing` | Clock, precise sleeps, percentiles |
 | `tools/netprobe` | Network jitter/loss measurement |
 | `tools/decodebench` | VideoToolbox decode latency benchmark |
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state otherwise,
+any contribution you submit for inclusion in this project, as defined in the
+Apache-2.0 license, is dual licensed as above, without any additional terms or
+conditions.

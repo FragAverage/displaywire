@@ -106,14 +106,20 @@ pub fn uploads_dir() -> io::Result<PathBuf> {
     Ok(dir.join("DisplayWire"))
 }
 
-/// Runs `f` as the logged-in user, so what it creates is theirs.
-pub fn as_user<T>(f: impl FnOnce() -> T) -> T {
-    let Ok(token) = user_token() else { return f() };
-    let impersonating = unsafe { ImpersonateLoggedOnUser(token) }.is_ok();
-    let result = f();
-    if impersonating {
-        let _ = unsafe { RevertToSelf() };
-    }
+/// Runs `f` as the logged-in user, so what it creates is theirs and it can
+/// only touch what they could. Never falls back to SYSTEM: the user controls
+/// these folders, and could point them anywhere with junctions.
+pub fn as_user<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let token = user_token()?;
+    let impersonated = unsafe { ImpersonateLoggedOnUser(token) };
+    let result = match impersonated {
+        Ok(()) => {
+            let result = f();
+            let _ = unsafe { RevertToSelf() };
+            result
+        }
+        Err(e) => Err(io::Error::other(format!("can't act as the logged-in user: {e}"))),
+    };
     let _ = unsafe { CloseHandle(token) };
     result
 }

@@ -65,7 +65,10 @@ fn sc(args: &[&str]) -> Result<String, String> {
 
 fn log_path() -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("DisplayWire");
-    let _ = std::fs::create_dir_all(&dir);
+    // Admins only, like the key next to it: the log names clients and may print a new key.
+    if let Err(e) = crate::auth::lock_dir(&dir) {
+        eprintln!("{e}");
+    }
     dir.join("server.log")
 }
 

@@ -15,13 +15,13 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 ## Blockers
 
 ### Legal and packaging
-- [ ] Add a `LICENSE` file (suggested: MIT OR Apache-2.0, the Rust norm; all dependencies are permissive).
-- [ ] Add `license`, `description`, `repository` and `rust-version` to `[workspace.package]`. Set `publish = false` so `proto`, `timing` and the other generic names never go to crates.io.
+- [x] Add a `LICENSE` file: dual MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`), noted in the README.
+- [x] Add `license`, `description`, `repository` and `rust-version` to `[workspace.package]`. Set `publish = false` so `proto`, `timing` and the other generic names never go to crates.io. MSRV 1.88, checked with `cargo +1.88 check`.
 - [ ] Check that NVIDIA's NVENC header licence (via `moq-nvenc`) fits the chosen licence.
 
 ### Security (Windows server, runs as SYSTEM)
-- [ ] **A standard user can plant the pairing key** (`server/src/auth.rs:38-66`). `load_or_create` trusts any existing file, and `protect()` shells out to `icacls` and ignores failure. Create `C:\ProgramData\DisplayWire` with a protected DACL (SYSTEM + Administrators) via `SetNamedSecurityInfoW`, verify owner/ACL on every load, and refuse to start otherwise.
-- [ ] **Uploads are renamed/deleted as SYSTEM in a user-controlled folder** (`server/src/transfer.rs:201`, `:207`). Junction + object-manager symlink → arbitrary file move/delete. Rename through the open handle (`SetFileInformationByHandle` + `FileRenameInfo`) or inside `as_user`; delete with `FILE_FLAG_DELETE_ON_CLOSE`.
+- [x] **A standard user can plant the pairing key** (`server/src/auth.rs:38-66`). `load_or_create` trusts any existing file, and `protect()` shells out to `icacls` and ignores failure. Create `C:\ProgramData\DisplayWire` with a protected DACL (SYSTEM + Administrators) via `SetNamedSecurityInfoW`, verify owner/ACL on every load, and refuse to start otherwise. Done: `auth::guard`, `auth::lock_dir`, `acl::owned_by_admins`.
+- [x] **Uploads are renamed/deleted as SYSTEM in a user-controlled folder** (`server/src/transfer.rs:201`, `:207`). Junction + object-manager symlink → arbitrary file move/delete. Rename through the open handle (`SetFileInformationByHandle` + `FileRenameInfo`) or inside `as_user`; delete with `FILE_FLAG_DELETE_ON_CLOSE`. Done: rename and delete run inside `as_user`.
 
 ### Personal info
 - [x] Scrub email, PC hostname, Tailscale IP and Claude co-author lines from git history.
@@ -36,8 +36,8 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 - [ ] Limit the firewall rule to `profile=private,domain remoteip=localsubnet` (plus the tailnet range) (`service.rs:92-95`).
 - [ ] Answer discovery only from private/local addresses (`main.rs:490-495`), and correct the "server stays silent" claim in `docs/AUTH.md`.
 - [ ] Bound the clipboard read to `GlobalSize(h) / 2` (`server/src/windows/shell.rs:48-51`).
-- [ ] Make `as_user` return an error instead of falling back to SYSTEM (`shell.rs:111-112`).
-- [ ] Never print the key from the service child (`main.rs:273`), and lock down the log folder ACL.
+- [x] Make `as_user` return an error instead of falling back to SYSTEM (`shell.rs:111-112`).
+- [ ] Never print the key from the service child (`main.rs:273`). (The log folder is now admin-only.)
 - [ ] Cap concurrent incoming transfers and their total size (`crates/xfer/src/endpoint.rs:80`, `lib.rs:408`).
 - [ ] Fix `quote()` for arguments ending in a backslash (`service.rs:56-58`).
 - [ ] Defence in depth: drop unneeded privileges from the SYSTEM child token (`service.rs:210-217`).

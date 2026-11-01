@@ -36,6 +36,7 @@ pub fn default_key_path() -> PathBuf {
 
 /// Reads the key, creating it first if there is none. Returns whether it was just created.
 pub fn load_or_create(path: &Path) -> Result<(Key, bool), String> {
+    guard(path)?;
     match std::fs::read_to_string(path) {
         Ok(text) => Key::parse(&text).map(|k| (k, false)).map_err(|e| format!("{}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_new(path).map(|k| (k, true)),
@@ -45,30 +46,128 @@ pub fn load_or_create(path: &Path) -> Result<(Key, bool), String> {
 
 /// Replaces the key. Every paired client stops working until it gets the new one.
 pub fn write_new(path: &Path) -> Result<Key, String> {
+    guard(path)?;
     let key = Key::generate();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e} (run as administrator, or use --key-file)", dir.display()))?;
     }
     // Written without the key readable by others first, then filled in.
     std::fs::write(path, "").map_err(|e| format!("write {}: {e}", path.display()))?;
-    protect(path);
+    protect(path)?;
     std::fs::write(path, format!("{key}\n")).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(key)
 }
 
+/// Before the default key is read or written, locks its folder down and makes
+/// sure nobody but SYSTEM or an administrator put the key there. Otherwise a
+/// standard user could create `ProgramData\DisplayWire\key` before the server
+/// is installed, and the server would accept their key.
 #[cfg(windows)]
-fn protect(path: &Path) {
-    // Only SYSTEM and administrators may read the key.
-    let _ = std::process::Command::new("icacls")
-        .arg(path)
-        .args(["/inheritance:r", "/grant", "*S-1-5-18:F", "/grant", "*S-1-5-32-544:F"])
-        .output();
+fn guard(path: &Path) -> Result<(), String> {
+    if path != default_key_path() {
+        return Ok(()); // --key-file: wherever the administrator chose
+    }
+    if let Some(dir) = path.parent() {
+        lock_dir(dir).map_err(|e| format!("{e} (run as administrator, or use --key-file)"))?;
+    }
+    if path.exists() && !acl::owned_by_admins(path)? {
+        return Err(format!(
+            "{} is not owned by SYSTEM or Administrators, so someone else may have put it there: delete it and run --new-key as administrator",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
-fn protect(path: &Path) {
+fn guard(_: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Creates `dir` and gives it to SYSTEM and administrators alone, ignoring
+/// whatever permissions its parent or a previous owner set. Files created in
+/// it later (the key, the service's log) inherit that.
+#[cfg(windows)]
+pub fn lock_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    acl::set(dir, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+}
+
+#[cfg(windows)]
+fn protect(path: &Path) -> Result<(), String> {
+    // SYSTEM, administrators and the file's owner (whoever chose --key-file).
+    acl::set(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
+}
+
+#[cfg(not(windows))]
+fn protect(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("protect {}: {e}", path.display()))
+}
+
+#[cfg(windows)]
+mod acl {
+    //! File permissions through the Win32 security API.
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetNamedSecurityInfoW,
+    };
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, IsWellKnownSid,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid,
+    };
+    use windows::core::{BOOL, PCWSTR};
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Applies the owner (if any) and protected DACL of an SDDL string to `path`.
+    pub fn set(path: &Path, sddl: &str) -> Result<(), String> {
+        let fail = |what: &str| format!("set permissions on {}: {what}", path.display());
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(sddl.as_ptr()), SDDL_REVISION_1, &mut sd, None) }
+            .map_err(|e| fail(&e.to_string()))?;
+        let result = (|| {
+            let (mut present, mut defaulted) = (BOOL::default(), BOOL::default());
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) }.map_err(|e| fail(&e.to_string()))?;
+            let mut owner = PSID::default();
+            unsafe { GetSecurityDescriptorOwner(sd, &mut owner, &mut defaulted) }.map_err(|e| fail(&e.to_string()))?;
+            let mut info = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+            if !owner.is_invalid() {
+                info |= OWNER_SECURITY_INFORMATION;
+            }
+            let name = wide(path);
+            let owner = (!owner.is_invalid()).then_some(owner);
+            let err = unsafe { SetNamedSecurityInfoW(PCWSTR(name.as_ptr()), SE_FILE_OBJECT, info, owner, None, Some(dacl), None) };
+            if err == ERROR_SUCCESS { Ok(()) } else { Err(fail(&windows::core::Error::from(err.to_hresult()).to_string())) }
+        })();
+        unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+        result
+    }
+
+    /// Whether `path` is owned by SYSTEM or the Administrators group.
+    pub fn owned_by_admins(path: &Path) -> Result<bool, String> {
+        let name = wide(path);
+        let mut owner = PSID::default();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let err = unsafe {
+            GetNamedSecurityInfoW(PCWSTR(name.as_ptr()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, &mut sd)
+        };
+        if err != ERROR_SUCCESS {
+            return Err(format!("read owner of {}: {}", path.display(), windows::core::Error::from(err.to_hresult())));
+        }
+        let trusted = unsafe { IsWellKnownSid(owner, WinLocalSystemSid).as_bool() || IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool() };
+        unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+        Ok(trusted)
+    }
 }
 
 pub fn unix_ms() -> u64 {

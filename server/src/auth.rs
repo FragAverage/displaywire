@@ -95,8 +95,13 @@ pub fn lock_dir(dir: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn protect(path: &Path) -> Result<(), String> {
-    // SYSTEM, administrators and the file's owner (whoever chose --key-file).
-    acl::set(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
+    if path == default_key_path() {
+        // Owned by Administrators whatever the default-owner policy says, so `guard` accepts it.
+        acl::set(path, "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+    } else {
+        // SYSTEM, administrators and the file's owner (whoever chose --key-file).
+        acl::set(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
+    }
 }
 
 #[cfg(not(windows))]

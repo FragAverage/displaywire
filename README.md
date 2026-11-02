@@ -121,7 +121,7 @@ signed, and the apps only accept an update that matches the key built into them
   only works on the same local network.
 - **It stutters or hitches.** Almost always the network. Use a wired connection on one side if you can, set up
   Wi-Fi tuning above, and watch the stats graph (⌃⌥S): lost frames and spikes in latency point at the network.
-  `netprobe` (in the release's server zip) measures jitter and loss between the two machines.
+  A plain `ping` to the PC that shows irregular times is the same story.
 - **No sound on the Mac.** Check the PC isn't muted, and that the stream's volume in Settings isn't zero.
 - **Nobody hears me.** Install VB-Cable on the PC and pick **CABLE Output** as the microphone in the app, and make
   sure the microphone is on (⌃⌥V).

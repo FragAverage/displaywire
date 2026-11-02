@@ -41,9 +41,9 @@ jobs:
       - name: Build server
         shell: pwsh
         run: |
-          cargo build --release -p displaywire-server -p netprobe
+          cargo build --release -p displaywire-server
           New-Item -ItemType Directory dist/displaywire-server-windows | Out-Null
-          Copy-Item target/release/displaywire-server.exe, target/release/netprobe.exe, README.md dist/displaywire-server-windows/
+          Copy-Item target/release/displaywire-server.exe, README.md dist/displaywire-server-windows/
           Compress-Archive dist/displaywire-server-windows dist/displaywire-server-windows.zip
       - uses: actions/upload-artifact@v4
         with:

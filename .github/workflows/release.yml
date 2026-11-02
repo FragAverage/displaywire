@@ -53,6 +53,8 @@ jobs:
   publish:
     needs: [client, server]
     runs-on: ubuntu-latest
+    # The signing key is only available to this environment, which only runs for v* tags.
+    environment: release
     permissions:
       contents: write
     steps:

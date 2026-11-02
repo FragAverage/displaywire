@@ -9,8 +9,8 @@ Each release has two extra files next to the downloads:
 - `latest.txt`: the version, and the SHA-256 and size of `DisplayWire-macos.zip` and `displaywire-server-windows.zip`.
 - `latest.txt.sig`: an Ed25519 signature of `latest.txt`.
 
-CI makes both in the release job (`tools/dwsign`) with a private key held in the repository's `UPDATE_SIGNING_KEY`
-secret. The public half is compiled into the apps (`crates/update`, `PUBLIC_KEY`). An app fetches
+CI makes both in the release job (`tools/dwsign`) with a private key held in the `UPDATE_SIGNING_KEY` secret of the
+`release` environment, which only workflows running for `v*` tags can use. The public half is compiled into the apps (`crates/update`, `PUBLIC_KEY`). An app fetches
 `releases/latest/download/latest.txt` and its signature, checks the signature, and only then looks at the version.
 A download is used only if its size and hash are exactly what the signed manifest names. So having write access to
 the GitHub repository is not enough to run code on a PC: the signing key is needed as well. This matters most for the

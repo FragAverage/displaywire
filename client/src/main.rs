@@ -29,6 +29,8 @@ mod receiver;
 mod settings;
 #[cfg(target_os = "macos")]
 mod transfer;
+#[cfg(target_os = "macos")]
+mod wifi;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -63,7 +65,7 @@ mod app {
     use winit::window::{CursorGrabMode, Window, WindowId};
 
     use crate::link::Link;
-    use crate::{dialog, display, input, keys, menu, overlay, receiver, settings, transfer};
+    use crate::{dialog, display, input, keys, menu, overlay, receiver, settings, transfer, wifi};
 
     #[derive(Parser)]
     #[command(about = "View a displaywire server's screen")]
@@ -114,6 +116,8 @@ mod app {
         receiver: Option<JoinHandle<()>>,
         sized: bool,
         video: Option<(u32, u32)>,
+        /// Holds AWDL down while connected, once set up and if the setting is on.
+        wifi: Option<wifi::Quiet>,
     }
 
     impl Session {
@@ -208,6 +212,7 @@ mod app {
             let stop = Arc::new(AtomicBool::new(false));
             let graph = load_graph_pref();
             let prefs = settings::Prefs::load();
+            let quiet_wifi = prefs.quiet_wifi && wifi::ready();
             let transfers = transfer::Transfers::new(link.clone(), self.proxy.clone(), prefs.clipboard);
             transfers.spawn();
             let telemetry = Arc::new(receiver::Telemetry::new(graph, prefs, transfers));
@@ -230,6 +235,7 @@ mod app {
                 receiver: Some(receiver),
                 sized: false,
                 video: None,
+                wifi: quiet_wifi.then(wifi::Quiet::start),
             })
         }
 
@@ -265,6 +271,7 @@ mod app {
                 menu::Action::Microphone => self.toggle_mic(),
                 menu::Action::Mute => self.change_prefs(|p| p.muted = !p.muted),
                 menu::Action::Shortcuts => dialog::show_shortcuts(),
+                menu::Action::WifiSetup => self.setup_wifi(),
                 menu::Action::SendFile => {
                     for path in dialog::choose_files() {
                         self.send_file(&path);
@@ -294,6 +301,29 @@ mod app {
                 } else {
                     new.save();
                 }
+            }
+        }
+
+        /// One-time setup for pausing AWDL while streaming (see `wifi`).
+        fn setup_wifi(&mut self) {
+            if wifi::ready() {
+                dialog::show_message("Wi-Fi tuning is already set up", "DisplayWire pauses AirDrop and AirPlay's Wi-Fi link while you stream, and restores it when you disconnect. Turn it off in Settings.");
+                return;
+            }
+            match wifi::install_rule() {
+                Ok(()) => {
+                    // Take effect on the connection that's open now.
+                    let on = settings::Prefs::load().quiet_wifi;
+                    if let Some(s) = &mut self.session
+                        && on
+                        && s.wifi.is_none()
+                    {
+                        s.wifi = Some(wifi::Quiet::start());
+                    }
+                    dialog::show_message("Wi-Fi tuning is on", "While you stream, DisplayWire now pauses AirDrop and AirPlay's Wi-Fi link, which adds bursts of delay, and brings it back when you disconnect or quit.");
+                }
+                Err(e) if e == "cancelled" => {}
+                Err(e) => dialog::show_message("Couldn't set up Wi-Fi tuning", &e),
             }
         }
 

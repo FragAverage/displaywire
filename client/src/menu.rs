@@ -22,6 +22,7 @@ pub enum Action {
     Settings,
     Mute,
     Microphone,
+    WifiSetup,
     Shortcuts,
 }
 
@@ -74,6 +75,11 @@ define_class!(
         #[unsafe(method(microphone:))]
         fn microphone(&self, _sender: Option<&AnyObject>) {
             send(Action::Microphone);
+        }
+
+        #[unsafe(method(wifiSetup:))]
+        fn wifi_setup(&self, _sender: Option<&AnyObject>) {
+            send(Action::WifiSetup);
         }
 
         #[unsafe(method(shortcuts:))]
@@ -142,6 +148,8 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
             item(mtm, "Disconnect", Some(sel!(disconnect:)), "", none, Some(t)),
             sep(),
             item(mtm, "Send File to PC…", Some(sel!(sendFile:)), "", none, Some(t)),
+            sep(),
+            item(mtm, "Set Up Wi-Fi Tuning…", Some(sel!(wifiSetup:)), "", none, Some(t)),
         ],
     );
     let view = submenu(

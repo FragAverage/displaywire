@@ -16,12 +16,14 @@ pub struct Prefs {
     pub muted: bool,
     /// Share clipboard text with the PC.
     pub clipboard: bool,
+    /// Pause AirDrop/AirPlay's Wi-Fi link (AWDL) while streaming, once set up.
+    pub quiet_wifi: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         let s = Settings::default();
-        Prefs { bitrate_mbps: s.bitrate_kbps / 1000, fps_cap: s.fps_cap, fec_percent: s.fec_percent, volume: 100, muted: false, clipboard: true }
+        Prefs { bitrate_mbps: s.bitrate_kbps / 1000, fps_cap: s.fps_cap, fec_percent: s.fec_percent, volume: 100, muted: false, clipboard: true, quiet_wifi: true }
     }
 }
 
@@ -48,6 +50,7 @@ impl Prefs {
                 "volume" => p.volume = v.parse().unwrap_or(p.volume),
                 "muted" => p.muted = v == "true",
                 "clipboard" => p.clipboard = v != "false",
+                "quiet_wifi" => p.quiet_wifi = v != "false",
                 _ => {}
             }
         }
@@ -73,8 +76,8 @@ impl Prefs {
         if let Some(path) = state_file("settings") {
             let _ = path.parent().map(std::fs::create_dir_all);
             let text = format!(
-                "bitrate_mbps={}\nfps_cap={}\nfec_percent={}\nvolume={}\nmuted={}\nclipboard={}\n",
-                self.bitrate_mbps, self.fps_cap, self.fec_percent, self.volume, self.muted, self.clipboard
+                "bitrate_mbps={}\nfps_cap={}\nfec_percent={}\nvolume={}\nmuted={}\nclipboard={}\nquiet_wifi={}\n",
+                self.bitrate_mbps, self.fps_cap, self.fec_percent, self.volume, self.muted, self.clipboard, self.quiet_wifi
             );
             let _ = std::fs::write(path, text);
         }
@@ -95,6 +98,8 @@ mod tests {
     #[test]
     fn parses_and_clamps() {
         let p = Prefs::parse("bitrate_mbps=80\nfps_cap=120\nfec_percent=20\nvolume=40\nmuted=true\n");
+        assert!(p.quiet_wifi, "on unless turned off");
+        assert!(!Prefs::parse("quiet_wifi=false\n").quiet_wifi);
         assert_eq!((p.bitrate_mbps, p.fps_cap, p.fec_percent, p.volume, p.muted), (80, 120, 20, 40, true));
         let wild = Prefs::parse("bitrate_mbps=99999\nfec_percent=200\nvolume=900\njunk\nfps_cap=notanumber");
         assert_eq!((wild.bitrate_mbps, wild.fec_percent, wild.volume, wild.fps_cap), (500, 50, 100, 0));

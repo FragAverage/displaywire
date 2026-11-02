@@ -127,7 +127,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     alert.addButtonWithTitle(ns_string!("Save"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
 
-    let (w, h) = (360.0, 166.0);
+    let (w, h) = (360.0, 190.0);
     let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
     let rows = [h - 28.0, h - 62.0, h - 96.0, h - 128.0];
     let (lx, cx) = (0.0, 150.0);
@@ -157,6 +157,10 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     let clipboard =
         unsafe { NSButton::checkboxWithTitle_target_action(ns_string!("Share clipboard text with the PC"), None, None, mtm) };
     clipboard.setFrame(rect(lx, 0.0, w, 20.0));
+    let wifi = unsafe { NSButton::checkboxWithTitle_target_action(ns_string!("Pause AirDrop and AirPlay Wi-Fi while streaming"), None, None, mtm) };
+    wifi.setFrame(rect(lx, 24.0, w, 20.0));
+    wifi.setState(if current.quiet_wifi { NSControlStateValueOn } else { NSControlStateValueOff });
+    view.addSubview(&wifi);
     clipboard.setState(if current.clipboard { NSControlStateValueOn } else { NSControlStateValueOff });
     view.addSubview(&clipboard);
     alert.setAccessoryView(Some(&view));
@@ -175,6 +179,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
             volume: volume.doubleValue().round().clamp(0.0, 100.0) as u8,
             muted: current.muted,
             clipboard: clipboard.state() == NSControlStateValueOn,
+            quiet_wifi: wifi.state() == NSControlStateValueOn,
         }
         .clamped(),
     )
@@ -192,6 +197,17 @@ pub fn choose_files() -> Vec<PathBuf> {
         return Vec::new();
     }
     panel.URLs().iter().filter_map(|u| u.path().map(|p| PathBuf::from(p.to_string()))).collect()
+}
+
+/// A plain message box.
+pub fn show_message(title: &str, text: &str) {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    alert.addButtonWithTitle(ns_string!("OK"));
+    NSApplication::sharedApplication(mtm).activate();
+    alert.runModal();
 }
 
 /// The keyboard shortcuts, for the Help menu.

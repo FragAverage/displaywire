@@ -123,6 +123,15 @@ volume and clipboard sharing. Bitrate, cap and FEC are applied live on the serve
 On a LAN the connect dialog lists servers that announce themselves (turn that off with
 `--no-discovery`), and remembers the ones you used.
 
+## Wi-Fi tuning (macOS)
+
+On Wi-Fi, macOS periodically hops channels for AirDrop and AirPlay (AWDL), which shows up
+as bursts of added delay on the stream. **Connection ▸ Set Up Wi-Fi Tuning…** adds a
+sudoers rule, after one password prompt, that lets DisplayWire run exactly
+`ifconfig awdl0 down` and `ifconfig awdl0 up`. While connected it holds AWDL down and
+brings it back when you disconnect or quit. The Settings sheet has a switch for it, and
+`sudo rm /etc/sudoers.d/displaywire-awdl` removes the rule.
+
 ## Packet loss
 
 Every video frame is sent with 10% repair packets (Reed-Solomon, `--fec <percent>`

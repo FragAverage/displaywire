@@ -24,7 +24,7 @@ Download from the repo's Releases page:
   folder. Uninstall from *Installed apps*, or
   `displaywire-server.exe --uninstall` (`--purge` also deletes the paired devices and logs).
 
-To publish a release, push a tag: `git tag v0.5.0 && git push origin v0.5.0`.
+To publish a release, push a tag: `git tag v0.6.0 && git push origin v0.6.0`.
 
 ## Build (on the Mac)
 Needs Rust 1.88+, and for the server `cargo install cargo-xwin` plus LLVM (`brew install llvm`, for `llvm-lib`).

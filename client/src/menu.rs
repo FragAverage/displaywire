@@ -24,6 +24,7 @@ pub enum Action {
     Microphone,
     WifiSetup,
     Shortcuts,
+    CheckUpdates,
 }
 
 static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
@@ -82,6 +83,11 @@ define_class!(
             send(Action::WifiSetup);
         }
 
+        #[unsafe(method(checkUpdates:))]
+        fn check_updates(&self, _sender: Option<&AnyObject>) {
+            send(Action::CheckUpdates);
+        }
+
         #[unsafe(method(shortcuts:))]
         fn shortcuts(&self, _sender: Option<&AnyObject>) {
             send(Action::Shortcuts);
@@ -131,6 +137,7 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
         "DisplayWire",
         vec![
             item(mtm, "About DisplayWire", Some(sel!(orderFrontStandardAboutPanel:)), "", none, None),
+            item(mtm, "Check for Updates…", Some(sel!(checkUpdates:)), "", none, Some(t)),
             item(mtm, "Settings…", Some(sel!(settings:)), ",", cmd, Some(t)),
             sep(),
             item(mtm, "Hide DisplayWire", Some(sel!(hide:)), "h", cmd, None),

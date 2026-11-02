@@ -4,7 +4,7 @@ members = ["crates/*", "tools/*", "server", "client"]
 
 [workspace.package]
 edition = "2024"
-version = "0.6.0"
+version = "0.6.1"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Low-latency game streaming from a Windows PC (NVIDIA) to a Mac"
@@ -17,6 +17,7 @@ timing = { path = "crates/timing" }
 transport = { path = "crates/transport" }
 secure = { path = "crates/secure" }
 pairing = { path = "crates/pairing" }
+update = { path = "crates/update" }
 xfer = { path = "crates/xfer" }
 hevc = { path = "crates/hevc" }
 videotoolbox = { path = "crates/videotoolbox" }

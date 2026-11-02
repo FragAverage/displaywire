@@ -24,7 +24,7 @@ Download from the repo's Releases page:
   folder. Uninstall from *Installed apps*, or
   `displaywire-server.exe --uninstall` (`--purge` also deletes the paired devices and logs).
 
-To publish a release, push a tag: `git tag v0.6.0 && git push origin v0.6.0`.
+To publish a release, push a tag: `git tag v0.6.1 && git push origin v0.6.1`.
 
 ## Build (on the Mac)
 Needs Rust 1.88+, and for the server `cargo install cargo-xwin` plus LLVM (`brew install llvm`, for `llvm-lib`).
@@ -89,6 +89,12 @@ and `--list-clients` / `--remove-client <id or name>` manage the list.
 
 The Mac keeps a list of PCs; click one to connect. From a terminal: `displaywire-client --pair <server>` pairs,
 then `displaywire-client <server>` connects.
+
+## Updates
+
+Both apps look for a newer release on GitHub and offer to install it (Mac: **DisplayWire > Check for Updates…**; PC:
+the tray menu, or `displaywire-server --update`). Releases are signed, and the apps only accept an update whose
+signature matches the key built into them. See `docs/UPDATES.md`.
 
 ## Clipboard and files
 

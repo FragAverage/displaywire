@@ -36,6 +36,8 @@ mod settings;
 #[cfg(target_os = "macos")]
 mod transfer;
 #[cfg(target_os = "macos")]
+mod updater;
+#[cfg(target_os = "macos")]
 mod wifi;
 
 #[cfg(not(target_os = "macos"))]
@@ -112,6 +114,10 @@ mod app {
         Notice(Option<String>),
         Title(String),
         Fatal(String),
+        /// A check for a newer version finished.
+        UpdateFound(crate::updater::Found),
+        /// The new version is downloaded and checked: quit so it can be swapped in (or why it can't be).
+        UpdateReady(Result<(), String>),
     }
 
     /// One connection and its window.
@@ -232,6 +238,9 @@ mod app {
         /// Whether the launcher's status checks should run (only while it is showing).
         probing: Arc<AtomicBool>,
         probe_started: bool,
+        /// The version already offered this run, so "Not now" isn't asked again.
+        update_offered: Option<String>,
+        updating: bool,
     }
 
     impl App {
@@ -272,7 +281,44 @@ mod app {
             if !self.probe_started {
                 self.probe_started = true;
                 spawn_probe(self.proxy.clone(), self.probing.clone());
+                crate::updater::spawn_check(self.proxy.clone(), false);
             }
+        }
+
+        /// A check for a newer version finished: offer it, or (if it was asked for) say why not.
+        fn on_update_found(&mut self, found: crate::updater::Found) {
+            match found.result {
+                Ok(Some(a)) => {
+                    // Not in the middle of a stream, and not the same version twice in a run.
+                    if (!found.manual && self.session.is_some()) || self.update_offered.as_deref() == Some(&a.version) && !found.manual {
+                        return;
+                    }
+                    self.update_offered = Some(a.version.clone());
+                    let text = format!(
+                        "You have {}. DisplayWire downloads the new version, checks it is genuine and restarts, which takes a few seconds. Your PCs and settings are kept.",
+                        crate::updater::VERSION
+                    );
+                    if dialog::confirm(&format!("DisplayWire {} is available", a.version), &text, "Install and Restart", "Not Now") {
+                        self.install_update(a);
+                    }
+                }
+                Ok(None) if found.manual => {
+                    dialog::show_message("DisplayWire is up to date", &format!("You have the latest version ({}).", crate::updater::VERSION))
+                }
+                Err(e) if found.manual => dialog::show_message("Can't check for updates", &e),
+                _ => {}
+            }
+        }
+
+        fn install_update(&mut self, a: update::Available) {
+            if self.updating {
+                return;
+            }
+            self.updating = true;
+            let proxy = self.proxy.clone();
+            let _ = std::thread::Builder::new().name("update-install".into()).spawn(move || {
+                let _ = proxy.send_event(UserEvent::UpdateReady(crate::updater::prepare(&a)));
+            });
         }
 
         fn hide_launcher(&mut self) {
@@ -432,6 +478,7 @@ mod app {
                 menu::Action::Mute => self.change_prefs(|p| p.muted = !p.muted),
                 menu::Action::Shortcuts => dialog::show_shortcuts(),
                 menu::Action::WifiSetup => self.setup_wifi(),
+                menu::Action::CheckUpdates => crate::updater::spawn_check(self.proxy.clone(), true),
                 menu::Action::SendFile => {
                     for path in dialog::choose_files() {
                         self.send_file(&path);
@@ -657,6 +704,19 @@ mod app {
             match event {
                 UserEvent::Menu(action) => return self.on_menu(el, action),
                 UserEvent::Launcher(action) => return self.on_launcher(el, action),
+                UserEvent::UpdateFound(found) => return self.on_update_found(found),
+                UserEvent::UpdateReady(result) => {
+                    self.updating = false;
+                    match result {
+                        Ok(()) => {
+                            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                                objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None);
+                            }
+                        }
+                        Err(e) => dialog::show_message("The update didn't install", &e),
+                    }
+                    return;
+                }
                 UserEvent::LauncherRows(rows) => {
                     if self.session.is_none()
                         && let Some(l) = &self.launcher
@@ -669,7 +729,7 @@ mod app {
             }
             let Some(s) = &mut self.session else { return };
             match event {
-                UserEvent::Menu(_) | UserEvent::Launcher(_) | UserEvent::LauncherRows(_) => {}
+                UserEvent::Menu(_) | UserEvent::Launcher(_) | UserEvent::LauncherRows(_) | UserEvent::UpdateFound(_) | UserEvent::UpdateReady(_) => {}
                 UserEvent::Status(text) => {
                     s.conn_status = text;
                     s.refresh_banner();
@@ -815,6 +875,8 @@ mod app {
             launcher: None,
             probing: Arc::new(AtomicBool::new(false)),
             probe_started: false,
+            update_offered: None,
+            updating: false,
         };
         event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
         app.session = None;

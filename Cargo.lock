@@ -680,7 +680,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decodebench"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "hevc",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "displaywire-client"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "cpal",
@@ -746,6 +746,7 @@ dependencies = [
  "secure",
  "timing",
  "transport",
+ "update",
  "videotoolbox",
  "winit",
  "xfer",
@@ -753,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "displaywire-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "eframe",
@@ -765,6 +766,7 @@ dependencies = [
  "secure",
  "timing",
  "transport",
+ "update",
  "windows",
  "windows-core",
  "xfer",
@@ -799,6 +801,13 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "dwsign"
+version = "0.6.1"
+dependencies = [
+ "update",
+]
 
 [[package]]
 name = "ecolor"
@@ -1228,7 +1237,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hevc"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "hkdf"
@@ -1666,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "netprobe"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "proto",
@@ -2181,14 +2190,14 @@ dependencies = [
 
 [[package]]
 name = "pairing"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "secure",
 ]
 
 [[package]]
 name = "pairprobe"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "pairing",
@@ -2347,7 +2356,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "proto"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "pxfm"
@@ -2548,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "secure"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "blake2",
  "chacha20poly1305",
@@ -2883,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "timing"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "tiny-skia"
@@ -2978,7 +2987,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "transport"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "proto",
  "reed-solomon-simd",
@@ -3028,6 +3037,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "update"
+version = "0.6.1"
+dependencies = [
+ "ring",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3068,7 +3084,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videotoolbox"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "walkdir"
@@ -3651,7 +3667,7 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
 name = "xfer"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "xkbcommon-dl"

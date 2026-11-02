@@ -32,6 +32,8 @@ const TIMER_ID: usize = 1;
 const CMD_OPEN_FILES: usize = 10;
 const CMD_PAIR: usize = 11;
 const CMD_MANAGE: usize = 12;
+const CMD_UPDATE: usize = 13;
+const CMD_CHECK: usize = 14;
 const CMD_COPY_ADDR: usize = 20;
 
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
@@ -223,6 +225,33 @@ fn auto_open(st: &State) {
     }
 }
 
+/// Asks, then downloads and installs the update (on its own thread: the tray keeps running).
+fn update_dialog() {
+    let _ = std::thread::Builder::new().name("update-install".into()).spawn(|| {
+        let Some(a) = super::updater::available() else { return };
+        let ask = format!(
+            "DisplayWire {} is available (this is {}).\n\nThe update is downloaded and checked, then the server restarts. A stream in progress is dropped for a few seconds.\n\nInstall it now?",
+            a.version,
+            super::updater::VERSION
+        );
+        if message(&ask, "DisplayWire update", true) {
+            notify("Downloading the update…");
+            if let Err(e) = super::updater::install(&a) {
+                message(&format!("The update didn't install: {e}"), "DisplayWire update", false);
+            }
+        }
+    });
+}
+
+/// A message box on the user's desktop; true if they chose Yes.
+fn message(text: &str, title: &str, question: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW};
+    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let flags = MB_SETFOREGROUND | MB_TOPMOST | if question { MB_YESNO | MB_ICONQUESTION } else { MB_OK | MB_ICONINFORMATION };
+    unsafe { MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), flags) == IDYES }
+}
+
 unsafe fn update_tooltip(hwnd: HWND) {
     let Some(st) = (unsafe { state(hwnd) }) else { return };
     auto_open(st);
@@ -249,6 +278,17 @@ unsafe fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, CMD_PAIR, w!("Pair new device…"));
         let _ = AppendMenuW(menu, MF_STRING, CMD_MANAGE, w!("Manage devices…"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        match super::updater::available() {
+            Some(a) => {
+                let text = wide::<64>(&format!("Update to {}…", a.version));
+                let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, PCWSTR(text.as_ptr()));
+            }
+            None => {
+                let text = wide::<64>(&format!("Check for updates (this is {})", super::updater::VERSION));
+                let _ = AppendMenuW(menu, MF_STRING, CMD_CHECK, PCWSTR(text.as_ptr()));
+            }
+        }
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
@@ -274,6 +314,14 @@ unsafe fn command(hwnd: HWND, cmd: usize) {
             open_ui(st);
         }
         CMD_MANAGE => open_ui(st),
+        CMD_UPDATE => update_dialog(),
+        CMD_CHECK => {
+            let _ = std::thread::Builder::new().name("update-check".into()).spawn(|| match super::updater::check() {
+                Ok(Some(a)) => notify(&format!("DisplayWire {} is available: right-click this icon to install it.", a.version)),
+                Ok(None) => notify(&format!("DisplayWire {} is the latest version.", super::updater::VERSION)),
+                Err(e) => notify(&format!("Can't check for updates: {e}")),
+            });
+        }
         c if c >= CMD_COPY_ADDR => {
             if let Some(a) = st.addresses.get(c - CMD_COPY_ADDR) {
                 super::shell::set_clipboard_text(a);

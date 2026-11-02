@@ -62,7 +62,18 @@ pub fn setup() -> Result<(), String> {
         // An older copy may be running as the service.
         run("sc", &["stop", SERVICE]);
         std::thread::sleep(std::time::Duration::from_millis(2500));
-        std::fs::copy(&me, &dest).map_err(|e| format!("copy to {}: {e}", dest.display()))?;
+        // The service's child (the tray and the stream) can linger a moment after the stop: end any other copy,
+        // then retry while the file is still in use.
+        let others = format!("PID ne {}", std::process::id());
+        let mut tries = 0;
+        while let Err(e) = std::fs::copy(&me, &dest) {
+            tries += 1;
+            if tries >= 20 {
+                return Err(format!("copy to {}: {e}", dest.display()));
+            }
+            run("taskkill", &["/f", "/im", "displaywire-server.exe", "/fi", &others]);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
     }
     println!("installing the service from {}", dest.display());
     let status = Command::new(&dest).arg("--install-service").status().map_err(|e| e.to_string())?;

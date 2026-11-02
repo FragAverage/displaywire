@@ -143,6 +143,12 @@ pub struct Cli {
     /// (what double-clicking offers; needs administrator rights).
     #[arg(long)]
     setup: bool,
+    /// Windows: look for a newer release and say whether there is one.
+    #[arg(long)]
+    check_update: bool,
+    /// Windows: install the newest release if it is newer than this one (administrator rights needed).
+    #[arg(long)]
+    update: bool,
     /// Windows: remove everything `--setup` added (`--purge` also deletes the paired devices and logs).
     #[arg(long)]
     uninstall: bool,
@@ -332,8 +338,10 @@ fn client_command(cli: &Cli, dir: &std::path::Path) -> Option<Result<(), String>
 
 #[cfg(windows)]
 fn service_command(cli: &Cli, data_dir: &std::path::Path) -> Option<Result<(), String>> {
-    use windows::{service, setup};
-    if cli.setup {
+    use windows::{service, setup, updater};
+    if cli.check_update || cli.update {
+        Some(updater::command(cli.update))
+    } else if cli.setup {
         let r = setup::setup();
         if cli.pause {
             if let Err(e) = &r {
@@ -366,7 +374,7 @@ fn service_command(cli: &Cli, data_dir: &std::path::Path) -> Option<Result<(), S
 
 #[cfg(not(windows))]
 fn service_command(cli: &Cli, _data_dir: &std::path::Path) -> Option<Result<(), String>> {
-    (cli.install_service || cli.uninstall_service || cli.service).then(|| Err("the service is Windows only".into()))
+    (cli.install_service || cli.uninstall_service || cli.service || cli.check_update || cli.update).then(|| Err("the service and updates are Windows only".into()))
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -441,6 +449,7 @@ fn run(cli: Cli) -> Result<(), String> {
         #[cfg(windows)]
         if !cli.no_tray && cli.file.is_none() {
             windows::tray::start(shared.clone());
+            windows::updater::start();
         }
         std::thread::spawn(move || control(&sock, &shared, announcement.as_ref(), &transfers, mic));
     }

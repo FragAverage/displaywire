@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use snow::{Builder, StatelessTransportState};
 
+pub mod pair;
+
 const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 const MAGIC: [u8; 2] = *b"DW";
 pub const HS1: u8 = 0x20;
@@ -50,6 +52,14 @@ impl Key {
         let mut k = [0u8; 32];
         getrandom::fill(&mut k).expect("system random number generator");
         Key(k)
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Key {
+        Key(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
     pub fn parse(s: &str) -> Result<Key, Error> {

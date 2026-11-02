@@ -16,6 +16,8 @@ mod input;
 #[cfg(target_os = "macos")]
 mod keys;
 #[cfg(target_os = "macos")]
+mod launcher;
+#[cfg(target_os = "macos")]
 mod link;
 #[cfg(target_os = "macos")]
 mod menu;
@@ -24,7 +26,11 @@ mod mic;
 #[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
+mod pairui;
+#[cfg(target_os = "macos")]
 mod receiver;
+#[cfg(target_os = "macos")]
+mod servers;
 #[cfg(target_os = "macos")]
 mod settings;
 #[cfg(target_os = "macos")]
@@ -65,7 +71,7 @@ mod app {
     use winit::window::{CursorGrabMode, Window, WindowId};
 
     use crate::link::Link;
-    use crate::{dialog, display, input, keys, menu, overlay, receiver, settings, transfer, wifi};
+    use crate::{dialog, discovery, display, input, keys, menu, overlay, receiver, servers, settings, transfer, wifi};
 
     #[derive(Parser)]
     #[command(about = "View a displaywire server's screen")]
@@ -75,6 +81,9 @@ mod app {
         /// Pairing key for this server (saved for next time). Only needed once.
         #[arg(long)]
         key: Option<String>,
+        /// Pair with a PC from the terminal: asks for the PIN the PC shows, then saves the key.
+        #[arg(long, value_name = "SERVER")]
+        pair: Option<String>,
         /// Save a pairing key without connecting: `--set-key <server> <key>`.
         #[arg(long, num_args = 2, value_names = ["SERVER", "KEY"])]
         set_key: Option<Vec<String>>,
@@ -95,6 +104,10 @@ mod app {
         Status(Option<String>),
         /// A menu item was chosen.
         Menu(menu::Action),
+        /// Something was clicked in the launcher window.
+        Launcher(crate::launcher::Action),
+        /// The launcher's tiles have new information.
+        LauncherRows(Vec<crate::launcher::Row>),
         /// Transfer progress or outcome for the banner; `None` clears it.
         Notice(Option<String>),
         Title(String),
@@ -103,6 +116,8 @@ mod app {
 
     /// One connection and its window.
     struct Session {
+        /// Which PC this is, as saved.
+        address: String,
         window: Window,
         input: Arc<input::Sender>,
         /// Stream health over the last minute, drawn by `overlay`.
@@ -141,6 +156,63 @@ mod app {
         }
     }
 
+    /// The tiles: every saved PC (online if it answered), then any found on the network that aren't saved.
+    fn rows_from(saved: &[servers::Server], answered: &[(String, String)], found: &[discovery::Found]) -> Vec<crate::launcher::Row> {
+        let probed = !answered.is_empty() || !found.is_empty() || saved.is_empty();
+        let mut rows: Vec<crate::launcher::Row> = saved
+            .iter()
+            .map(|s| crate::launcher::Row {
+                address: s.address.clone(),
+                name: s.name.clone(),
+                paired: s.key.is_some(),
+                online: if probed || !answered.is_empty() { Some(answered.iter().any(|(a, _)| a == &s.address)) } else { None },
+                saved: true,
+            })
+            .collect();
+        for f in found {
+            // The same PC can be saved by one address (Tailscale) and found by another (its LAN address): one tile.
+            let known = |s: &servers::Server| {
+                (servers::same_host(&s.address, &f.address) && servers::port(&s.address) == servers::port(&f.address)) || s.name == f.name
+            };
+            if !saved.iter().any(known) {
+                rows.push(crate::launcher::Row { address: f.address.clone(), name: f.name.clone(), paired: false, online: Some(true), saved: false });
+            }
+        }
+        rows
+    }
+
+    /// Checks every few seconds which saved PCs answer, and what else is on the network, while the launcher shows.
+    fn spawn_probe(proxy: EventLoopProxy<UserEvent>, probing: Arc<AtomicBool>) {
+        let _ = std::thread::Builder::new().name("probe".into()).spawn(move || {
+            loop {
+                if !probing.load(Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    continue;
+                }
+                let saved = servers::load();
+                let addresses: Vec<String> = saved.iter().map(|s| s.address.clone()).collect();
+                let answered = discovery::probe(&addresses, std::time::Duration::from_millis(600));
+                let found = discovery::browse(std::time::Duration::from_millis(400));
+                // A PC that has said its name gets it, unless it was named by hand.
+                for s in &saved {
+                    if let Some((_, name)) = answered.iter().find(|(a, _)| a == &s.address)
+                        && s.name == s.address
+                    {
+                        let _ = servers::upsert(&s.address, Some(name), None);
+                    }
+                }
+                let saved = servers::load();
+                if probing.load(Relaxed) {
+                    let _ = proxy.send_event(UserEvent::LauncherRows(rows_from(&saved, &answered, &found)));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    static SCRIPT_STARTED: AtomicBool = AtomicBool::new(false);
+
     struct App {
         /// Server from the command line; without one, errors go back to the dialog.
         arg: Option<String>,
@@ -156,35 +228,130 @@ mod app {
         locked: bool,
         error: Option<String>,
         menu_installed: bool,
+        launcher: Option<crate::launcher::Launcher>,
+        /// Whether the launcher's status checks should run (only while it is showing).
+        probing: Arc<AtomicBool>,
+        probe_started: bool,
     }
 
     impl App {
-        /// Connects to the command-line server, or asks until a connection
-        /// starts or the user quits.
-        fn connect(&mut self, el: &ActiveEventLoop, mut problem: Option<String>) {
-            loop {
-                let (server, key) = match self.arg.take() {
-                    Some(s) => (s, self.key.take()),
-                    None if self.interactive => match dialog::ask_server(problem.as_deref()) {
-                        Some(entered) => (entered.server, entered.key),
-                        None => return el.exit(),
-                    },
-                    None => {
-                        self.error = problem;
-                        return el.exit();
+        /// Connects to the server given on the command line. (Otherwise the launcher window does it.)
+        fn connect(&mut self, el: &ActiveEventLoop, problem: Option<String>) {
+            let Some(server) = self.arg.take() else {
+                self.error = problem;
+                return el.exit();
+            };
+            let key = self.key.take();
+            match self.start(el, &server, key.as_deref()) {
+                Ok(session) => self.begin(&server, session),
+                Err(e) => {
+                    self.error = Some(format!("Can't connect to {server}: {e}"));
+                    el.exit();
+                }
+            }
+        }
+
+        /// A session has started: remember the PC, send queued files, put the launcher away.
+        fn begin(&mut self, server: &str, session: Session) {
+            let _ = servers::upsert(server, None, None);
+            servers::touch(server);
+            self.session = Some(session);
+            self.hide_launcher();
+            for path in std::mem::take(&mut self.pending_sends) {
+                self.send_file(&path);
+            }
+        }
+
+        /// Shows the list of PCs, and keeps its online/offline marks fresh while it shows.
+        fn show_launcher(&mut self) {
+            let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+            let launcher = self.launcher.get_or_insert_with(|| crate::launcher::Launcher::new(mtm, self.proxy.clone()));
+            launcher.set_rows(rows_from(&servers::load(), &[], &[]));
+            launcher.show();
+            self.probing.store(true, Relaxed);
+            if !self.probe_started {
+                self.probe_started = true;
+                spawn_probe(self.proxy.clone(), self.probing.clone());
+            }
+        }
+
+        fn hide_launcher(&mut self) {
+            self.probing.store(false, Relaxed);
+            if let Some(l) = &self.launcher {
+                l.hide();
+            }
+        }
+
+        /// Redraws the list now (after a rename, a pairing...).
+        fn refresh_launcher(&self) {
+            if let Some(l) = &self.launcher {
+                l.set_rows(rows_from(&servers::load(), &[], &[]));
+            }
+        }
+
+        fn on_launcher(&mut self, el: &ActiveEventLoop, action: crate::launcher::Action) {
+            use crate::launcher::Action;
+            match action {
+                Action::Connect(address) => self.connect_to(el, &address),
+                Action::Pair(address) => self.pair_and_connect(el, &address),
+                Action::Add => {
+                    if let Some(address) = dialog::ask_address() {
+                        let _ = servers::upsert(&address, None, None);
+                        self.pair_and_connect(el, &address);
                     }
-                };
-                match self.start(el, &server, key.as_deref()) {
-                    Ok(session) => {
-                        dialog::remember(&server);
-                        self.session = Some(session);
-                        for path in std::mem::take(&mut self.pending_sends) {
-                            self.send_file(&path);
-                        }
+                }
+                Action::Rename(address) => {
+                    let current = servers::find(&address).map(|s| s.name).unwrap_or_default();
+                    if let Some(name) = dialog::ask_text("Rename PC", &format!("A name for {address}."), &current, "Name", "Rename") {
+                        let _ = servers::upsert(&address, Some(&name), None);
+                        self.refresh_launcher();
+                    }
+                }
+                Action::Forget(address) => {
+                    let name = servers::find(&address).map(|s| s.name).unwrap_or_else(|| address.clone());
+                    if dialog::confirm(
+                        &format!("Forget {name}?"),
+                        "This Mac will forget the PC and its key. To use it again, pair again from the PC. The PC still lists this Mac until you remove it there.",
+                        "Forget",
+                        "Cancel",
+                    ) {
+                        let _ = servers::forget(&address);
+                        self.refresh_launcher();
+                    }
+                }
+                Action::Closed => {
+                    if self.session.is_none() {
+                        el.exit();
+                    }
+                }
+            }
+        }
+
+        /// Connects to a saved PC, pairing first if this Mac has no key for it.
+        fn connect_to(&mut self, el: &ActiveEventLoop, address: &str) {
+            if servers::key_for(address).is_none() {
+                return self.pair_and_connect(el, address);
+            }
+            match self.start(el, address, None) {
+                Ok(session) => self.begin(address, session),
+                Err(e) => dialog::show_message("Can't connect", &format!("{address}: {e}")),
+            }
+        }
+
+        /// The PIN window, then (if it worked) a connection.
+        fn pair_and_connect(&mut self, el: &ActiveEventLoop, address: &str) {
+            let name = servers::find(address).map_or_else(|| address.to_string(), |s| s.name);
+            match crate::pairui::pair(address, &name) {
+                crate::pairui::Outcome::Paired { key, server_name } => {
+                    if let Err(e) = servers::upsert(address, Some(&server_name), Some(key)) {
+                        dialog::show_message("Couldn't save the key", &e);
                         return;
                     }
-                    Err(e) => problem = Some(format!("Can't connect to {server}: {e}")),
+                    self.refresh_launcher();
+                    self.connect_to(el, address);
                 }
+                crate::pairui::Outcome::Cancelled => self.refresh_launcher(),
+                crate::pairui::Outcome::Failed(e) => dialog::show_message("Pairing failed", &e),
             }
         }
 
@@ -199,7 +366,7 @@ mod app {
                     key
                 }
                 None => keys::load(server).ok_or_else(|| {
-                    format!("no pairing key for {server}: get it from the PC (displaywire-server --show-key) and run  displaywire-client --set-key {server} <key>")
+                    format!("this Mac isn't paired with {server} yet: open DisplayWire and add the PC, or run  displaywire-client --pair {server}")
                 })?,
             };
             let link = Arc::new(Link::new(sock, key));
@@ -224,6 +391,7 @@ mod app {
                 .spawn(move || receiver::run(addr, link, input2, layer, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
             Ok(Session {
+                address: server.to_string(),
                 window,
                 input,
                 telemetry,
@@ -249,22 +417,14 @@ mod app {
             }
         }
 
-        fn on_menu(&mut self, el: &ActiveEventLoop, action: menu::Action) {
+        fn on_menu(&mut self, _el: &ActiveEventLoop, action: menu::Action) {
             match action {
-                menu::Action::Connect => {
-                    // Cancelling keeps the current connection.
-                    if let Some(entered) = dialog::ask_server(None) {
-                        self.locked = false;
-                        self.session = None;
-                        self.arg = Some(entered.server);
-                        self.key = entered.key;
-                        self.interactive = true;
-                        self.connect(el, None);
-                    }
-                }
-                menu::Action::Disconnect => {
+                menu::Action::Connect | menu::Action::Disconnect => {
+                    // Back to the list of PCs.
                     self.locked = false;
                     self.session = None;
+                    self.interactive = true;
+                    self.show_launcher();
                 }
                 menu::Action::ToggleStats => self.toggle_graph(),
                 menu::Action::Settings => self.edit_settings(),
@@ -388,15 +548,52 @@ mod app {
                     menu::install(mtm, self.proxy.clone());
                 }
             }
-            if self.session.is_none() {
-                self.connect(el, None);
+            #[cfg(debug_assertions)]
+            if let Ok(script) = std::env::var("DISPLAYWIRE_TEST_SCRIPT")
+                && !SCRIPT_STARTED.swap(true, Relaxed)
+            {
+                // Debug builds only: `connect:ADDR,wait:5,disconnect,wait:2,quit` sends what clicks would, so flows can be tested without a mouse.
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    use crate::launcher::Action;
+                    for step in script.split(',') {
+                        let (cmd, arg) = step.split_once(':').unwrap_or((step, ""));
+                        let event = match cmd {
+                            "wait" => {
+                                std::thread::sleep(std::time::Duration::from_secs(arg.parse().unwrap_or(1)));
+                                continue;
+                            }
+                            "connect" => UserEvent::Launcher(Action::Connect(arg.to_string())),
+                            "pair" => UserEvent::Launcher(Action::Pair(arg.to_string())),
+                            "disconnect" => UserEvent::Menu(menu::Action::Disconnect),
+                            _ => UserEvent::Launcher(Action::Closed),
+                        };
+                        let _ = proxy.send_event(event);
+                    }
+                });
+            }
+            if self.session.is_none() && self.launcher.is_none() {
+                if self.interactive {
+                    self.show_launcher();
+                } else {
+                    self.connect(el, None);
+                }
             }
         }
 
         fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
             let Some(input) = self.session.as_ref().map(|s| s.input.clone()) else { return };
             match event {
-                WindowEvent::CloseRequested => el.exit(),
+                WindowEvent::CloseRequested => {
+                    // Back to the list of PCs (⌘Q quits); with a server given on the command line, close means done.
+                    if self.interactive {
+                        self.locked = false;
+                        self.session = None;
+                        self.show_launcher();
+                    } else {
+                        el.exit();
+                    }
+                }
                 WindowEvent::Focused(false) => {
                     input.release_all();
                     if self.locked {
@@ -457,12 +654,22 @@ mod app {
         }
 
         fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-            if let UserEvent::Menu(action) = event {
-                return self.on_menu(el, action);
+            match event {
+                UserEvent::Menu(action) => return self.on_menu(el, action),
+                UserEvent::Launcher(action) => return self.on_launcher(el, action),
+                UserEvent::LauncherRows(rows) => {
+                    if self.session.is_none()
+                        && let Some(l) = &self.launcher
+                    {
+                        l.set_rows(rows);
+                    }
+                    return;
+                }
+                _ => {}
             }
             let Some(s) = &mut self.session else { return };
             match event {
-                UserEvent::Menu(_) => {}
+                UserEvent::Menu(_) | UserEvent::Launcher(_) | UserEvent::LauncherRows(_) => {}
                 UserEvent::Status(text) => {
                     s.conn_status = text;
                     s.refresh_banner();
@@ -484,8 +691,31 @@ mod app {
                 UserEvent::Fatal(e) => {
                     eprintln!("error: {e}");
                     self.locked = false;
+                    let address = self.session.as_ref().map(|s| s.address.clone());
                     self.session = None;
-                    self.connect(el, Some(e));
+                    if self.interactive || address.is_some() && self.launcher.is_some() {
+                        self.interactive = true;
+                        self.show_launcher();
+                        if let Some(address) = address {
+                            // No reply at all most likely means the PC no longer knows this Mac.
+                            if e.starts_with("no reply") {
+                                if dialog::confirm(
+                                    "Can't reach the PC",
+                                    &format!("{e}\n\nIf this Mac was removed on the PC, pair it again."),
+                                    "Pair again",
+                                    "Cancel",
+                                ) {
+                                    let _ = servers::unpair(&address);
+                                    self.pair_and_connect(el, &address);
+                                }
+                            } else {
+                                dialog::show_message("Disconnected", &e);
+                            }
+                        }
+                    } else {
+                        self.error = Some(e);
+                        el.exit();
+                    }
                 }
             }
         }
@@ -502,15 +732,67 @@ mod app {
         }
     }
 
+    /// `--pair <server>`: the same exchange as the pairing window, in the terminal.
+    fn pair_from_terminal(server: &str) -> Result<(), String> {
+        use std::io::Write;
+        let addr: SocketAddr = transport::resolve(server, 9000).map_err(|e| e.to_string())?;
+        let name = std::env::var("HOSTNAME").unwrap_or_else(|_| "Mac".into());
+        let pairing = pairing::Pairing::start(addr, &name).map_err(|e| e.to_string())?;
+        println!("Asking {server} to pair. On the PC: tray icon, Pair new device…");
+        let mut shown = None;
+        loop {
+            let p = pairing.progress();
+            if shown.as_ref() != Some(&p) {
+                shown = Some(p.clone());
+                match p {
+                    pairing::Progress::Contacting => println!("Contacting…"),
+                    pairing::Progress::NoReply => println!("No reply yet: is the PC listening (Pair new device…) and the address right?"),
+                    pairing::Progress::WaitingForAllow => println!("Waiting for you to allow this device on the PC…"),
+                    pairing::Progress::NeedPin => {
+                        print!("PIN shown on the PC: ");
+                        let _ = std::io::stdout().flush();
+                        let mut line = String::new();
+                        let _ = std::io::stdin().read_line(&mut line);
+                        pairing.submit_pin(line.trim());
+                    }
+                    pairing::Progress::Checking => println!("Checking…"),
+                    pairing::Progress::WrongPin { tries_left } => {
+                        println!("Wrong PIN, {tries_left} tries left.");
+                        pairing.retry();
+                    }
+                    pairing::Progress::Denied => return Err("the PC denied the request".into()),
+                    pairing::Progress::Busy => return Err("another device is pairing with the PC right now".into()),
+                    pairing::Progress::Locked => return Err("pairing was stopped: too many wrong PINs, or the PIN expired".into()),
+                    pairing::Progress::Cancelled => return Err("cancelled".into()),
+                    pairing::Progress::Failed(e) => return Err(e),
+                    pairing::Progress::Done { key, server_name } => {
+                        servers::upsert(server, Some(&server_name), Some(key))?;
+                        println!("Paired with {server_name}. Connect with:  displaywire-client {server}");
+                        return Ok(());
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     pub fn run(cli: Cli) -> Result<(), String> {
         if let Some(which) = &cli.preview {
             match which.as_str() {
-                "connect" => drop(dialog::ask_server(None)),
+                "connect" => drop(dialog::ask_address()),
                 "settings" => drop(dialog::ask_settings(settings::Prefs::load())),
                 "shortcuts" => dialog::show_shortcuts(),
+                "pair" => match crate::pairui::pair(&cli.server.clone().unwrap_or_else(|| "127.0.0.1:9100".into()), "Test PC") {
+                    crate::pairui::Outcome::Paired { server_name, .. } => println!("paired with {server_name}"),
+                    crate::pairui::Outcome::Cancelled => println!("cancelled"),
+                    crate::pairui::Outcome::Failed(e) => println!("failed: {e}"),
+                },
                 other => return Err(format!("unknown dialog {other}")),
             }
             return Ok(());
+        }
+        if let Some(server) = &cli.pair {
+            return pair_from_terminal(server);
         }
         if let Some(args) = &cli.set_key {
             let key = secure::Key::parse(&args[1]).map_err(|e| e.to_string())?;
@@ -530,6 +812,9 @@ mod app {
             locked: false,
             error: None,
             menu_installed: false,
+            launcher: None,
+            probing: Arc::new(AtomicBool::new(false)),
+            probe_started: false,
         };
         event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
         app.session = None;

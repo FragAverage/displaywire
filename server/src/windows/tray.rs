@@ -1,10 +1,10 @@
 //! The notification-area icon: a tooltip with the connection status, a
 //! balloon when a file arrives, and a small menu. It lives in the server
 //! process in the user's session; things that should happen as the user
-//! (opening folders, the pairing key's elevation prompt) are launched as them.
+//! (opening folders, the device-management window) are launched as them.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -30,7 +30,8 @@ const ICON_ID: u32 = 1;
 const TIMER_ID: usize = 1;
 
 const CMD_OPEN_FILES: usize = 10;
-const CMD_SHOW_KEY: usize = 11;
+const CMD_PAIR: usize = 11;
+const CMD_MANAGE: usize = 12;
 const CMD_COPY_ADDR: usize = 20;
 
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
@@ -187,8 +188,44 @@ unsafe fn add_icon(hwnd: HWND) {
     }
 }
 
+/// When the window was last started, so a second click doesn't start another while the first is still opening.
+static UI_LAUNCHED_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Shows the device-management window: brings the open one forward, or starts it as the logged-in user.
+fn open_ui(st: &State) {
+    let shared = &st.shared;
+    if shared.ui_open.load(Relaxed) > 0 {
+        shared.ui_front.store(true, Relaxed);
+        return;
+    }
+    let now = timing::now_ns();
+    if now.saturating_sub(UI_LAUNCHED_NS.load(Relaxed)) < 5_000_000_000 {
+        return;
+    }
+    UI_LAUNCHED_NS.store(now, Relaxed);
+    let Some(handle) = shared.ui_handle.get() else { return };
+    let (port, token) = (handle.port.to_string(), handle.token.clone());
+    let cmd = format!("\"{}\" --ui {port} {token}", st.exe.display());
+    println!("ui: starting the device window");
+    if let Err(e) = super::shell::spawn_as_user(&cmd) {
+        // Not running as a service (no other user to launch as): start it as ourselves.
+        println!("ui: can't start the window as the logged-in user ({e}); starting it as this user");
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new(&st.exe).args(["--ui", &port, &token]).creation_flags(0x0800_0000).spawn();
+    }
+}
+
+/// A device asking to pair opens the window if it isn't open.
+fn auto_open(st: &State) {
+    use crate::pairing::View;
+    if matches!(st.shared.pairing.snapshot(timing::now_ns()).view, View::Asking { .. } | View::Pin { .. }) {
+        open_ui(st);
+    }
+}
+
 unsafe fn update_tooltip(hwnd: HWND) {
     let Some(st) = (unsafe { state(hwnd) }) else { return };
+    auto_open(st);
     let mut nid = data(hwnd, NIF_TIP);
     nid.szTip = wide(&tooltip(st));
     // If the icon went missing (the shell restarted before we noticed), put it back.
@@ -209,7 +246,9 @@ unsafe fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(menu, MF_STRING, CMD_COPY_ADDR + i, PCWSTR(text.as_ptr()));
         }
         let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN_FILES, w!("Open received files"));
-        let _ = AppendMenuW(menu, MF_STRING, CMD_SHOW_KEY, w!("Show pairing key (asks for permission)"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, CMD_PAIR, w!("Pair new device…"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_MANAGE, w!("Manage devices…"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
@@ -230,12 +269,11 @@ unsafe fn command(hwnd: HWND, cmd: usize) {
                 let _ = super::shell::spawn_as_user(&format!("explorer.exe \"{}\"", dir.display()));
             }
         }
-        CMD_SHOW_KEY => {
-            // Elevation as the user, so a standard user is asked for an administrator's password.
-            let exe = st.exe.display();
-            let ps = format!("Start-Process -FilePath '{exe}' -ArgumentList '--show-key','--pause' -Verb RunAs");
-            let _ = super::shell::spawn_as_user(&format!("powershell.exe -NoProfile -WindowStyle Hidden -Command \"{ps}\""));
+        CMD_PAIR => {
+            st.shared.pairing.start(timing::now_ns());
+            open_ui(st);
         }
+        CMD_MANAGE => open_ui(st),
         c if c >= CMD_COPY_ADDR => {
             if let Some(a) = st.addresses.get(c - CMD_COPY_ADDR) {
                 super::shell::set_clipboard_text(a);

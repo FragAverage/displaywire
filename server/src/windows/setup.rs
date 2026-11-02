@@ -88,7 +88,7 @@ pub fn setup() -> Result<(), String> {
 }
 
 /// Removes the service, firewall rule and install folder. `purge` also deletes the
-/// pairing key and logs.
+/// paired devices and logs.
 pub fn uninstall(purge: bool) -> Result<(), String> {
     run("sc", &["stop", SERVICE]);
     std::thread::sleep(std::time::Duration::from_millis(2000));
@@ -103,7 +103,7 @@ pub fn uninstall(purge: bool) -> Result<(), String> {
     let remove: Vec<String> = paths.iter().map(|p| format!("rmdir /s /q \"{}\"", p.display())).collect();
     // `ping` is the delay (`timeout` needs a console); raw_arg keeps cmd's own quoting intact.
     let _ = Command::new("cmd").raw_arg(format!("/c ping -n 4 127.0.0.1 >nul & {}", remove.join(" & "))).spawn();
-    println!("DisplayWire Server has been removed.{}", if purge { "" } else { " Its pairing key and logs were kept in ProgramData\\DisplayWire." });
+    println!("DisplayWire Server has been removed.{}", if purge { "" } else { " Its paired devices and logs were kept in ProgramData\\DisplayWire." });
     Ok(())
 }
 
@@ -125,10 +125,10 @@ pub fn interactive() -> bool {
     println!("DisplayWire Server {}\n", env!("CARGO_PKG_VERSION"));
     if is_installed() {
         println!("DisplayWire Server is installed as a Windows service.");
-        println!("  u = uninstall it    k = show the pairing key    r = run a copy in this window instead    Enter = close");
+        println!("  u = uninstall it    k = list paired devices    r = run a copy in this window instead    Enter = close");
         match ask("> ").as_str() {
             "u" => finish(if is_elevated() { uninstall(false) } else { relaunch_elevated("--uninstall --pause") }, false),
-            "k" => finish(relaunch_elevated("--show-key --pause"), false),
+            "k" => finish(relaunch_elevated("--list-clients --pause"), false),
             "r" => return true,
             _ => {}
         }

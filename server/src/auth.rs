@@ -1,17 +1,19 @@
-//! The pairing key on disk, and the connection to the one authenticated
-//! client. See `docs/AUTH.md`.
+//! Private files on disk (the paired devices), and the connection to the one
+//! authenticated client. See `docs/AUTH.md` and `docs/PAIRING.md`.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use secure::{Key, Session};
+use secure::Session;
 
 /// The authenticated client that video, audio and replies go to.
 #[derive(Clone)]
 pub struct Link {
     pub addr: SocketAddr,
     pub session: Arc<Session>,
+    /// Which paired device this is (its id in `clients`).
+    pub client: Arc<str>,
 }
 
 impl Link {
@@ -23,56 +25,63 @@ impl Link {
     }
 }
 
-pub fn default_key_path() -> PathBuf {
+/// Where the server keeps its data: the paired devices (and, from earlier versions, the single shared key).
+pub fn default_dir() -> PathBuf {
     #[cfg(windows)]
     {
-        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("DisplayWire").join("key")
+        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("DisplayWire")
     }
     #[cfg(not(windows))]
     {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config/displaywire/key")
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config/displaywire")
     }
 }
 
-/// Reads the key, creating it first if there is none. Returns whether it was just created.
-pub fn load_or_create(path: &Path) -> Result<(Key, bool), String> {
+/// Reads a private file, `None` if it isn't there.
+pub fn read_private(path: &Path) -> Result<Option<String>, String> {
     guard(path)?;
     match std::fs::read_to_string(path) {
-        Ok(text) => Key::parse(&text).map(|k| (k, false)).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_new(path).map(|k| (k, true)),
-        Err(e) => Err(format!("read {}: {e} (run as administrator, or use --key-file)", path.display())),
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {e} (run as administrator, or use --data-dir)", path.display())),
     }
 }
 
-/// Replaces the key. Every paired client stops working until it gets the new one.
-pub fn write_new(path: &Path) -> Result<Key, String> {
+/// Writes a private file, replacing any old one. Written under a temporary name that is already
+/// private, then renamed, so the contents are never readable by others and a crash can't leave half a file.
+pub fn write_private(path: &Path, contents: &str) -> Result<(), String> {
     guard(path)?;
-    let key = Key::generate();
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e} (run as administrator, or use --key-file)", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e} (run as administrator, or use --data-dir)", dir.display()))?;
     }
-    // Written without the key readable by others first, then filled in.
-    std::fs::write(path, "").map_err(|e| format!("write {}: {e}", path.display()))?;
-    protect(path)?;
-    std::fs::write(path, format!("{key}\n")).map_err(|e| format!("write {}: {e}", path.display()))?;
-    Ok(key)
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, "").map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    protect(&tmp)?;
+    std::fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
 }
 
-/// Before the default key is read or written, locks its folder down and makes
-/// sure nobody but SYSTEM or an administrator put the key there. Otherwise a
-/// standard user could create `ProgramData\DisplayWire\key` before the server
-/// is installed, and the server would accept their key.
+/// Whether `path` is in the default data folder (as opposed to one chosen with `--data-dir`).
+#[cfg(windows)]
+fn in_default_dir(path: &Path) -> bool {
+    path.parent() == Some(default_dir().as_path())
+}
+
+/// Before a file in the default folder is read or written, locks the folder down and makes
+/// sure nobody but SYSTEM or an administrator put the file there. Otherwise a
+/// standard user could create `ProgramData\DisplayWire\clients` before the server
+/// is installed, and the server would accept their keys.
 #[cfg(windows)]
 fn guard(path: &Path) -> Result<(), String> {
-    if path != default_key_path() {
-        return Ok(()); // --key-file: wherever the administrator chose
+    if !in_default_dir(path) {
+        return Ok(()); // --data-dir: wherever the administrator chose
     }
     if let Some(dir) = path.parent() {
-        lock_dir(dir).map_err(|e| format!("{e} (run as administrator, or use --key-file)"))?;
+        lock_dir(dir).map_err(|e| format!("{e} (run as administrator, or use --data-dir)"))?;
     }
     if path.exists() && !acl::owned_by_admins(path)? {
         return Err(format!(
-            "{} is not owned by SYSTEM or Administrators, so someone else may have put it there: delete it and run --new-key as administrator",
+            "{} is not owned by SYSTEM or Administrators, so someone else may have put it there: delete it and pair your devices again",
             path.display()
         ));
     }
@@ -95,11 +104,11 @@ pub fn lock_dir(dir: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn protect(path: &Path) -> Result<(), String> {
-    if path == default_key_path() {
+    if in_default_dir(path) {
         // Owned by Administrators whatever the default-owner policy says, so `guard` accepts it.
         acl::set(path, "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)")
     } else {
-        // SYSTEM, administrators and the file's owner (whoever chose --key-file).
+        // SYSTEM, administrators and the file's owner (whoever chose --data-dir).
         acl::set(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
     }
 }

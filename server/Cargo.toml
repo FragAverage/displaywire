@@ -7,7 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The device-management window is always built on Windows; this builds it elsewhere too, for development.
+ui-dev = ["dep:eframe"]
+
 [dependencies]
+eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"], optional = true }
 proto.workspace = true
 timing.workspace = true
 transport.workspace = true
@@ -16,8 +21,10 @@ xfer.workspace = true
 hevc.workspace = true
 rtrb = "0.4"
 clap = { version = "4.6.7", features = ["derive"] }
+getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
 windows-core = "0.62"
 moq-nvenc = "0.1"
 windows = { version = "0.62.2", features = [

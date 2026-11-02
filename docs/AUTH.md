@@ -17,25 +17,23 @@ v5). Replaces the unauthenticated protocol of v4 and earlier.
   small string that can be copied over SSH or any other channel.
 - No cost on the hot path beyond ~1 µs of ChaCha20-Poly1305 per datagram.
 
-Non-goals (for now): per-client keys and revocation of a single client, a PIN
-pairing UI, certificate-style identity for the server. See "Later".
+Per-device keys, revoking a single device and PIN pairing are described in `docs/PAIRING.md`. Non-goals (for
+now): certificate-style identity for the server. See "Later".
 
 ## Pairing key
 
-32 random bytes, written as `dw1-` plus 64 hex characters.
+32 random bytes, written as `dw1-` plus 64 hex characters. **Each paired device has its own** (see
+`docs/PAIRING.md`): a new device is given one by the server during PIN pairing, and nobody types or copies it.
 
-- Server: created on first run or by `--install-service`, stored in
-  `C:\ProgramData\DisplayWire\key` readable only by SYSTEM and Administrators.
-  The server locks that folder down to them before using it, and refuses a
-  key file owned by anyone else, so a standard user can't plant their own key.
-  `displaywire-server --show-key` prints it, `--new-key` replaces it (which
-  disconnects and revokes every client).
-- Client: `DisplayWire.app` asks for it in the connect dialog the first time (and
-  whenever the server rejects it). It is kept per server address in
-  `~/Library/Application Support/DisplayWire/keys/` with mode 0600.
-  `displaywire-client --set-key <server> <key>` stores one without the dialog.
+- Server: the list of devices and their keys is `C:\ProgramData\DisplayWire\clients`, readable only by SYSTEM
+  and Administrators. The server locks that folder down to them before using it, and refuses a file owned by
+  anyone else, so a standard user can't plant their own key. On a handshake it tries each device's key; the one
+  that opens it says who is connecting. Removing a device (`displaywire-server --remove-client`, or the window)
+  disconnects it and refuses its key from then on.
+- Client: the key for each PC is kept with the saved PCs in
+  `~/Library/Application Support/DisplayWire/pcs`, mode 0600.
 
-Anyone holding the key can connect. Treat it like a password.
+Anyone holding a device's key can connect as that device. Treat it like a password.
 
 ## Handshake
 
@@ -95,15 +93,11 @@ After the handshake every datagram is:
 
 ## Failure modes the client reports
 
-- No HS2 within 5 s: server not running, firewall, **or wrong pairing key**
-  (the server deliberately doesn't say which). The error names all three.
+- No HS2 within 5 s: server not running, firewall, **or the PC no longer has this device paired**
+  (the server deliberately doesn't say which). The error names them, and the Mac app offers to pair again.
 - Session lost mid-stream: the client re-handshakes automatically.
 
 ## Later
 
-- PIN pairing: a time-limited, rate-limited exchange that hands the key to a
-  new client, as another way to provision the same key (needs a screen on the
-  server, so not done yet).
-- Per-client keys (Noise XX or IK with static keys and an authorised-keys list)
-  so one client can be revoked.
 - Windows firewall scoping to LAN and tailnet only.
+- More than one device connected at a time (today one is active; another connecting takes over).

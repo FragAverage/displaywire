@@ -3,101 +3,63 @@
 use std::path::PathBuf;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSButton, NSColor, NSComboBox, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSSecureTextField, NSSlider,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSButton, NSControlStateValueOff,
+    NSControlStateValueOn, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSSlider,
     NSTextField, NSView,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 
 use crate::settings::Prefs;
-use crate::{discovery, keys};
-
-/// What the user entered.
-pub struct Entered {
-    pub server: String,
-    /// A pairing key typed in, if any (otherwise the saved one is used).
-    pub key: Option<String>,
-}
-
-const MAX_RECENT: usize = 8;
+use crate::discovery;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }
 
-fn label(mtm: MainThreadMarker, text: &str, frame: NSRect) -> Retained<NSTextField> {
-    let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
-    l.setFrame(frame);
-    l.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-    l.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    l
-}
-
-/// Asks for the server (a combo box of recent and discovered ones) and, if one
-/// isn't saved yet, its pairing key. `None` means quit.
-pub fn ask_server(problem: Option<&str>) -> Option<Entered> {
+/// A question with a one-line answer. `None` if cancelled or left empty.
+pub fn ask_text(title: &str, info: &str, current: &str, placeholder: &str, ok: &str) -> Option<String> {
     let mtm = MainThreadMarker::new().expect("main thread");
-    let recent = recent_servers();
-    let found = discovery::browse(std::time::Duration::from_millis(700));
-
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(ns_string!("Connect to DisplayWire"));
-    let mut info = String::new();
-    if let Some(p) = problem {
-        info += &format!("{p}\n\n");
-        alert.setAlertStyle(NSAlertStyle::Warning);
-    }
-    info += "Address of the PC running displaywire-server.";
-    if !found.is_empty() {
-        let list: Vec<String> = found.iter().map(|f| format!("{} ({})", f.name, f.address)).collect();
-        info += &format!("\nFound on this network: {}", list.join(", "));
-    }
-    alert.setInformativeText(&NSString::from_str(&info));
-    alert.addButtonWithTitle(ns_string!("Connect"));
-    alert.addButtonWithTitle(ns_string!("Quit"));
-
-    let (w, h) = (320.0, 108.0);
-    let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
-    view.addSubview(&label(mtm, "Server", rect(0.0, h - 16.0, w, 14.0)));
-    let combo = NSComboBox::initWithFrame(NSComboBox::alloc(mtm), rect(0.0, h - 42.0, w, 24.0));
-    combo.setCompletes(true);
-    let mut items: Vec<String> = recent.clone();
-    for f in &found {
-        if !items.contains(&f.address) {
-            items.push(f.address.clone());
-        }
-    }
-    for item in &items {
-        let s = NSString::from_str(item);
-        unsafe { combo.addItemWithObjectValue(&*(&*s as *const NSString as *const AnyObject)) };
-    }
-    let first = problem.is_none().then(|| recent.first().or(items.first()).cloned()).flatten().unwrap_or_default();
-    combo.setStringValue(&NSString::from_str(&first));
-    combo.setPlaceholderString(Some(ns_string!("e.g. 192.168.1.50 or gaming-pc")));
-    view.addSubview(&combo);
-
-    let saved = keys::load(&first).is_some();
-    view.addSubview(&label(mtm, "Pairing key", rect(0.0, 36.0, w, 14.0)));
-    let key = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), rect(0.0, 10.0, w, 24.0));
-    key.setPlaceholderString(Some(if saved {
-        ns_string!("Saved: leave empty to use it")
-    } else {
-        ns_string!("dw1-… from displaywire-server --show-key")
-    }));
-    view.addSubview(&key);
-    alert.setAccessoryView(Some(&view));
-    alert.window().setInitialFirstResponder(Some(&combo));
-
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(info));
+    alert.addButtonWithTitle(&NSString::from_str(ok));
+    alert.addButtonWithTitle(ns_string!("Cancel"));
+    let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(0.0, 0.0, 320.0, 24.0));
+    field.setStringValue(&NSString::from_str(current));
+    field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+    alert.setAccessoryView(Some(&field));
+    alert.window().setInitialFirstResponder(Some(&field));
     NSApplication::sharedApplication(mtm).activate();
     if alert.runModal() != NSAlertFirstButtonReturn {
         return None;
     }
-    let server = combo.stringValue().to_string().trim().to_string();
-    let typed = key.stringValue().to_string().trim().to_string();
-    Some(Entered { server, key: (!typed.is_empty()).then_some(typed) })
+    let text = field.stringValue().to_string().trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The address of a PC to add, with the ones found on the network listed in the message.
+pub fn ask_address() -> Option<String> {
+    let found = discovery::browse(std::time::Duration::from_millis(700));
+    let mut info = String::from("The address of the PC running DisplayWire Server: its IP address or computer name.");
+    if !found.is_empty() {
+        let list: Vec<String> = found.iter().map(|f| format!("{} ({})", f.name, f.address)).collect();
+        info += &format!("\nFound on this network: {}", list.join(", "));
+    }
+    ask_text("Add a PC", &info, "", "e.g. 192.168.1.50 or gaming-pc", "Add")
+}
+
+/// A yes/no question.
+pub fn confirm(title: &str, text: &str, ok: &str, cancel: &str) -> bool {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    alert.addButtonWithTitle(&NSString::from_str(ok));
+    alert.addButtonWithTitle(&NSString::from_str(cancel));
+    NSApplication::sharedApplication(mtm).activate();
+    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 const FPS_CAPS: [u16; 7] = [0, 30, 60, 90, 120, 144, 240];
@@ -234,7 +196,7 @@ pub fn state_file(name: &str) -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Library/Application Support/DisplayWire").join(name))
 }
 
-/// Servers connected to before, most recent first.
+/// Servers connected to before, most recent first (from before `servers`, kept for importing).
 pub fn recent_servers() -> Vec<String> {
     let read = |name: &str| state_file(name).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     let mut list: Vec<String> = read("servers").lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
@@ -244,16 +206,4 @@ pub fn recent_servers() -> Vec<String> {
         list.push(old);
     }
     list
-}
-
-/// Puts `server` first in the list of recent servers.
-pub fn remember(server: &str) {
-    let mut list = recent_servers();
-    list.retain(|s| s != server);
-    list.insert(0, server.to_string());
-    list.truncate(MAX_RECENT);
-    if let Some(path) = state_file("servers") {
-        let _ = path.parent().map(std::fs::create_dir_all);
-        let _ = std::fs::write(path, list.join("\n"));
-    }
 }

@@ -236,7 +236,7 @@ impl Receiver {
             if !alive {
                 if !ever_connected && now - begin > 5 * SEC {
                     return Err(format!(
-                        "no reply from {}: is displaywire-server running, is udp/{} allowed through its firewall, and is the pairing key right?",
+                        "no reply from {}: the PC may be off or unreachable (is udp/{} allowed through its firewall?), or it no longer has this Mac paired.",
                         self.server,
                         self.server.port()
                     ));

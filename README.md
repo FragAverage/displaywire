@@ -12,17 +12,17 @@ Download from the repo's Releases page:
   ```
   xattr -dr com.apple.quarantine /Applications/DisplayWire.app
   ```
-  It asks for the server's address on launch and remembers it. From a
+  It shows your PCs; click one to connect. From a
   terminal, `/Applications/DisplayWire.app/Contents/MacOS/displaywire-client <server-ip>`
   connects directly and prints live stats.
 - **Windows server** (`displaywire-server-windows.zip`): double-click
   `displaywire-server.exe` and answer **Y**. After a UAC prompt it installs itself to
   `Program Files\DisplayWire` as a service (starts with Windows, streams UAC prompts and
   the login screen), opens the firewall for it, adds an entry to *Installed apps*
-  and prints the pairing key to enter in the Mac client. A tray icon shows who is
-  connected; its menu opens the received-files folder and shows the pairing key
-  (after a permission prompt). Uninstall from *Installed apps*, or
-  `displaywire-server.exe --uninstall` (`--purge` also deletes the key and logs).
+  and tells you to pair your first device from the tray icon. A tray icon shows who is
+  connected; its menu pairs new devices, manages paired ones and opens the received-files
+  folder. Uninstall from *Installed apps*, or
+  `displaywire-server.exe --uninstall` (`--purge` also deletes the paired devices and logs).
 
 To publish a release, push a tag: `git tag v0.5.0 && git push origin v0.5.0`.
 
@@ -74,19 +74,21 @@ elevated windows.
 
 ## Pairing
 
-The server has a pairing key and encrypts everything with it; a client without
-the key can't see or do anything, and the server doesn't answer it at all
-(details in `docs/AUTH.md`).
+Every device has a key of its own, and everything is encrypted with it; a client that isn't paired can't see or do
+anything, and the server doesn't answer it at all (details in `docs/AUTH.md` and `docs/PAIRING.md`).
 
-- `displaywire-server.exe --install-service` creates the key (in
-  `C:\ProgramData\DisplayWire\key`, readable only by administrators) and prints it.
-  `--show-key` prints it again, `--new-key` replaces it (every client then needs
-  the new one).
-- On the Mac, once per server: `displaywire-client --set-key <server> <key>`, or
-  `displaywire-client <server> --key <key>`. It is kept in
-  `~/Library/Application Support/DisplayWire/keys`.
-- You can fetch the key from the Mac over SSH, without touching the PC:
-  `ssh gaming-pc 'C:\ProgramData\DisplayWire\displaywire-server.exe --show-key'`.
+To pair a Mac:
+
+1. On the PC, click the DisplayWire tray icon → **Pair new device…**
+2. On the Mac, open DisplayWire → **Add PC…**, enter the PC's address (or click it if it was found on the network).
+3. On the PC, **Allow** the request. A 6-digit PIN appears; type it on the Mac.
+
+That's all: no key to copy. The PC's **Manage devices…** window lists paired devices and removes them (which destroys
+that device's key and disconnects it at once). Over SSH, `displaywire-server --pair` does the PC side from a console,
+and `--list-clients` / `--remove-client <id or name>` manage the list.
+
+The Mac keeps a list of PCs; click one to connect. From a terminal: `displaywire-client --pair <server>` pairs,
+then `displaywire-client <server>` connects.
 
 ## Clipboard and files
 

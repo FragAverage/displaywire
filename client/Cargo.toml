@@ -12,6 +12,7 @@ proto.workspace = true
 timing.workspace = true
 transport.workspace = true
 secure.workspace = true
+pairing.workspace = true
 xfer.workspace = true
 if-addrs = "0.13"
 hevc.workspace = true

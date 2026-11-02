@@ -18,6 +18,9 @@ pub struct Announcement {
     pub port: u16,
     pub version: u16,
     pub name: String,
+    /// The server's own IPv4 address on the network the query came from. Windows answers a
+    /// broadcast query from the broadcast address itself, so the sender's address can't be used.
+    pub address: Option<[u8; 4]>,
 }
 
 pub fn query(nonce: [u8; 8]) -> [u8; QUERY_LEN] {
@@ -50,6 +53,9 @@ pub fn reply(nonce: [u8; 8], a: &Announcement, out: &mut [u8]) -> usize {
     w.u16(a.version);
     w.u8(name.len() as u8);
     w.bytes(name);
+    if let Some(ip) = a.address {
+        w.bytes(&ip);
+    }
     w.len()
 }
 
@@ -60,8 +66,10 @@ pub fn parse_reply(datagram: &[u8]) -> Option<([u8; 8], Announcement)> {
     let nonce = r.take()?;
     let (port, version) = (r.u16()?, r.u16()?);
     let len = r.u8()? as usize;
-    let name = String::from_utf8_lossy(r.rest().get(..len)?).into_owned();
-    Some((nonce, Announcement { port, version, name }))
+    let rest = r.rest();
+    let name = String::from_utf8_lossy(rest.get(..len)?).into_owned();
+    let address = rest.get(len..len + 4).and_then(|b| b.try_into().ok());
+    Some((nonce, Announcement { port, version, name, address }))
 }
 
 #[cfg(test)]
@@ -72,12 +80,16 @@ mod tests {
     fn roundtrip_and_sizes() {
         let q = query([1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(parse_query(&q), Some([1, 2, 3, 4, 5, 6, 7, 8]));
-        let a = Announcement { port: 9000, version: 5, name: "GAMING-PC".into() };
+        let a = Announcement { port: 9000, version: 5, name: "GAMING-PC".into(), address: Some([192, 168, 1, 50]) };
         let mut out = [0u8; 128];
         let n = reply([1, 2, 3, 4, 5, 6, 7, 8], &a, &mut out);
         assert_eq!(parse_reply(&out[..n]), Some(([1, 2, 3, 4, 5, 6, 7, 8], a)));
+        // A server that doesn't say its address (older ones) still parses.
+        let old = Announcement { port: 9000, version: 5, name: "OLD".into(), address: None };
+        let n = reply([9; 8], &old, &mut out);
+        assert_eq!(parse_reply(&out[..n]), Some(([9; 8], old)));
         // The longest possible reply is still smaller than a query.
-        let long = Announcement { port: 1, version: 1, name: "x".repeat(200) };
+        let long = Announcement { port: 1, version: 1, name: "x".repeat(200), address: Some([1, 2, 3, 4]) };
         assert!(reply([0; 8], &long, &mut out) < QUERY_LEN);
     }
 

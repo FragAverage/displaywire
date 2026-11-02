@@ -14,21 +14,23 @@ use cpal::{BufferSize, SampleFormat, SupportedBufferSize};
 use proto::stream::{AUDIO_CHANNELS, AUDIO_RATE};
 use timing::{Samples, now_ns};
 
+use crate::resample::{Frame, Resampler};
+
 const CH: usize = AUDIO_CHANNELS;
-const MS: usize = AUDIO_RATE as usize / 1000;
+// The ring holds frames at the device's rate, so these are in ms and scaled when the stream opens.
 /// Cushion before playback starts, to begin with / at least / at most.
-const PREFILL_START: usize = 10 * MS;
-const PREFILL_MIN: usize = 5 * MS;
-const PREFILL_MAX: usize = 160 * MS;
+const PREFILL_START_MS: usize = 10;
+const PREFILL_MIN_MS: usize = 5;
+const PREFILL_MAX_MS: usize = 160;
 /// How often the unused backlog is shed: 1 s of playback. Shorter windows (250 ms) shed audio the
 /// player then turns out to need, and the cushion climbs instead.
-const WINDOW: usize = AUDIO_RATE as usize;
+const WINDOW_MS: usize = 1000;
 /// Kept on top of the cushion before the unused part is dropped.
-const SLACK: usize = 5 * MS;
+const SLACK_MS: usize = 5;
 /// A burst beyond this is dropped at once.
-const HARD_MAX: usize = 100 * MS;
+const HARD_MAX_MS: usize = 100;
 /// Ring capacity.
-const RING_FRAMES: usize = 12_000;
+const RING_MS: usize = 250;
 /// No packet for this long: the server is idle (silence), not late.
 const IDLE_NS: u64 = 60_000_000;
 /// Device buffer requested: ~2.7 ms.
@@ -55,6 +57,13 @@ pub struct Player {
     producer: rtrb::Producer<i16>,
     _stream: cpal::Stream,
     counters: Arc<Counters>,
+    /// The device's rate and channels: the stream's own (48 kHz stereo) unless the device can't take it.
+    rate: u32,
+    ch: usize,
+    /// Only when the device runs at another rate.
+    resampler: Option<Resampler>,
+    /// Converted samples, waiting to go into the ring.
+    converted: Vec<i16>,
     last_seq: Option<u32>,
     lost_chunks: u32,
     last_report: (u32, u32, u32),
@@ -66,31 +75,34 @@ pub struct Player {
     peak: i16,
 }
 
-/// Opens the output stream with the given buffer size.
-fn open(device: &cpal::Device, buffer: BufferSize) -> Result<(rtrb::Producer<i16>, cpal::Stream, Arc<Counters>), String> {
-        let config = cpal::StreamConfig { channels: CH as u16, sample_rate: AUDIO_RATE, buffer_size: buffer };
-        let (producer, mut consumer) = rtrb::RingBuffer::<i16>::new(RING_FRAMES * CH);
+/// Opens the output stream at the given rate, channels and buffer size.
+fn open(device: &cpal::Device, rate: u32, ch: usize, buffer: BufferSize) -> Result<(rtrb::Producer<i16>, cpal::Stream, Arc<Counters>), String> {
+        let config = cpal::StreamConfig { channels: ch as u16, sample_rate: rate, buffer_size: buffer };
+        let ms = rate as usize / 1000;
+        let (prefill_min, prefill_max, window, slack, hard_max) =
+            (PREFILL_MIN_MS * ms, PREFILL_MAX_MS * ms, WINDOW_MS * ms, SLACK_MS * ms, HARD_MAX_MS * ms);
+        let (producer, mut consumer) = rtrb::RingBuffer::<i16>::new(RING_MS * ms * ch);
         let counters = Arc::new(Counters::default());
         counters.gain.store(1.0f32.to_bits(), Relaxed);
         let c = counters.clone();
         let mut playing = false;
-        let mut prefill = PREFILL_START;
+        let mut prefill = PREFILL_START_MS * ms;
         let (mut win_frames, mut win_min, mut win_ok, mut calm) = (0usize, usize::MAX, true, 0u32);
         let callback = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let mut avail = consumer.slots() / CH;
+            let mut avail = consumer.slots() / ch;
             let drop_frames = |consumer: &mut rtrb::Consumer<i16>, frames: usize| {
-                if frames > 0 && let Ok(chunk) = consumer.read_chunk(frames * CH) {
+                if frames > 0 && let Ok(chunk) = consumer.read_chunk(frames * ch) {
                     chunk.commit_all();
                     c.dropped.fetch_add(frames as u32, Relaxed);
                 }
             };
-            if avail > HARD_MAX {
+            if avail > hard_max {
                 drop_frames(&mut consumer, avail - prefill);
                 avail = prefill;
             }
             c.fill.store(avail as u32, Relaxed);
             c.cushion.store(prefill as u32, Relaxed);
-            c.block.store((data.len() / CH) as u32, Relaxed);
+            c.block.store((data.len() / ch) as u32, Relaxed);
             let idle = now_ns().saturating_sub(c.last_packet_ns.load(Relaxed)) > IDLE_NS;
             if !playing && avail >= prefill {
                 playing = true;
@@ -98,9 +110,9 @@ fn open(device: &cpal::Device, buffer: BufferSize) -> Result<(rtrb::Producer<i16
             }
             if playing {
                 win_min = win_min.min(avail);
-                win_frames += data.len() / CH;
+                win_frames += data.len() / ch;
             }
-            let take = if playing { (avail * CH).min(data.len()) } else { 0 };
+            let take = if playing { (avail * ch).min(data.len()) } else { 0 };
             if take > 0 && let Ok(chunk) = consumer.read_chunk(take) {
                 let (a, b) = chunk.as_slices();
                 let gain = f32::from_bits(c.gain.load(Relaxed)) / 32768.0;
@@ -115,18 +127,18 @@ fn open(device: &cpal::Device, buffer: BufferSize) -> Result<(rtrb::Producer<i16
                 if !idle {
                     c.underruns.fetch_add(1, Relaxed);
                     win_ok = false;
-                    prefill = (prefill + 6 * MS).min(PREFILL_MAX);
+                    prefill = (prefill + 6 * ms).min(prefill_max);
                     calm = 0;
                 }
             }
-            if playing && win_frames >= WINDOW {
+            if playing && win_frames >= window {
                 // A window without an underrun: shed what was never used.
                 if win_ok {
-                    let excess = win_min.saturating_sub(prefill + SLACK);
+                    let excess = win_min.saturating_sub(prefill + slack);
                     drop_frames(&mut consumer, excess);
                     calm += 1;
                     if calm >= 2 {
-                        prefill = prefill.saturating_sub(2 * MS).max(PREFILL_MIN);
+                        prefill = prefill.saturating_sub(2 * ms).max(prefill_min);
                         calm = 0;
                     }
                 }
@@ -135,7 +147,7 @@ fn open(device: &cpal::Device, buffer: BufferSize) -> Result<(rtrb::Producer<i16
         };
         let stream = device
             .build_output_stream(config, callback, |e| eprintln!("audio output: {e}"), None)
-            .map_err(|e| format!("can't open the output device at 48 kHz stereo: {e}"))?;
+            .map_err(|e| format!("can't open the output device at {} kHz {}: {e}", rate as f32 / 1000.0, if ch == 1 { "mono" } else { "stereo" }))?;
         Ok((producer, stream, counters))
 }
 
@@ -149,22 +161,56 @@ impl Player {
             _ => BufferSize::Default,
         };
         println!("audio: device {:?}, buffer sizes {:?}, asking for {:?}", device.description().map(|d| d.to_string()).unwrap_or_default(), supported.buffer_size(), buffer);
-        // A small fixed buffer is best, but some outputs (Bluetooth, HDMI, USB) refuse it: let the device choose then.
-        let (producer, stream, counters) = match open(&device, buffer) {
-            Ok(opened) => opened,
-            Err(e) if buffer != BufferSize::Default => {
-                println!("audio: the device refused that buffer ({e}); letting it choose");
-                open(&device, BufferSize::Default)?
+        // The stream's own 48 kHz stereo when the device can take it. Otherwise the device's own format, converted here:
+        // a Bluetooth headset in hands-free mode (its mic in use) runs at 16 kHz mono only. A small fixed buffer is
+        // best, but some outputs (Bluetooth, HDMI, USB) refuse it: let the device choose then.
+        let own = (supported.sample_rate(), (supported.channels() as usize).min(CH));
+        let mut formats = vec![(AUDIO_RATE, CH)];
+        if own != formats[0] {
+            formats.push(own);
+        }
+        let buffers = if buffer == BufferSize::Default { vec![buffer] } else { vec![buffer, BufferSize::Default] };
+        let mut error = String::new();
+        let mut opened = None;
+        'open: for &(rate, ch) in &formats {
+            for buffer in &buffers {
+                match open(&device, rate, ch, *buffer) {
+                    Ok(o) => {
+                        opened = Some((rate, ch, o));
+                        break 'open;
+                    }
+                    Err(e) => {
+                        println!("audio: {e} (buffer {buffer:?})");
+                        error = e;
+                    }
+                }
             }
-            Err(e) => return Err(e),
-        };
+        }
+        let (rate, ch, (producer, stream, counters)) = opened.ok_or(error)?;
+        if (rate, ch) != (AUDIO_RATE, CH) {
+            println!("audio: the device runs at {rate} Hz, {ch} channel(s); converting");
+        }
         if supported.sample_format() != SampleFormat::F32 {
             // cpal converts for us; nothing to do, but worth knowing.
             println!("audio: device format is {}", supported.sample_format());
         }
         stream.play().map_err(|e| e.to_string())?;
         println!("audio: playing on the default output");
-        Ok(Player { producer, _stream: stream, counters, last_seq: None, lost_chunks: 0, last_report: (0, 0, 0), age: Samples::default(), age_ms: 0.0, peak: 0 })
+        Ok(Player {
+            producer,
+            _stream: stream,
+            counters,
+            rate,
+            ch,
+            resampler: (rate != AUDIO_RATE).then(|| Resampler::new(AUDIO_RATE, rate)),
+            converted: Vec::new(),
+            last_seq: None,
+            lost_chunks: 0,
+            last_report: (0, 0, 0),
+            age: Samples::default(),
+            age_ms: 0.0,
+            peak: 0,
+        })
     }
 
     /// Volume and mute: a linear gain, 1.0 for unchanged.
@@ -184,14 +230,42 @@ impl Player {
         }
         self.last_seq = Some(seq);
         self.counters.last_packet_ns.store(now_ns(), Relaxed);
-        let samples = payload.len() / 2;
         self.peak = payload.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b).saturating_abs()).fold(self.peak, i16::max);
-        match self.producer.write_chunk_uninit(samples) {
+        if (self.rate, self.ch) == (AUDIO_RATE, CH) {
+            let samples = payload.len() / 2;
+            match self.producer.write_chunk_uninit(samples) {
+                Ok(chunk) => {
+                    chunk.fill_from_iter(payload.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)));
+                }
+                Err(_) => {
+                    self.counters.dropped.fetch_add((samples / CH) as u32, Relaxed);
+                }
+            }
+            return;
+        }
+        let (out, ch) = (&mut self.converted, self.ch);
+        out.clear();
+        let mut emit = |f: Frame| {
+            let s = |v: f32| v.round().clamp(-32768.0, 32767.0) as i16;
+            if ch == 1 {
+                out.push(s((f[0] + f[1]) / 2.0));
+            } else {
+                out.extend([s(f[0]), s(f[1])]);
+            }
+        };
+        for b in payload.as_chunks::<4>().0 {
+            let f = [i16::from_le_bytes([b[0], b[1]]) as f32, i16::from_le_bytes([b[2], b[3]]) as f32];
+            match &mut self.resampler {
+                Some(r) => r.push(f, &mut emit),
+                None => emit(f),
+            }
+        }
+        match self.producer.write_chunk_uninit(self.converted.len()) {
             Ok(chunk) => {
-                chunk.fill_from_iter(payload.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)));
+                chunk.fill_from_iter(self.converted.iter().copied());
             }
             Err(_) => {
-                self.counters.dropped.fetch_add((samples / CH) as u32, Relaxed);
+                self.counters.dropped.fetch_add((self.converted.len() / self.ch) as u32, Relaxed);
             }
         }
     }
@@ -201,7 +275,7 @@ impl Player {
         if now_ns().saturating_sub(self.counters.last_packet_ns.load(Relaxed)) > IDLE_NS {
             return None;
         }
-        let ms = |frames: u32| frames as f32 * 1e3 / AUDIO_RATE as f32;
+        let ms = |frames: u32| frames as f32 * 1e3 / self.rate as f32;
         Some((self.age_ms + ms(self.counters.fill.load(Relaxed)), ms(self.counters.cushion.load(Relaxed))))
     }
 
@@ -209,14 +283,14 @@ impl Player {
     pub fn summary(&mut self) -> String {
         let (under, dropped, lost) = (self.counters.underruns.load(Relaxed), self.counters.dropped.load(Relaxed), self.lost_chunks);
         let (pu, pd, pl) = std::mem::replace(&mut self.last_report, (under, dropped, lost));
-        let queued = self.counters.fill.load(Relaxed) as f64 * 1e3 / AUDIO_RATE as f64;
+        let queued = self.counters.fill.load(Relaxed) as f64 * 1e3 / self.rate as f64;
         let age = timing::ms(self.age.summary().p50);
         self.age.clear();
-        let cushion = self.counters.cushion.load(Relaxed) as f64 * 1e3 / AUDIO_RATE as f64;
+        let cushion = self.counters.cushion.load(Relaxed) as f64 * 1e3 / self.rate as f64;
         let mut s = format!("audio {:.0} ms (arrived {age:.0} + queued {queued:.0}, cushion {cushion:.0}, level {}%)", age + queued, self.peak as u32 * 100 / 32767);
         self.peak = 0;
         if under != pu || dropped != pd || lost != pl {
-            s += &format!(" (underruns {} trimmed {} lost {})", under - pu, (dropped - pd) / (AUDIO_RATE / 1000), lost - pl);
+            s += &format!(" (underruns {} trimmed {} lost {})", under - pu, (dropped - pd) / (self.rate / 1000), lost - pl);
         }
         s
     }

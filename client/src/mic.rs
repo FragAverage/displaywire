@@ -6,6 +6,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SupportedBufferSize};
 use proto::stream::{AUDIO_CHANNELS, AUDIO_RATE};
 
+use crate::resample::Resampler;
+
 /// Frames per datagram: 5 ms, as the server sends desktop audio.
 pub const CHUNK_FRAMES: usize = 240;
 pub const CHUNK_SAMPLES: usize = CHUNK_FRAMES * AUDIO_CHANNELS;
@@ -17,6 +19,38 @@ const RING_FRAMES: usize = 12_000;
 pub struct Capture {
     consumer: rtrb::Consumer<i16>,
     _stream: cpal::Stream,
+}
+
+/// Opens the input stream at the given rate; the ring always gets 48 kHz stereo.
+fn open(device: &cpal::Device, rate: u32, channels: usize, buffer: BufferSize) -> Result<(rtrb::Consumer<i16>, cpal::Stream), String> {
+    let config = cpal::StreamConfig { channels: channels as u16, sample_rate: rate, buffer_size: buffer };
+    let (mut producer, consumer) = rtrb::RingBuffer::<i16>::new(RING_FRAMES * AUDIO_CHANNELS);
+    let mut resampler = (rate != AUDIO_RATE).then(|| Resampler::new(rate, AUDIO_RATE));
+    let callback = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+        // Mono goes to both sides; more than two channels: the first two.
+        let frames = data.chunks_exact(channels).map(|f| [f[0], f[channels.min(2) - 1]]);
+        match &mut resampler {
+            None => {
+                let Ok(chunk) = producer.write_chunk_uninit(data.len() / channels * AUDIO_CHANNELS) else { return };
+                chunk.fill_from_iter(frames.flat_map(|[l, r]| [sample(l), sample(r)]));
+            }
+            Some(resampler) => {
+                for f in frames {
+                    resampler.push(f, |[l, r]| {
+                        if producer.slots() >= AUDIO_CHANNELS {
+                            let _ = producer.push(sample(l));
+                            let _ = producer.push(sample(r));
+                        }
+                    });
+                }
+            }
+        }
+    };
+    let stream = device
+        .build_input_stream(config, callback, |e| eprintln!("mic input: {e}"), None)
+        .map_err(|e| format!("can't open the microphone at {} kHz: {e}", rate as f32 / 1000.0))?;
+    Ok((consumer, stream))
 }
 
 impl Capture {
@@ -31,23 +65,32 @@ impl Capture {
         };
         let name = device.description().map(|d| d.to_string()).unwrap_or_default();
         println!("mic: device {name:?}, {channels} channel(s) at {} Hz", supported.sample_rate());
-        let config = cpal::StreamConfig { channels: channels as u16, sample_rate: AUDIO_RATE, buffer_size: buffer };
-        let (mut producer, consumer) = rtrb::RingBuffer::<i16>::new(RING_FRAMES * AUDIO_CHANNELS);
-        let callback = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            // Mono goes to both sides; more than two channels: the first two.
-            let frames = data.len() / channels;
-            let Ok(chunk) = producer.write_chunk_uninit(frames * AUDIO_CHANNELS) else { return };
-            let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
-            chunk.fill_from_iter(data.chunks_exact(channels).flat_map(|f| {
-                let (l, r) = (sample(f[0]), sample(f[channels.min(2) - 1]));
-                [l, r]
-            }));
-        };
-        let stream = device
-            .build_input_stream(config, callback, |e| eprintln!("mic input: {e}"), None)
-            .map_err(|e| format!("can't open the microphone at 48 kHz: {e}"))?;
-        stream.play().map_err(|e| e.to_string())?;
-        Ok(Capture { consumer, _stream: stream })
+        // 48 kHz when the device can; otherwise its own rate, converted (a Bluetooth headset in hands-free mode is
+        // 16 kHz only). Some devices also refuse a small fixed buffer: let them choose then.
+        let mut rates = vec![AUDIO_RATE];
+        if supported.sample_rate() != AUDIO_RATE {
+            rates.push(supported.sample_rate());
+        }
+        let buffers = if buffer == BufferSize::Default { vec![buffer] } else { vec![buffer, BufferSize::Default] };
+        let mut error = String::new();
+        for &rate in &rates {
+            for buffer in &buffers {
+                match open(&device, rate, channels, *buffer) {
+                    Ok((consumer, stream)) => {
+                        if rate != AUDIO_RATE {
+                            println!("mic: the device runs at {rate} Hz; converting");
+                        }
+                        stream.play().map_err(|e| e.to_string())?;
+                        return Ok(Capture { consumer, _stream: stream });
+                    }
+                    Err(e) => {
+                        println!("mic: {e} (buffer {buffer:?})");
+                        error = e;
+                    }
+                }
+            }
+        }
+        Err(error)
     }
 
     /// The next whole 5 ms chunk, as little-endian bytes, if one has been captured.

@@ -30,6 +30,8 @@ mod pairui;
 #[cfg(target_os = "macos")]
 mod receiver;
 #[cfg(target_os = "macos")]
+mod resample;
+#[cfg(target_os = "macos")]
 mod servers;
 #[cfg(target_os = "macos")]
 mod settings;

@@ -121,6 +121,18 @@ struct Receiver {
     trace: Option<std::io::BufWriter<std::fs::File>>,
 }
 
+/// Without an output device nothing is played and the server isn't asked for audio, so say so on the stream window
+/// (once it is up) instead of leaving a silent stream unexplained.
+fn tell_no_sound(proxy: &EventLoopProxy<UserEvent>, why: &str) {
+    let (proxy, text) = (proxy.clone(), format!("No sound: {why}"));
+    let _ = std::thread::Builder::new().name("audio-notice".into()).spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = proxy.send_event(UserEvent::Notice(Some(text)));
+        std::thread::sleep(Duration::from_secs(12));
+        let _ = proxy.send_event(UserEvent::Notice(None));
+    });
+}
+
 impl Receiver {
     fn new(
         server: SocketAddr,
@@ -131,6 +143,7 @@ impl Receiver {
         telemetry: Arc<Telemetry>,
     ) -> Result<Receiver, String> {
         link.set_read_timeout(Duration::from_millis(2)).map_err(|e| e.to_string())?;
+        let proxy_for_audio = proxy.clone();
         Ok(Receiver {
             server,
             link,
@@ -151,7 +164,12 @@ impl Receiver {
             mic: None,
             mic_seq: 0,
             mic_stats: (0, 0, 0),
-            audio: audio::Player::new().map_err(|e| eprintln!("audio disabled: {e}")).ok(),
+            audio: audio::Player::new()
+                .map_err(|e| {
+                    eprintln!("audio disabled: {e}");
+                    tell_no_sound(&proxy_for_audio, &e);
+                })
+                .ok(),
             trace: std::env::var_os("DISPLAYWIRE_TRACE").and_then(|p| std::fs::File::create(p).ok()).map(|mut f| {
                 use std::io::Write;
                 let _ = writeln!(f, "frame,keyframe,bytes,capture_ns,decoded_ns,decode_ns");

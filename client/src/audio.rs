@@ -66,16 +66,8 @@ pub struct Player {
     peak: i16,
 }
 
-impl Player {
-    pub fn new() -> Result<Player, String> {
-        let host = cpal::default_host();
-        let device = host.default_output_device().ok_or("no audio output device")?;
-        let supported = device.default_output_config().map_err(|e| e.to_string())?;
-        let buffer = match supported.buffer_size() {
-            SupportedBufferSize::Range { min, max } => BufferSize::Fixed(DEVICE_FRAMES.clamp(*min, *max)),
-            _ => BufferSize::Default,
-        };
-        println!("audio: device {:?}, buffer sizes {:?}, asking for {:?}", device.description().map(|d| d.to_string()).unwrap_or_default(), supported.buffer_size(), buffer);
+/// Opens the output stream with the given buffer size.
+fn open(device: &cpal::Device, buffer: BufferSize) -> Result<(rtrb::Producer<i16>, cpal::Stream, Arc<Counters>), String> {
         let config = cpal::StreamConfig { channels: CH as u16, sample_rate: AUDIO_RATE, buffer_size: buffer };
         let (producer, mut consumer) = rtrb::RingBuffer::<i16>::new(RING_FRAMES * CH);
         let counters = Arc::new(Counters::default());
@@ -144,6 +136,28 @@ impl Player {
         let stream = device
             .build_output_stream(config, callback, |e| eprintln!("audio output: {e}"), None)
             .map_err(|e| format!("can't open the output device at 48 kHz stereo: {e}"))?;
+        Ok((producer, stream, counters))
+}
+
+impl Player {
+    pub fn new() -> Result<Player, String> {
+        let host = cpal::default_host();
+        let device = host.default_output_device().ok_or("no audio output device")?;
+        let supported = device.default_output_config().map_err(|e| e.to_string())?;
+        let buffer = match supported.buffer_size() {
+            SupportedBufferSize::Range { min, max } => BufferSize::Fixed(DEVICE_FRAMES.clamp(*min, *max)),
+            _ => BufferSize::Default,
+        };
+        println!("audio: device {:?}, buffer sizes {:?}, asking for {:?}", device.description().map(|d| d.to_string()).unwrap_or_default(), supported.buffer_size(), buffer);
+        // A small fixed buffer is best, but some outputs (Bluetooth, HDMI, USB) refuse it: let the device choose then.
+        let (producer, stream, counters) = match open(&device, buffer) {
+            Ok(opened) => opened,
+            Err(e) if buffer != BufferSize::Default => {
+                println!("audio: the device refused that buffer ({e}); letting it choose");
+                open(&device, BufferSize::Default)?
+            }
+            Err(e) => return Err(e),
+        };
         if supported.sample_format() != SampleFormat::F32 {
             // cpal converts for us; nothing to do, but worth knowing.
             println!("audio: device format is {}", supported.sample_format());

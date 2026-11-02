@@ -11,9 +11,12 @@ were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and yo
 
 ## What you need
 
-- **PC:** Windows 10 (version 2004 or later) or Windows 11, with an NVIDIA graphics card for the best performance.
+- **PC:** Windows 10 or 11, with an NVIDIA graphics card for the best performance. (Sound from every app needs
+  Windows 10 version 2004 or later; older versions send the default output only.)
 - **Mac:** macOS 12 or later, Apple Silicon or Intel.
-- Both on the same network, or on the same Tailscale network. A wired connection on at least one side helps a lot.
+- Both on the same network, or on the same [Tailscale](https://tailscale.com) network (use the PC's Tailscale address in
+  **Add PC…**). A wired connection on at least one side helps a lot. DisplayWire uses UDP port 9000 on the PC; the
+  installer opens it in the Windows firewall.
 
 ## Install
 

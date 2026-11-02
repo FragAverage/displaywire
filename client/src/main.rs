@@ -298,7 +298,11 @@ mod app {
                         "You have {}. DisplayWire downloads the new version, checks it is genuine and restarts, which takes a few seconds. Your PCs and settings are kept.",
                         crate::updater::VERSION
                     );
-                    if dialog::confirm(&format!("DisplayWire {} is available", a.version), &text, "Install and Restart", "Not Now") {
+                    #[cfg(debug_assertions)]
+                    let auto = std::env::var_os("DISPLAYWIRE_TEST_AUTOINSTALL").is_some();
+                    #[cfg(not(debug_assertions))]
+                    let auto = false;
+                    if auto || dialog::confirm(&format!("DisplayWire {} is available", a.version), &text, "Install and Restart", "Not Now") {
                         self.install_update(a);
                     }
                 }
@@ -708,11 +712,8 @@ mod app {
                 UserEvent::UpdateReady(result) => {
                     self.updating = false;
                     match result {
-                        Ok(()) => {
-                            if let Some(mtm) = objc2::MainThreadMarker::new() {
-                                objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None);
-                            }
-                        }
+                        // Leave the event loop (not `terminate`, which re-enters it); the swap script waits for us to exit.
+                        Ok(()) => el.exit(),
                         Err(e) => dialog::show_message("The update didn't install", &e),
                     }
                     return;

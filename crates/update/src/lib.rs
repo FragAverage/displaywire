@@ -119,7 +119,10 @@ impl Manifest {
             return None;
         }
         let &(_, sha256, size) = self.files.iter().find(|(n, _, _)| n == platform.key())?;
-        let url = format!("https://github.com/{REPO}/releases/download/v{}/{}", self.version, platform.asset());
+        let url = match test_base() {
+            Some(base) => format!("{base}/{}", platform.asset()),
+            None => format!("https://github.com/{REPO}/releases/download/v{}/{}", self.version, platform.asset()),
+        };
         Some(Available { version: self.version.clone(), url, sha256, size })
     }
 }
@@ -141,9 +144,20 @@ fn curl() -> PathBuf {
     }
 }
 
+/// Debug builds only: serve the release files from somewhere else (a local folder served over http) to test updating.
+#[cfg(debug_assertions)]
+fn test_base() -> Option<String> {
+    std::env::var("DISPLAYWIRE_UPDATE_BASE").ok()
+}
+#[cfg(not(debug_assertions))]
+fn test_base() -> Option<String> {
+    None
+}
+
 fn run_curl(url: &str, max_bytes: u64, out: Option<&Path>, seconds: u32) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new(curl());
-    cmd.args(["--fail", "--silent", "--show-error", "--location", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"])
+    let (proto, redir) = if test_base().is_some() { ("=http,https", "=http,https") } else { ("=https", "=https") };
+    cmd.args(["--fail", "--silent", "--show-error", "--location", "--proto", proto, "--proto-redir", redir, "--tlsv1.2"])
         .args(["--max-time", &seconds.to_string(), "--max-filesize", &max_bytes.to_string()]);
     match out {
         Some(p) => cmd.arg("-o").arg(p),
@@ -162,7 +176,7 @@ fn run_curl(url: &str, max_bytes: u64, out: Option<&Path>, seconds: u32) -> Resu
 
 /// Looks for a release newer than `current`. `Ok(None)` if this is the latest.
 pub fn check(current: &str, platform: Platform) -> Result<Option<Available>, String> {
-    let base = format!("https://github.com/{REPO}/releases/latest/download");
+    let base = test_base().unwrap_or_else(|| format!("https://github.com/{REPO}/releases/latest/download"));
     let text = run_curl(&format!("{base}/{MANIFEST}"), MAX_MANIFEST as u64, None, 20)?;
     let sig = run_curl(&format!("{base}/{MANIFEST}.sig"), 512, None, 20)?;
     let manifest = verify_manifest(&text, &String::from_utf8_lossy(&sig), PUBLIC_KEY)?;

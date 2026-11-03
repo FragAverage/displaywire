@@ -190,6 +190,10 @@ pub struct ScreenSource {
     pointer_dirty: bool,
     last_encode_ns: u64,
     interval_ns: u64,
+    /// Whether the pointer is drawn into the video (the client draws it otherwise).
+    pointer_in_video: bool,
+    /// Encode the current image again even if nothing changed.
+    repaint: bool,
     /// `--encoder`, the frame rate and the current bitrate, to rebuild the encoder at a new size.
     encoder_kind: String,
     fps: u32,
@@ -230,6 +234,8 @@ impl ScreenSource {
             pointer_dirty: false,
             last_encode_ns: 0,
             interval_ns: 1_000_000_000 / cli.fps.max(1) as u64,
+            pointer_in_video: true,
+            repaint: false,
             encoder_kind: cli.encoder.clone(),
             fps: cli.fps,
             bitrate,
@@ -250,7 +256,7 @@ impl ScreenSource {
     }
 
     fn next(&mut self, force_keyframe: bool, timeout_ms: u32) -> Res<Option<EncodedFrame>> {
-        let forced = force_keyframe && self.capture.has_frame;
+        let forced = (force_keyframe || self.repaint) && self.capture.has_frame;
         let pointer_due = self.last_encode_ns + self.interval_ns;
         let mut timeout = if forced { 0 } else { timeout_ms };
         if self.pointer_dirty {
@@ -261,15 +267,17 @@ impl ScreenSource {
         if self.capture.take_resized() {
             self.rebuild()?;
         }
-        self.pointer_dirty |= change.pointer;
+        // A client that draws the pointer gets it from `pointer()`; no frame needed for it.
+        self.pointer_dirty |= change.pointer && self.pointer_in_video;
         let capture_ns = timing::now_ns();
         let pointer_only = self.pointer_dirty && capture_ns >= pointer_due;
         if !self.capture.has_frame || !(change.desktop || forced || pointer_only) {
             return Ok(None);
         }
         self.pointer_dirty = false;
+        self.repaint = false;
         self.last_encode_ns = capture_ns;
-        self.capture.compose()?;
+        self.capture.compose(self.pointer_in_video)?;
         let composed_ns = timing::now_ns();
         let nv12 = self.converter.convert()?;
         if let Some(p) = &self.profile {
@@ -298,6 +306,23 @@ impl Source for ScreenSource {
     fn set_bitrate(&mut self, bps: u32) {
         self.bitrate = bps;
         self.encoder.set_bitrate(bps);
+    }
+
+    fn set_pointer_in_video(&mut self, on: bool) {
+        // Repaint so a still screen doesn't keep showing (or lack) the pointer.
+        self.repaint |= on != self.pointer_in_video;
+        self.pointer_in_video = on;
+    }
+
+    fn pointer(&self) -> Option<crate::PointerState> {
+        let p = self.capture.pointer_at();
+        let c = &self.capture;
+        let norm = |v: i32, size: u32| (v.clamp(0, size as i32 - 1) as u64 * 65535 / (size.max(2) - 1) as u64) as u16;
+        Some(crate::PointerState { visible: p.visible, x: norm(p.x, c.width), y: norm(p.y, c.height), shape: p.shape })
+    }
+
+    fn pointer_image(&self) -> Option<crate::PointerImage> {
+        self.capture.pointer_image()
     }
 
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {

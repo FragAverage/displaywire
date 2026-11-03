@@ -187,6 +187,25 @@ pub struct Cli {
     service: bool,
 }
 
+/// Where the pointer is, for clients that draw it (`CAP_CURSOR`): 0..=65535 across the screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PointerState {
+    pub visible: bool,
+    pub x: u16,
+    pub y: u16,
+    /// `PointerImage::id` of its current image.
+    pub shape: u32,
+}
+
+/// The pointer's image: RGBA (straight alpha), `id` changing with it.
+pub struct PointerImage {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub hot: (u32, u32),
+    pub rgba: Vec<u8>,
+}
+
 pub struct EncodedFrame {
     /// HEVC Annex B access unit.
     pub data: Vec<u8>,
@@ -210,6 +229,15 @@ pub trait Source {
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String>;
     /// Changes the video bitrate while running. Sources that can't just ignore it.
     fn set_bitrate(&mut self, _bps: u32) {}
+    /// Whether the pointer is drawn into the video (off while the client draws it).
+    fn set_pointer_in_video(&mut self, _on: bool) {}
+    /// The pointer, for a client that draws it; None from sources without one.
+    fn pointer(&self) -> Option<PointerState> {
+        None
+    }
+    fn pointer_image(&self) -> Option<PointerImage> {
+        None
+    }
 }
 
 struct Shared {
@@ -504,6 +532,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut stats = Stats::new();
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
     let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
+    let mut pointer = PointerSender::default();
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
@@ -521,6 +550,11 @@ fn run(cli: Cli) -> Result<(), String> {
         if kbps != applied_kbps {
             applied_kbps = kbps;
             source.set_bitrate(kbps * 1000);
+        }
+        let client_cursor = shared.caps.load(Relaxed) & proto::stream::CAP_CURSOR != 0;
+        source.set_pointer_in_video(!client_cursor);
+        if client_cursor {
+            pointer.send(&*source, &link, &sock, &mut sealed);
         }
         let force = shared.keyframe.swap(false, Relaxed);
         // Frame-rate cap: wait before taking the next frame (which is then the latest
@@ -549,6 +583,54 @@ fn run(cli: Cli) -> Result<(), String> {
         });
         frame_id = frame_id.wrapping_add(1);
         stats.frame(&frame, encoded_ns, now_ns(), &shared);
+    }
+}
+
+/// Sends the pointer to a client that draws it: its state on every change and every second, its
+/// image when it changes and every two seconds (so a lost piece mends itself).
+#[derive(Default)]
+struct PointerSender {
+    to: Option<SocketAddr>,
+    state: Option<PointerState>,
+    state_ns: u64,
+    image: Option<u32>,
+    image_ns: u64,
+}
+
+impl PointerSender {
+    fn send(&mut self, source: &dyn Source, link: &auth::Link, sock: &UdpSocket, sealed: &mut [u8]) {
+        if self.to != Some(link.addr) {
+            *self = PointerSender { to: Some(link.addr), ..Default::default() };
+        }
+        let Some(p) = source.pointer() else { return };
+        let now = now_ns();
+        let mut plain = [0u8; proto::MAX_PLAIN];
+        if self.image != Some(p.shape) || now - self.image_ns > 2 * SEC {
+            if let Some(img) = source.pointer_image().filter(|i| i.id == p.shape) {
+                let max = proto::stream::MAX_CURSOR_SIZE as u32;
+                if img.width <= max && img.height <= max {
+                    let shape = proto::stream::CursorShape {
+                        id: img.id,
+                        width: img.width as u16,
+                        height: img.height as u16,
+                        hot_x: img.hot.0 as u16,
+                        hot_y: img.hot.1 as u16,
+                        offset: 0,
+                    };
+                    for (i, chunk) in img.rgba.chunks(proto::stream::CURSOR_PAYLOAD).enumerate() {
+                        let shape = proto::stream::CursorShape { offset: (i * proto::stream::CURSOR_PAYLOAD) as u32, ..shape };
+                        let n = Msg::CursorShape(shape, chunk).encode(&mut plain);
+                        link.send(sock, &plain[..n], sealed);
+                    }
+                }
+            }
+            (self.image, self.image_ns) = (Some(p.shape), now);
+        }
+        if self.state != Some(p) || now - self.state_ns > SEC {
+            let n = Msg::Cursor { visible: p.visible, x: p.x, y: p.y, shape: p.shape }.encode(&mut plain);
+            link.send(sock, &plain[..n], sealed);
+            (self.state, self.state_ns) = (Some(p), now);
+        }
     }
 }
 

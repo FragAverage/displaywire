@@ -23,6 +23,8 @@ pub const AUDIO_CHANNELS: usize = 2;
 pub const CAP_AUDIO: u8 = 1;
 /// Client → server microphone.
 pub const CAP_MIC: u8 = 2;
+/// The client draws the pointer itself from `Msg::Cursor`/`Msg::CursorShape`, so it isn't in the video.
+pub const CAP_CURSOR: u8 = 16;
 
 const HELLO: u8 = 1;
 const PING: u8 = 2;
@@ -40,6 +42,8 @@ const XFER_CANCEL: u8 = 13;
 const PADS: u8 = 14;
 const RUMBLE: u8 = 15;
 const LIGHT: u8 = 16;
+const CURSOR: u8 = 17;
+const CURSOR_SHAPE: u8 = 18;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -51,6 +55,25 @@ pub const BUTTON_RIGHT: u8 = 2;
 pub const BUTTON_MIDDLE: u8 = 4;
 pub const BUTTON_BACK: u8 = 8;
 pub const BUTTON_FORWARD: u8 = 16;
+
+/// Largest pointer image sent, in pixels each way (Windows' own go to 256 only at huge sizes).
+pub const MAX_CURSOR_SIZE: u16 = 128;
+const CURSOR_SHAPE_HEADER_LEN: usize = 3 + 4 + 2 * 4 + 4;
+/// RGBA bytes per `CursorShape` datagram.
+pub const CURSOR_PAYLOAD: usize = crate::MAX_PLAIN - CURSOR_SHAPE_HEADER_LEN;
+
+/// Server → client: one piece of pointer image `id` (RGBA, straight alpha, rows top to bottom).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorShape {
+    pub id: u32,
+    pub width: u16,
+    pub height: u16,
+    /// The pixel that is the pointer's position.
+    pub hot_x: u16,
+    pub hot_y: u16,
+    /// Where this datagram's bytes go in the `width × height × 4` image.
+    pub offset: u32,
+}
 
 /// Gamepads one client can have connected at once (XInput's limit).
 pub const MAX_PADS: usize = 4;
@@ -268,6 +291,10 @@ pub enum Msg<'a> {
     Rumble { slot: u8, large: u8, small: u8 },
     /// Server → client: the light bar colour a game set on PlayStation pad `slot`.
     Light { slot: u8, r: u8, g: u8, b: u8 },
+    /// Server → client (with `CAP_CURSOR`): the pointer, on every change and every second. `x`/`y` are its
+    /// position, 0..=65535 across the streamed screen; `shape` names the image (`CursorShape::id`).
+    Cursor { visible: bool, x: u16, y: u16, shape: u32 },
+    CursorShape(CursorShape, &'a [u8]),
 }
 
 impl<'a> Msg<'a> {
@@ -351,6 +378,22 @@ impl<'a> Msg<'a> {
                 w.u8(slot);
                 w.u8(large);
                 w.u8(small);
+            }
+            Msg::Cursor { visible, x, y, shape } => {
+                w.u8(CURSOR);
+                w.u8(visible as u8);
+                w.u16(x);
+                w.u16(y);
+                w.u32(shape);
+            }
+            Msg::CursorShape(c, payload) => {
+                w.u8(CURSOR_SHAPE);
+                w.u32(c.id);
+                for v in [c.width, c.height, c.hot_x, c.hot_y] {
+                    w.u16(v);
+                }
+                w.u32(c.offset);
+                w.bytes(payload);
             }
             Msg::Light { slot, r, g, b } => {
                 w.u8(LIGHT);
@@ -470,6 +513,16 @@ impl<'a> Msg<'a> {
             }
             RUMBLE => Msg::Rumble { slot: r.u8()?, large: r.u8()?, small: r.u8()? },
             LIGHT => Msg::Light { slot: r.u8()?, r: r.u8()?, g: r.u8()?, b: r.u8()? },
+            CURSOR => Msg::Cursor { visible: r.u8()? != 0, x: r.u16()?, y: r.u16()?, shape: r.u32()? },
+            CURSOR_SHAPE => {
+                let c = CursorShape { id: r.u32()?, width: r.u16()?, height: r.u16()?, hot_x: r.u16()?, hot_y: r.u16()?, offset: r.u32()? };
+                let payload = r.rest();
+                let total = c.width as usize * c.height as usize * 4;
+                if c.width == 0 || c.height == 0 || c.width > MAX_CURSOR_SIZE || c.height > MAX_CURSOR_SIZE || c.offset as usize + payload.len() > total {
+                    return None;
+                }
+                Msg::CursorShape(c, payload)
+            }
             XFER => Msg::Xfer { id: r.u32()?, index: r.u32()?, payload: r.rest() },
             XFER_ACK => Msg::XferAck { id: r.u32()?, next: r.u32()?, sack: r.u64()? },
             XFER_CANCEL => Msg::XferCancel { id: r.u32()?, reason: r.u8()? },
@@ -609,6 +662,24 @@ mod tests {
         // A slot out of range is rejected.
         p.pads[1].slot = MAX_PADS as u8;
         let n = Msg::Pads(p).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), None);
+    }
+
+    #[test]
+    fn cursor_messages_round_trip_and_bad_shapes_are_rejected() {
+        let mut buf = [0u8; crate::MAX_PLAIN];
+        let m = Msg::Cursor { visible: true, x: 65535, y: 3, shape: 9 };
+        let n = m.encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), Some(m));
+        let c = CursorShape { id: 9, width: 32, height: 32, hot_x: 1, hot_y: 2, offset: 4096 - CURSOR_PAYLOAD as u32 };
+        let payload = [7u8; CURSOR_PAYLOAD];
+        let n = Msg::CursorShape(c, &payload).encode(&mut buf);
+        assert_eq!(n, crate::MAX_PLAIN);
+        assert_eq!(Msg::decode(&buf[..n]), Some(Msg::CursorShape(c, &payload)));
+        // Past the end of the image, or too big.
+        let n = Msg::CursorShape(CursorShape { offset: 4096 - 10, ..c }, &payload).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), None);
+        let n = Msg::CursorShape(CursorShape { width: MAX_CURSOR_SIZE + 1, offset: 0, ..c }, &payload[..4]).encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), None);
     }
 }

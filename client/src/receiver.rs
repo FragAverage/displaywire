@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use proto::stream::{CAP_AUDIO, Msg, VERSION};
+use proto::stream::{CAP_AUDIO, CAP_CURSOR, Msg, VERSION};
 use timing::history::{Binner, History};
 use timing::{Samples, ms, now_ns};
 use transport::video::{Frame, Reassembler};
@@ -17,6 +17,7 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::app::UserEvent;
 use crate::audio;
+use crate::cursor;
 use crate::display::Layer;
 use crate::gamepad;
 use crate::input;
@@ -114,6 +115,9 @@ struct Receiver {
     /// Open only while the microphone is on.
     mic: Option<mic::Capture>,
     pads: gamepad::Poller,
+    /// The PC's pointer, drawn here as the Mac cursor: images being put together, and the last state.
+    cursors: cursor::Assembler,
+    cursor_state: Option<(bool, u16, u16, u32)>,
     mic_seq: u32,
     /// Chunks sent and peak level since the last report, and when that was.
     mic_stats: (u32, i16, u64),
@@ -166,6 +170,8 @@ impl Receiver {
             sim_loss: std::env::var("DISPLAYWIRE_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
             mic: None,
             pads,
+            cursors: cursor::Assembler::default(),
+            cursor_state: None,
             mic_seq: 0,
             mic_stats: (0, 0, 0),
             audio: audio::Player::new()
@@ -235,7 +241,7 @@ impl Receiver {
         let mut got_video = false;
         let mut buf = [0u8; 2048];
         let mut plain = [0u8; 2048];
-        let caps = if self.audio.is_some() { CAP_AUDIO } else { 0 };
+        let caps = CAP_CURSOR | if self.audio.is_some() { CAP_AUDIO } else { 0 };
         // Handshake state (see docs/AUTH.md): a session is "alive" while datagrams
         // that verify keep arriving; otherwise we (re)handshake, keeping the old
         // session until the new one is ready.
@@ -393,6 +399,17 @@ impl Receiver {
                 Some(m @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => self.telemetry.transfers.handle(&m),
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),
                 Some(Msg::Rumble { slot, large, small }) => self.pads.rumble(slot, large, small),
+                Some(Msg::CursorShape(shape, payload)) => {
+                    if let Some(image) = self.cursors.push(shape, payload) {
+                        let _ = self.proxy.send_event(UserEvent::CursorImage(image));
+                    }
+                }
+                Some(Msg::Cursor { visible, x, y, shape }) => {
+                    if self.cursor_state != Some((visible, x, y, shape)) {
+                        self.cursor_state = Some((visible, x, y, shape));
+                        let _ = self.proxy.send_event(UserEvent::Cursor { visible, x, y, shape });
+                    }
+                }
                 Some(Msg::Light { slot, r, g, b }) => self.pads.light(slot, r, g, b),
                 _ => {}
             }

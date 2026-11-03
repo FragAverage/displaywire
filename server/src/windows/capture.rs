@@ -23,6 +23,7 @@ use windows::Win32::System::StationsAndDesktops::{
 use windows::core::Interface;
 
 use super::{Context, Res};
+use crate::PointerImage;
 
 /// How often a lost duplication is retried. Failed attempts are cheap, and
 /// this bounds how long the picture freezes when a UAC prompt comes or goes.
@@ -62,6 +63,8 @@ struct Pointer {
     x: i32,
     y: i32,
     shape: Option<Shape>,
+    /// Bumped with every new shape.
+    shape_id: u32,
 }
 
 struct Shape {
@@ -70,10 +73,79 @@ struct Shape {
     /// In pixels; monochrome shapes hold an AND mask and an XOR mask, each this tall.
     height: u32,
     pitch: u32,
+    /// The pixel that is the pointer's position.
+    hot: (u32, u32),
     data: Vec<u8>,
 }
 
+/// Where the pointer is: its hotspot on this monitor, in pixels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PointerAt {
+    pub visible: bool,
+    pub x: i32,
+    pub y: i32,
+    pub shape: u32,
+}
+
 impl Shape {
+    /// RGBA for a client to draw. Pixels that invert the screen (the I-beam, some hands) can't be shown
+    /// as such by an ordinary cursor: they become black with a white edge, visible on any background.
+    fn rgba(&self) -> Vec<u8> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let mut out = vec![0u8; w * h * 4];
+        let mut invert = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let px = |row: usize| {
+                    let o = row * self.pitch as usize + x * 4;
+                    u32::from_le_bytes(self.data[o..o + 4].try_into().unwrap())
+                };
+                let bgra = match self.kind {
+                    k if k == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32 => px(y),
+                    k if k == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32 => {
+                        let s = px(y);
+                        match (s >> 24, s & 0x00FF_FFFF) {
+                            (0, rgb) => 0xFF00_0000 | rgb,
+                            (_, 0) => 0,
+                            _ => {
+                                invert[i] = true;
+                                0xFF00_0000
+                            }
+                        }
+                    }
+                    _ => {
+                        let bit = |row: usize| self.data[row * self.pitch as usize + x / 8] & (0x80 >> (x % 8)) != 0;
+                        match (bit(y), bit(y + h)) {
+                            (true, false) => 0,
+                            (false, false) => 0xFF00_0000,
+                            (false, true) => 0xFFFF_FFFF,
+                            (true, true) => {
+                                invert[i] = true;
+                                0xFF00_0000
+                            }
+                        }
+                    }
+                };
+                out[i * 4..i * 4 + 4].copy_from_slice(&[(bgra >> 16) as u8, (bgra >> 8) as u8, bgra as u8, (bgra >> 24) as u8]);
+            }
+        }
+        // White edge around inverting pixels, on transparent neighbours only.
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if out[i * 4 + 3] != 0 {
+                    continue;
+                }
+                let near = (y.saturating_sub(1)..(y + 2).min(h)).any(|ny| (x.saturating_sub(1)..(x + 2).min(w)).any(|nx| invert[ny * w + nx]));
+                if near {
+                    out[i * 4..i * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+        }
+        out
+    }
+
     /// The pointer pixel at (`x`, `y`) drawn over desktop pixel `d` (BGRA).
     fn blend(&self, x: u32, y: u32, d: u32) -> u32 {
         let px = |row: u32| {
@@ -260,7 +332,8 @@ impl Capture {
             };
             if r.is_ok() {
                 let height = if si.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 { si.Height / 2 } else { si.Height };
-                p.shape = Some(Shape { kind: si.Type, width: si.Width, height, pitch: si.Pitch, data });
+                p.shape = Some(Shape { kind: si.Type, width: si.Width, height, pitch: si.Pitch, hot: (si.HotSpot.x.max(0) as u32, si.HotSpot.y.max(0) as u32), data });
+                p.shape_id = p.shape_id.wrapping_add(1);
                 change.pointer |= p.visible;
             }
         }
@@ -341,11 +414,25 @@ impl Capture {
         }
     }
 
-    /// Fills `composed`: the desktop with the pointer drawn on it.
-    pub fn compose(&mut self) -> Res<()> {
+    /// Where the pointer is, for clients that draw it themselves.
+    pub fn pointer_at(&self) -> PointerAt {
+        let p = &self.pointer;
+        let hot = p.shape.as_ref().map_or((0, 0), |s| s.hot);
+        PointerAt { visible: p.visible && p.shape.is_some(), x: p.x + hot.0 as i32, y: p.y + hot.1 as i32, shape: p.shape_id }
+    }
+
+    pub fn pointer_image(&self) -> Option<PointerImage> {
+        let p = &self.pointer;
+        let s = p.shape.as_ref()?;
+        Some(PointerImage { id: p.shape_id, width: s.width, height: s.height, hot: s.hot, rgba: s.rgba() })
+    }
+
+    /// Fills `composed`: the desktop, with the pointer drawn on unless `with_pointer` is false
+    /// (the client draws it).
+    pub fn compose(&mut self, with_pointer: bool) -> Res<()> {
         unsafe { self.context.CopyResource(&self.composed, &self.frame) };
         let p = &self.pointer;
-        let Some(shape) = p.shape.as_ref().filter(|_| p.visible) else { return Ok(()) };
+        let Some(shape) = p.shape.as_ref().filter(|_| p.visible && with_pointer) else { return Ok(()) };
         let (x0, y0) = (p.x.max(0) as u32, p.y.max(0) as u32);
         let x1 = (p.x + shape.width as i32).clamp(0, self.width as i32) as u32;
         let y1 = (p.y + shape.height as i32).clamp(0, self.height as i32) as u32;

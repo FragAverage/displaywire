@@ -10,6 +10,8 @@ mod dialog;
 #[cfg(target_os = "macos")]
 mod discovery;
 #[cfg(target_os = "macos")]
+mod cursor;
+#[cfg(target_os = "macos")]
 mod display;
 #[cfg(target_os = "macos")]
 mod gamepad;
@@ -62,10 +64,12 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod app {
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
 
 
     use clap::Parser;
@@ -74,7 +78,7 @@ mod app {
     use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
     use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
     use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
-    use winit::window::{CursorGrabMode, Window, WindowId};
+    use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
     use crate::link::Link;
     use crate::{dialog, discovery, display, input, keys, menu, overlay, receiver, servers, settings, transfer, wifi};
@@ -118,6 +122,9 @@ mod app {
         Notice(Option<String>),
         /// Clears the banner's notice if it still says this (a timed notice ending).
         NoticeExpired(String),
+        /// The PC's pointer: a new image, and where it is (0..=65535 across the video) and which image it shows.
+        CursorImage(Arc<crate::cursor::Image>),
+        Cursor { visible: bool, x: u16, y: u16, shape: u32 },
         Title(String),
         Fatal(String),
         /// A check for a newer version finished.
@@ -145,6 +152,13 @@ mod app {
         video: Option<(u32, u32)>,
         /// Holds AWDL down while connected, once set up and if the setting is on.
         wifi: Option<wifi::Quiet>,
+        /// The PC's pointer images by id, the cursor made from the current one (with its size), the PC's
+        /// pointer (visible, position as a fraction of the video, image), and where this Mac's pointer was
+        /// last moved to and when.
+        cursor_images: HashMap<u32, Arc<crate::cursor::Image>>,
+        cursor_made: Option<(u32, u32, CustomCursor)>,
+        pc_pointer: Option<(bool, f64, f64, u32)>,
+        local_pointer: Option<((f64, f64), Instant)>,
     }
 
     impl Session {
@@ -462,6 +476,10 @@ mod app {
                 sized: false,
                 video: None,
                 wifi: quiet_wifi.then(wifi::Quiet::start),
+                cursor_images: HashMap::new(),
+                cursor_made: None,
+                pc_pointer: None,
+                local_pointer: None,
             })
         }
 
@@ -600,11 +618,50 @@ mod app {
         fn to_video(&self, pos: PhysicalPosition<f64>) -> Option<(f64, f64)> {
             let s = self.session.as_ref()?;
             let (vw, vh) = s.video?;
-            let size = s.window.inner_size();
-            let scale = (size.width as f64 / vw as f64).min(size.height as f64 / vh as f64);
-            let (w, h) = (vw as f64 * scale, vh as f64 * scale);
-            let (x0, y0) = ((size.width as f64 - w) / 2.0, (size.height as f64 - h) / 2.0);
-            Some(((pos.x - x0) / w, (pos.y - y0) / h))
+            let (scale, x0, y0) = video_fit(s)?;
+            Some(((pos.x - x0) / (vw as f64 * scale), (pos.y - y0) / (vh as f64 * scale)))
+        }
+    }
+
+    /// Physical pixels per video pixel in the window (the video is letterboxed to fit), and the
+    /// video's top-left corner.
+    fn video_fit(s: &Session) -> Option<(f64, f64, f64)> {
+        let (vw, vh) = s.video?;
+        let size = s.window.inner_size();
+        let scale = (size.width as f64 / vw as f64).min(size.height as f64 / vh as f64);
+        Some((scale, (size.width as f64 - vw as f64 * scale) / 2.0, (size.height as f64 - vh as f64 * scale) / 2.0))
+    }
+
+    /// Fraction of the video → window position (physical pixels).
+    fn from_video(s: &Session, fx: f64, fy: f64) -> Option<PhysicalPosition<f64>> {
+        let (vw, vh) = s.video?;
+        let (scale, x0, y0) = video_fit(s)?;
+        Some(PhysicalPosition::new(x0 + fx * vw as f64 * scale, y0 + fy * vh as f64 * scale))
+    }
+
+    /// Shows the PC's pointer as this window's cursor, at the size the PC shows it in the video.
+    /// While the pointer is captured (games) the cursor stays hidden.
+    fn show_pc_pointer(s: &mut Session, el: &ActiveEventLoop, locked: bool) {
+        let Some((visible, _, _, shape)) = s.pc_pointer else { return };
+        if locked {
+            return;
+        }
+        s.window.set_cursor_visible(visible);
+        let (Some(image), Some((scale, _, _))) = (s.cursor_images.get(&shape), video_fit(s)) else { return };
+        // winit makes the cursor one point per pixel, so scale to points.
+        let factor = scale / s.window.scale_factor();
+        let key = (factor * 100.0).round() as u32;
+        if s.cursor_made.as_ref().is_some_and(|m| (m.0, m.1) == (shape, key)) {
+            return;
+        }
+        let (rgba, w, h, hx, hy) = crate::cursor::scaled(image, factor);
+        match CustomCursor::from_rgba(rgba, w, h, hx, hy) {
+            Ok(source) => {
+                let cursor = el.create_custom_cursor(source);
+                s.window.set_cursor(cursor.clone());
+                s.cursor_made = Some((shape, key, cursor));
+            }
+            Err(e) => eprintln!("cursor: {e}"),
         }
     }
 
@@ -726,6 +783,9 @@ mod app {
                 WindowEvent::CursorMoved { position, .. } if !self.locked => {
                     if let Some((x, y)) = self.to_video(position) {
                         input.absolute(x, y);
+                        if let Some(s) = &mut self.session {
+                            s.local_pointer = Some(((x, y), Instant::now()));
+                        }
                     }
                 }
                 _ => {}
@@ -776,6 +836,33 @@ mod app {
                 UserEvent::Notice(text) => {
                     s.notice = text;
                     s.refresh_banner();
+                }
+                UserEvent::CursorImage(image) => {
+                    // Pointers come in a handful of shapes; a long session can still pile them up.
+                    if s.cursor_images.len() > 32 {
+                        s.cursor_images.clear();
+                    }
+                    s.cursor_images.insert(image.id, image);
+                    show_pc_pointer(s, el, self.locked);
+                }
+                UserEvent::Cursor { visible, x, y, shape } => {
+                    let (fx, fy) = (x as f64 / 65535.0, y as f64 / 65535.0);
+                    s.pc_pointer = Some((visible, fx, fy, shape));
+                    show_pc_pointer(s, el, self.locked);
+                    // The PC moved its pointer itself (a dialog centring it, a game): follow, unless this
+                    // Mac's pointer moved lately, which the PC is just catching up with.
+                    if !self.locked
+                        && s.input.focused.load(Relaxed)
+                        && let Some(((lx, ly), at)) = s.local_pointer
+                        && at.elapsed() > Duration::from_millis(250)
+                        && (0.0..=1.0).contains(&lx)
+                        && (0.0..=1.0).contains(&ly)
+                        && ((fx - lx).abs() > 0.004 || (fy - ly).abs() > 0.004)
+                        && let Some(pos) = from_video(s, fx, fy)
+                    {
+                        let _ = s.window.set_cursor_position(pos);
+                        s.local_pointer = Some(((fx, fy), Instant::now()));
+                    }
                 }
                 UserEvent::NoticeExpired(text) => {
                     if s.notice.as_deref() == Some(text.as_str()) {

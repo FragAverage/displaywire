@@ -26,6 +26,8 @@ or a DualShock 4 when the Mac pad is a PlayStation one (gyro, touchpad, light ba
 - [x] PC: `vigem-client` (features `unstable_ds4`, `unstable_xtarget_notification`), X360 or DS4 per slot, Xbox
       rumble notifications back to the client; unplugged after 1 s of silence or on a new session.
       ViGEmBus's `ERROR_NO_MORE_ITEMS` (no HID read pending) on DS4 reports is ignored, not a replug.
+- [x] Pads stay plugged in (neutral) while the window is in the background; games saw a disconnect before.
+- [ ] Option: keep controller input while another Mac window has focus (`GCController.shouldMonitorBackgroundEvents`).
 - [ ] Phase B: DS4 extended report (gyro, accelerometer, touchpad) and DS4 notifications (rumble, light bar):
       our own IOCTLs to ViGEmBus (`IOCTL_DS4_SUBMIT_REPORT` with `DS4_REPORT_EX`, `IOCTL_DS4_REQUEST_NOTIFICATION`);
       Mac side reads `GCMotion` and the DualShock/DualSense touchpad.
@@ -78,16 +80,20 @@ keyframe as fallback; FEC parity adapts 5–30% with the Settings value as the m
 - [ ] Adaptive FEC parity from smoothed loss and burst length.
 - [ ] Stats graph: show target bitrate and FEC % alongside actual.
 - [ ] Test with netprobe-style impairment (loss, bursts, delay ramps) and on the real Wi-Fi.
-## 6. Draw the cursor on the client (agreed)
-Decided: the client shows the PC's pointer shape as its own OS cursor (NSCursor on Mac, HCURSOR on Windows), so it
-moves with zero added latency; when the PC moves the pointer itself, the client warps its cursor to match.
-- [ ] Protocol: pointer shape (id + RGBA + hotspot, cached by id) and position/visibility messages; capability in Hello.
-- [ ] Server: stop compositing the pointer for clients that support it (keep it for old clients and captured/game mode
-      where the pointer is hidden anyway); convert monochrome/masked-colour shapes to RGBA (invert → outline fallback).
-- [ ] Mac: NSCursor from the shape with HiDPI scaling; Windows client: `CreateIconIndirect`.
-- [ ] Warp detection: a PC position change that our last injected input doesn't explain → `CGWarpMouseCursorPosition`
-      (Mac) / `SetCursorPos` (Windows), rate-limited so it never fights the user.
-- [ ] Hidden pointer on the PC (games, video players) hides it locally too.
+## 6. Draw the cursor on the client (done 2026-11-03, tested)
+Decided: the client shows the PC's pointer shape as its own OS cursor, so it moves with zero added latency; when
+the PC moves the pointer itself, the client warps its cursor to match.
+- [x] Protocol: `CAP_CURSOR`; `Msg::Cursor` (visible, position, image id; on change and every second) and
+      `Msg::CursorShape` (RGBA in pieces, on change and every 2 s so a lost piece mends itself; up to 128×128).
+- [x] Server: pointer left out of the video and pointer-only frames skipped for such clients; a still screen is
+      repainted once when that switches. Monochrome/masked shapes → RGBA; inverting pixels become black with a
+      white edge.
+- [x] Mac: winit custom cursor scaled to the size the PC shows it in the window; hidden when the PC hides it.
+- [x] Warp: follows a PC-side move when this Mac's mouse has been still for 250 ms.
+- [ ] Retina sharpness: winit makes cursors one point per pixel, so they're scaled to points (slightly soft).
+      An own `NSCursor` with a 2× bitmap rep would be sharp.
+- [ ] Windows client (item 3): the same through winit.
+
 ## 7. Monitor choice and a virtual display (agreed)
 Decided: hybrid: the main window streams the PC's main monitor; the client can open any other monitor in its own
 window (one more capture + encode session each). Virtual display: bundle the open-source, signed IddCx Virtual

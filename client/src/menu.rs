@@ -73,6 +73,17 @@ define_class!(
             send(Action::Mute);
         }
 
+        /// Called by AppKit as a menu opens: the mute item says what choosing it will do.
+        /// Every change to the setting is saved at once, so the saved one is current.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(mute:)) {
+                let title = if crate::settings::Prefs::load().muted { "Unmute Audio" } else { "Mute Audio" };
+                item.setTitle(&NSString::from_str(title));
+            }
+            true
+        }
+
         #[unsafe(method(microphone:))]
         fn microphone(&self, _sender: Option<&AnyObject>) {
             send(Action::Microphone);

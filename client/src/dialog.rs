@@ -116,6 +116,10 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     volume.setMaxValue(100.0);
     volume.setDoubleValue(current.volume as f64);
     view.addSubview(&volume);
+    let mute = unsafe { NSButton::checkboxWithTitle_target_action(ns_string!("Mute"), None, None, mtm) };
+    mute.setFrame(rect(cx + 156.0, rows[3], w - cx - 156.0, 22.0));
+    mute.setState(if current.muted { NSControlStateValueOn } else { NSControlStateValueOff });
+    view.addSubview(&mute);
     let clipboard =
         unsafe { NSButton::checkboxWithTitle_target_action(ns_string!("Share clipboard text with the PC"), None, None, mtm) };
     clipboard.setFrame(rect(lx, 0.0, w, 20.0));
@@ -143,7 +147,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
             fps_cap: FPS_CAPS.get(fps.indexOfSelectedItem().max(0) as usize).copied().unwrap_or(0),
             fec_percent: FEC_LEVELS.get(fec.indexOfSelectedItem().max(0) as usize).map_or(10, |&(p, _)| p),
             volume: volume.doubleValue().round().clamp(0.0, 100.0) as u8,
-            muted: current.muted,
+            muted: mute.state() == NSControlStateValueOn,
             clipboard: clipboard.state() == NSControlStateValueOn,
             quiet_wifi: wifi.state() == NSControlStateValueOn,
             auto_capture: capture.state() == NSControlStateValueOn,

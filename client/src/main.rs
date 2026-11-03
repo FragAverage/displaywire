@@ -515,7 +515,11 @@ mod app {
                 menu::Action::ToggleStats => self.toggle_graph(),
                 menu::Action::Settings => self.edit_settings(),
                 menu::Action::Microphone => self.toggle_mic(),
-                menu::Action::Mute => self.change_prefs(|p| p.muted = !p.muted),
+                menu::Action::Mute => {
+                    self.change_prefs(|p| p.muted = !p.muted);
+                    let muted = self.session.as_ref().is_some_and(|s| s.telemetry.prefs.lock().unwrap().muted);
+                    self.flash_notice(if muted { "Audio muted" } else { "Audio on" }, 1500);
+                }
                 menu::Action::Shortcuts => dialog::show_shortcuts(),
                 menu::Action::WifiSetup => self.setup_wifi(),
                 menu::Action::CheckUpdates => crate::updater::spawn_check(self.proxy.clone(), true),
@@ -579,11 +583,18 @@ mod app {
             let Some(s) = &self.session else { return };
             let on = !s.telemetry.mic_on.load(Relaxed);
             s.telemetry.mic_on.store(on, Relaxed);
-            let proxy = self.proxy.clone();
-            let _ = proxy.send_event(UserEvent::Notice(Some(if on { "Microphone on".into() } else { "Microphone off".into() })));
+            self.flash_notice(if on { "Microphone on" } else { "Microphone off" }, 1500);
+        }
+
+        /// Shows `text` in the banner for `ms`, clearing it then only if nothing newer replaced it.
+        fn flash_notice(&mut self, text: &str, ms: u64) {
+            let Some(s) = &mut self.session else { return };
+            s.notice = Some(text.to_string());
+            s.refresh_banner();
+            let (proxy, text) = (self.proxy.clone(), text.to_string());
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                let _ = proxy.send_event(UserEvent::Notice(None));
+                std::thread::sleep(Duration::from_millis(ms));
+                let _ = proxy.send_event(UserEvent::NoticeExpired(text));
             });
         }
 
@@ -891,6 +902,7 @@ mod app {
                         let text = format!("PC is now {w}×{h}");
                         s.notice = Some(text.clone());
                         s.refresh_banner();
+                        let proxy = proxy.clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(3));
                             let _ = proxy.send_event(UserEvent::NoticeExpired(text));
@@ -900,6 +912,17 @@ mod app {
                     // The first picture is on its way to the screen.
                     if s.placeholder.take().is_some() {
                         s.refresh_banner();
+                        // A mute left on from an earlier session is easy to miss.
+                        if s.telemetry.prefs.lock().unwrap().muted {
+                            let text = "Sound is muted · View › Mute Audio".to_string();
+                            s.notice = Some(text.clone());
+                            s.refresh_banner();
+                            let proxy = proxy.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_secs(5));
+                                let _ = proxy.send_event(UserEvent::NoticeExpired(text));
+                            });
+                        }
                     }
                 }
                 UserEvent::Graph => s.overlay.update(&s.telemetry.history.lock().unwrap()),

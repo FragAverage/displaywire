@@ -221,7 +221,7 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 ### Bugs
 - [ ] **A resolution change freezes the stream**: see Roadmap 1.
 - [ ] `--fps 0` divides by zero (`server/src/file.rs:25`), and `--pace-mbps 0` overflows (`main.rs:318`, `:364`). Add clap value ranges.
-- [ ] Each mic toggle starts a thread that clears the banner after 1.5 s, which can wipe a newer notice (`client/src/main.rs:307`).
+- [x] Each mic toggle starts a thread that clears the banner after 1.5 s, which can wipe a newer notice (`client/src/main.rs:307`).
 - [ ] Name the server `control` thread and handle its death (`main.rs:304`); stop ignoring `spawn` failures.
 - [ ] `hevc::nal_type` panics on an empty slice (`crates/hevc/src/lib.rs:10`).
 

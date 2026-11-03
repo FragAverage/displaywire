@@ -3,12 +3,11 @@
     "version": "0.6.3",
     "vendor": "DisplayWire",
     "type": "native",
-    "main": "run.sh",
+    "main": "displaywire-tv",
     "title": "DisplayWire",
     "icon": "icon.png",
     "largeIcon": "largeIcon.png",
     "bgColor": "#000000",
     "iconColor": "#000000",
-    "supportTouchMode": "none",
-    "requiredPermissions": ["time.query", "media.operation"]
+    "supportTouchMode": "none"
 }

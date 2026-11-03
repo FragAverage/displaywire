@@ -11,6 +11,8 @@ unsafe extern "C" {
 }
 
 const RTLD_NOW: c_int = 2;
+/// LG's libraries look up their own symbols by name, as they would if linked normally.
+const RTLD_GLOBAL: c_int = 0x100;
 
 fn last_error() -> String {
     let e = unsafe { dlerror() };
@@ -26,7 +28,7 @@ unsafe impl Sync for Lib {}
 
 impl Lib {
     pub fn open(name: &CStr) -> Result<Lib, String> {
-        let h = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
+        let h = unsafe { dlopen(name.as_ptr(), RTLD_NOW | RTLD_GLOBAL) };
         if h.is_null() { Err(last_error()) } else { Ok(Lib(h)) }
     }
 

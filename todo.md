@@ -171,17 +171,20 @@ Prototype (branch `lg-proto`), in milestones:
       Docker build sets `getrandom_backend="linux_raw"`.
 - [ ] M1b: pair and connect from the Mac terminal (skipped: went straight to the TV).
 - [ ] Watch for: two session drops right after pairing in the first run, not seen since.
-- [ ] M2: video through LG's native pipeline. **Blocked on the test TV (2026-11-03):**
-      - The TV has NDL DirectMedia API v1 only (exports checked); v1 is H.264-only (webosbrew headers, moonlight-tv's
-        `ndl-webos4`, and the only codec string in LG's impl is `h264b`). No `libStarfishMediaAPIs`, so no SMP/HEVC route.
-      - `NDL_DirectMediaInit` and the SDL window work, but `NDL_DirectVideoOpen` fails for every source (0/1/2/3) and size
-        (2560×1440, 1080p, 720p), from SSH, as an installed app, with `NDL_DirectMediaSetAppState(foreground)`, and from
-        SSH while the app holds the window.
-      - Cause: the Developer Mode app jail on k5lp lacks `/dev/rtkmem` (present in the SSH jail). moonlight-tv's
-        `SS4S_webOS_IsJailConfigBroken` disables NDL and SMP on k3lp/k5lp for exactly this. Fix needs root; no public
-        root for this firmware (05.40.97, Jul 2025, 32-bit kernel 4.4).
-      - Built so far: `play`, `connect --show`, `window`, NDL/SDL via dlopen (`webos/src/{dl,ndl,screen,tv}.rs`),
-        `hevc::sps_size`, IPK packaging (`webos/app/`, `scripts/package-webos.sh`).
+- [x] M2a: video on the TV screen through **LGNC** (`liblgncopenapi.so.2`, moonlight-tv's "NetCast Legacy"):
+      `play` of an H.264 1080p clip shows correctly and smoothly from the installed app (2026-11-03).
+      What it took:
+      - NDL v1 (H.264-only on this TV) can't work here: the k5lp Developer Mode app jail has no `/dev/rtkmem`
+        (moonlight-tv's `SS4S_webOS_IsJailConfigBroken`). LGNC doesn't need it.
+      - LGNC must be initialised **before** SDL's video subsystem; otherwise it crashes in `wl_proxy_marshal`
+        (crash reports in `/tmp/faultmanager/crash/`; the TV uploads them to LG).
+      - The app's `main` must be the binary itself (LG's services identify the app by its executable; via a shell
+        script `LGNC_PLUGIN_Initialize` returns -1). Launched as an app, the binary reads `args`/`env` beside it and
+        logs to `/media/developer/temp/dw/app.log`.
+      - LG libraries are `dlopen`ed `RTLD_GLOBAL`.
+      - LGNC is H.264 only, so this TV needs H.264 from the PC; no HEVC route exists here (no SMP library either).
+- [ ] M2b: live stream: the server encodes H.264 for this client (NVENC H.264; codec in Hello, see item 8), the TV
+      opens LGNC at the SPS size (needs an H.264 SPS parser), `connect --show` end to end; measure latency.
 - [ ] M3: IPK packaging and launch from the TV's home screen; audio; gamepad/keyboard/mouse/Magic Remote input.
 
 ## Not planned

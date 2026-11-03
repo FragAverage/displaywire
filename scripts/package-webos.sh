@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 out=target/webos
-rm -rf "$out/app" && mkdir -p "$out/app"
+rm -rf "$out/app" "$out"/*.ipk && mkdir -p "$out/app"
 cp webos/app/* "$out/app/"
 docker run --rm -v "$PWD":/src displaywire-webos arm-webos-linux-gnueabi-strip \
     -o "/src/$out/app/displaywire-tv" /src/target/armv7-unknown-linux-gnueabi/release/displaywire-tv

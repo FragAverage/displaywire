@@ -16,6 +16,8 @@ mod compat;
 #[cfg(target_os = "linux")]
 mod dl;
 #[cfg(target_os = "linux")]
+mod lgnc;
+#[cfg(target_os = "linux")]
 mod ndl;
 #[cfg(target_os = "linux")]
 mod screen;
@@ -66,15 +68,14 @@ enum Cmd {
         /// Show the stream on the TV's screen.
         #[arg(long)]
         show: bool,
-        /// NDL video source type (1 is H.264, the only one LG's headers name).
-        #[arg(long, default_value_t = 1)]
-        source: i32,
+        #[command(flatten)]
+        video: VideoArgs,
     },
-    /// Play a dump from `connect --dump` on the TV's screen, in a loop.
+    /// Play an Annex B file (a `connect --dump`, or H.264) on the TV's screen, in a loop.
     Play {
         file: PathBuf,
-        #[arg(long, default_value_t = 1)]
-        source: i32,
+        #[command(flatten)]
+        video: VideoArgs,
         #[arg(long, default_value_t = 60)]
         fps: u32,
     },
@@ -85,13 +86,27 @@ enum Cmd {
     Window,
 }
 
+/// Which of LG's decoders to use.
+#[derive(clap::Args, Clone, Copy)]
+struct VideoArgs {
+    #[cfg(target_os = "linux")]
+    #[arg(long, value_enum, default_value = "lgnc")]
+    backend: tv::Backend,
+    /// NDL video source type (1 is H.264, the only one LG's headers name).
+    #[arg(long, default_value_t = 1)]
+    source: i32,
+}
+
 fn main() {
-    let cli = Cli::parse();
+    let cli = match launched_as_app() {
+        Some(args) => Cli::parse_from(args),
+        None => Cli::parse(),
+    };
     let store = store::Store::new(cli.state_dir);
     let result = match cli.cmd {
         Cmd::Pair { address, name } => pair(&store, &address, &name),
-        Cmd::Connect { address, dump, seconds, show, source } => connect(&store, &address, dump, seconds, show.then_some(source)),
-        Cmd::Play { file, source, fps } => play(&file, source, fps),
+        Cmd::Connect { address, dump, seconds, show, video } => connect(&store, &address, dump, seconds, show.then_some(video)),
+        Cmd::Play { file, video, fps } => play(&file, video, fps),
         Cmd::Window => window(),
         Cmd::List => store.load().map(|servers| {
             for s in servers {
@@ -145,8 +160,8 @@ fn pair(store: &store::Store, address: &str, name: &str) -> Result<(), String> {
     }
 }
 
-/// `show`: the NDL source type to show the stream with.
-fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: Option<u64>, show: Option<i32>) -> Result<(), String> {
+/// `show`: how to show the stream on screen.
+fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: Option<u64>, show: Option<VideoArgs>) -> Result<(), String> {
     let server = store
         .find(address)?
         .ok_or_else(|| format!("{address} isn't paired: run `displaywire-tv pair {address}` first"))?;
@@ -159,8 +174,8 @@ fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: 
             stop.store(true, Relaxed);
         });
     }
-    if let Some(source) = show {
-        return show_stream(addr, server.key, source, stop);
+    if let Some(video) = show {
+        return show_stream(addr, server.key, video, stop);
     }
     let sink: Box<dyn session::VideoSink + Send> = match dump {
         Some(path) => Box::new(session::Dump::create(&path)?),
@@ -170,18 +185,18 @@ fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: 
 }
 
 #[cfg(target_os = "linux")]
-fn show_stream(addr: std::net::SocketAddr, key: secure::Key, source: i32, stop: Arc<AtomicBool>) -> Result<(), String> {
-    tv::show(source, stop, move |sink, stop| session::run(addr, key, sink, stop))
+fn show_stream(addr: std::net::SocketAddr, key: secure::Key, video: VideoArgs, stop: Arc<AtomicBool>) -> Result<(), String> {
+    tv::show(video.backend, video.source, stop, move |sink, stop| session::run(addr, key, sink, stop))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn show_stream(_: std::net::SocketAddr, _: secure::Key, _: i32, _: Arc<AtomicBool>) -> Result<(), String> {
+fn show_stream(_: std::net::SocketAddr, _: secure::Key, _: VideoArgs, _: Arc<AtomicBool>) -> Result<(), String> {
     Err("--show only works on the TV".into())
 }
 
 #[cfg(target_os = "linux")]
-fn play(file: &std::path::Path, source: i32, fps: u32) -> Result<(), String> {
-    tv::play(file, source, fps)
+fn play(file: &std::path::Path, video: VideoArgs, fps: u32) -> Result<(), String> {
+    tv::play(file, video.backend, video.source, fps)
 }
 
 #[cfg(target_os = "linux")]
@@ -195,6 +210,49 @@ fn window() -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn play(_: &std::path::Path, _: i32, _: u32) -> Result<(), String> {
+fn play(_: &std::path::Path, _: VideoArgs, _: u32) -> Result<(), String> {
     Err("play only works on the TV".into())
 }
+
+/// When the TV launches us as an app, the only argument is the launch parameters (JSON). The
+/// prototype then takes its command line from `args` (one per line) and environment from `env`
+/// (`KEY=value` lines) beside the binary, and logs to `DW_LOG` or the developer temp folder.
+/// The binary has to be the app's `main` itself: LG's services identify the app by its executable.
+fn launched_as_app() -> Option<Vec<String>> {
+    let first = std::env::args().nth(1)?;
+    if !first.starts_with('{') {
+        return None;
+    }
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let _ = std::env::set_current_dir(&dir);
+    for line in std::fs::read_to_string("env").unwrap_or_default().lines() {
+        if let Some((k, v)) = line.trim().strip_prefix("export ").unwrap_or(line.trim()).split_once('=') {
+            // SAFETY: still single-threaded.
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
+    let log = std::env::var("DW_LOG").unwrap_or_else(|_| "/media/developer/temp/dw/app.log".into());
+    redirect_output(&log);
+    println!("=== launched as an app: {first}");
+    let mut args = vec!["displaywire-tv".to_string()];
+    args.extend(std::fs::read_to_string("args").unwrap_or_default().lines().map(str::to_string).filter(|l| !l.is_empty()));
+    Some(args)
+}
+
+#[cfg(unix)]
+fn redirect_output(path: &str) {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn dup2(old: i32, new: i32) -> i32;
+    }
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        // SAFETY: plain fd duplication onto stdout and stderr.
+        unsafe {
+            dup2(f.as_raw_fd(), 1);
+            dup2(f.as_raw_fd(), 2);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn redirect_output(_: &str) {}

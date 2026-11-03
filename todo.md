@@ -1,7 +1,7 @@
 # Roadmap
 
 Discussed 2026-11-03, one item at a time. Suggested build order: 1 → 10 → 2 → 6 → 5, then 3 and 4, with 7, 8 and 9
-alongside.
+alongside; 11 (iPad) after 3, since it reuses the client split; 12 (LG) last, as a prototype.
 
 ## 1. Survive a resolution change (agreed)
 Decided: the Mac window keeps its size and fits the new picture; the server does a full rebuild (no NVENC
@@ -123,6 +123,42 @@ Risk: no AMD/Intel hardware to test on here; needs community testers or cloud ma
 ## 10. Security fixes before wider release (agreed)
 Decided: every open item under "Should fix > Security" below ships in the next release (0.7), before new features
 reach users. The firewall rule allows LAN + Tailscale only.
+
+## 11. iPad app (agreed)
+Decided: iPad first (universal build so iPhone comes later); Rust core + SwiftUI shell; touch works as a trackpad;
+App Store distribution, TestFlight first.
+- [ ] Apple Developer account ($99/year); this also lets us notarize the Mac app and drop the `xattr` step.
+- [ ] Rust core as an xcframework (`aarch64-apple-ios`, simulator slices): receiver, transport, secure, pairing, xfer,
+      clock; a small C ABI (or UniFFI) for connect, frames, audio, input, events. Shares the client split from item 3.
+- [ ] Video: VideoToolbox decode (reuse `crates/videotoolbox`) into `AVSampleBufferDisplayLayer` or a CAMetalLayer;
+      ProMotion 120 Hz via `CADisplayLink` preferred rate.
+- [ ] Audio: AVAudioSession (playback + mic, low IO buffer), same jitter cushion.
+- [ ] Touch as trackpad: one-finger drag moves the pointer, tap clicks, two-finger tap right-clicks, two-finger drag
+      scrolls, tap-and-drag holds the button; on-screen keyboard button.
+- [ ] Hardware keyboard and trackpad/mouse: `UIKey` presses, pointer lock (`prefersPointerLocked`) with
+      `GCMouse` relative motion for games; ⌘ → Windows key as on the Mac.
+- [ ] Gamepads via GameController (shared logic with the Mac, item 2).
+- [ ] SwiftUI: PC list with discovery (needs the local network permission), pairing PIN, settings, stats overlay.
+- [ ] Stage Manager / Split View: resize the stream, release input when inactive; pause on background.
+- [ ] Clipboard (text) both ways; files via the share sheet / Files picker.
+- [ ] App Store review notes: no remote code, explain local network use; privacy labels (no data collected).
+
+## 12. LG TV app (agreed, exploratory)
+Decided: native client for webOS (low latency, like moonlight-tv), installed through Developer Mode or the Homebrew
+Channel, not the LG store. Control by gamepad, keyboard and mouse, and the Magic Remote as a pointer.
+Caveat: a Developer Mode app stops working unless the session is renewed every 50 hours (the Homebrew Channel
+avoids that but needs a rootable TV), so this is for enthusiasts until LG offers a better route.
+- [ ] Find the TV's webOS version (Settings > General > About This TV, or `ares-device -i` in Developer Mode) and
+      check it against what moonlight-tv supports.
+- [ ] Toolchain: cross-compile the Rust client for webOS (armv7/aarch64 Linux, LG's NDK sysroot), package as an IPK
+      with `ares-package`.
+- [ ] Video: LG's native media pipeline (NDL DirectMedia, or SMP on newer webOS) for hardware HEVC with low latency;
+      study moonlight-tv's backends for each webOS version.
+- [ ] Audio: NDL/PulseAudio output; no mic on a TV.
+- [ ] Input: SDL2 (or evdev) for gamepads, keyboard and mouse; Magic Remote as a pointer (motion → absolute pointer,
+      OK = click, wheel = scroll); remote Back = menu.
+- [ ] UI: the shared egui UI from item 3, sized for a TV (10-foot layout, remote navigation).
+- [ ] Decide after a prototype: is latency good enough to keep going, and is a store app ever possible?
 
 ## Not planned
 - Internet access without Tailscale (STUN hole punching, a relay, accounts). Tailscale stays the answer; we run no

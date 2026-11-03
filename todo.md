@@ -183,9 +183,15 @@ Prototype (branch `lg-proto`), in milestones:
         logs to `/media/developer/temp/dw/app.log`.
       - LG libraries are `dlopen`ed `RTLD_GLOBAL`.
       - LGNC is H.264 only, so this TV needs H.264 from the PC; no HEVC route exists here (no SMP library either).
-- [ ] M2b: live stream: the server encodes H.264 for this client (NVENC H.264; codec in Hello, see item 8), the TV
-      opens LGNC at the SPS size (needs an H.264 SPS parser), `connect --show` end to end; measure latency.
-- [ ] M3: IPK packaging and launch from the TV's home screen; audio; gamepad/keyboard/mouse/Magic Remote input.
+- [x] M2b: live stream on the TV (2026-11-03): `connect --show` from the installed app shows the PC desktop live.
+      - The client sets `CAP_H264 | CAP_MAX_1080P`; the server rebuilds converter + NVENC as 1920×1080 H.264 for that
+        session (HEVC at native size for everyone else). Above 1080p this TV's H.264 decoder shows only green.
+      - PC capture → received on the TV ~17–23 ms, rtt ~5 ms; decode/display time on the TV not measured yet.
+      - Server encode for H.264 looked slow (~17 ms capture → encoded at 1440p): profile at 1080p.
+      - Dev setup: the server on FRAG-PC is a build of this branch (`C:\Program Files\DisplayWire\displaywire-server.exe`,
+        previous one kept as `.exe.bak`); built in `~\dw-build` with `cargo +1.99.1` (the PC's default Rust is 1.79).
+- [ ] M3: a real app: pairing and PC choice on the TV (no `args` file), audio (LGNC audio is off on broken-jail TVs:
+      try SDL/PulseAudio), gamepad/keyboard/mouse/Magic Remote input, measure glass-to-glass latency.
 
 ## Not planned
 - Internet access without Tailscale (STUN hole punching, a relay, accounts). Tailscale stays the answer; we run no

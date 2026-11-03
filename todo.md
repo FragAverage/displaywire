@@ -67,19 +67,23 @@ LaunchAgent at login, mirroring the Windows tray (no login-window streaming); vi
 - [ ] Permissions UX: Screen Recording + Accessibility first-run walkthrough; pairing and device list in the menu bar.
 - [ ] Keep the Mac awake while streaming (`IOPMAssertion`); Bonjour/our discovery answer.
 - [ ] Packaging: same `.app` with a server mode, or a second app; Homebrew cask; signed updates.
-## 5. Adaptive bitrate + reference-frame invalidation (agreed)
-Decided: the Settings bitrate becomes a ceiling and the server adapts below it ("Fixed" toggle keeps today's
-behaviour); GCC-style controller on one-way delay trend plus loss; reference-frame invalidation for lost frames with a
-keyframe as fallback; FEC parity adapts 5–30% with the Settings value as the minimum.
-- [ ] Client: per-frame feedback (arrival spread, one-way delay from the synced clock, loss, FEC repairs) at ~20 Hz.
-- [ ] Server: controller (delay-gradient trend filter, overuse → multiplicative cut, loss > 10% → hard cut, slow
-      additive climb back to the ceiling); call `set_bitrate` (NVENC reconfigure, already wired).
-- [ ] Pacing follows the current bitrate; don't let the pacer queue build delay itself.
-- [ ] RFI: client sends the first lost frame id; server calls `nvEncInvalidateRefFrames` (keeps enough reference
-      frames, `maxNumRefFrames`); if the frame is too old or the encoder is MF, force a keyframe as today.
-- [ ] Adaptive FEC parity from smoothed loss and burst length.
-- [ ] Stats graph: show target bitrate and FEC % alongside actual.
-- [ ] Test with netprobe-style impairment (loss, bursts, delay ramps) and on the real Wi-Fi.
+## 5. Adaptive bitrate + reference-frame invalidation (done 2026-11-03, tested)
+Decided: the Settings bitrate becomes a ceiling and the server adapts below it ("fixed" checkbox keeps today's
+behaviour); controller on one-way delay plus loss; reference-frame invalidation for lost frames with a keyframe as
+fallback; FEC parity adapts up to 30% with the Settings value as the minimum.
+- [x] Client: `Msg::Feedback` every 50 ms: datagrams received/sent per settled frame (a frame straddling two
+      reports isn't half-lost), frames lost, median capture → arrival delay.
+- [x] Server (`server/src/rate.rs`, tested): cut 15% when the queue (delay over the 10 s minimum) stays above 25 ms
+      for 150 ms, and again only if it grows; cut 15–30% on smoothed loss > 5%; climb ~10%/s to the ceiling on a
+      clean link; floor 3 Mbps. Encoder told only about ≥ 2% changes. `rate:` log lines say why it cut.
+- [x] RFI: `Msg::FrameLost` → NVENC `nvEncInvalidateRefFrames` on every frame from the lost one to the newest
+      (the client drops all of them), 8 reference frames kept, `Msg::Recovered` before the next frame (encoded at
+      once, so a still screen doesn't stall it). Keyframe if too far back, MF, or no answer in 150 ms.
+      Tested at 15% simulated loss: ~100 losses repaired, 0 by keyframe, 0 decode errors.
+- [x] No protocol version change (new messages are ignored by older peers; `Settings.adaptive` decodes from old).
+- [ ] Stats graph: show the target bitrate and repair % beside the actual.
+- [ ] Encode time doubles (2 → 5–7 ms) when the PC renders at ~60 fps: GPU clocks? Look at NVENC/GPU power state.
+
 ## 6. Draw the cursor on the client (done 2026-11-03, tested)
 Decided: the client shows the PC's pointer shape as its own OS cursor, so it moves with zero added latency; when
 the PC moves the pointer itself, the client warps its cursor to match.

@@ -1,3 +1,133 @@
+# Roadmap
+
+Discussed 2026-11-03, one item at a time. Suggested build order: 1 → 10 → 2 → 6 → 5, then 3 and 4, with 7, 8 and 9
+alongside.
+
+## 1. Survive a resolution change (agreed)
+Decided: the Mac window keeps its size and fits the new picture; the server does a full rebuild (no NVENC
+in-place reconfigure); the Mac shows a short banner ("PC is now 2560×1440").
+Today `Capture::duplication` (`server/src/windows/capture.rs:273`) sees the new size and waits forever.
+The Mac side already copes: a keyframe with new parameter sets rebuilds the decoder (`receiver.rs:new_decoder`).
+- [ ] Capture: accept the new duplication, reallocate `frame`/`composed`/pointer textures, report a resize.
+- [ ] `ScreenSource`: rebuild `Converter` and encoder at the new (even) size, then force a keyframe.
+- [ ] Input: `Injector.screen` is read once at startup (`server/src/windows/input.rs:47`); refresh it on resize or the mouse lands in the wrong place.
+- [ ] Client: banner on a size change after the first frame (`UserEvent::VideoSize`, `client/src/main.rs:770`).
+- [ ] Test: change resolution in Windows Settings mid-stream; an exclusive-fullscreen game at a non-desktop size; lock screen; rotate a monitor.
+
+## 2. Gamepads (agreed)
+Decided: bundle ViGEmBus (installer offers it, server detects it and says if missing); emulate an Xbox 360 pad,
+or a DualShock 4 when the Mac pad is a PlayStation one (gyro, touchpad, light bar); up to 4 pads; rumble goes back.
+- [ ] Protocol: gamepad messages (connect/disconnect with type, state snapshots on the reliable input channel,
+      rumble and light bar back); bump the protocol version and advertise the capability in Hello.
+- [ ] Mac: GameController framework: pad connect/disconnect, buttons, sticks, triggers, DualShock/DualSense motion
+      and touchpad; keep the system from eating the Home/PS button while streaming.
+- [ ] Mac: rumble via `GCDeviceHaptics`, light bar via `GCDeviceLight`.
+- [ ] PC: ViGEmClient (or its IOCTLs directly), one target per pad, X360 or DS4; DS4 extended report for motion/touchpad.
+- [ ] PC: release every pad on disconnect or focus loss, like keys.
+- [ ] Installer: offer ViGEmBus; check its licence (BSD-3) and redistribution of the signed driver.
+- [ ] README: controllers section.
+## 3. Windows client (agreed)
+Decided: D3D11 video decode (any GPU, zero-copy to the swapchain); one shared cross-platform UI for the PC list,
+pairing and settings on both Mac and Windows; one `client` crate with platform modules like the server; v1 has the
+Win key / Alt-Tab hook, raw relative mouse, gamepads, clipboard and file drop. UI toolkit: egui, drawn in our own
+winit window (also replaces the AppKit launcher, pairing sheet and settings on the Mac).
+- [ ] Split `client/src` into shared code (receiver, pacing, clock, stats, settings, servers, transfer, updater) and
+      `macos/` + `windows/` behind small traits: Decoder, Presenter, AudioOut, Mic, Input, Clipboard.
+- [ ] Shared UI toolkit for launcher, pairing, settings and dialogs; port the Mac launcher to it with egui.
+- [ ] Decode: `ID3D11VideoDecoder` HEVC Main (Main10 later for item 8), parse slices with `crates/hevc`.
+- [ ] Present: flip-model swapchain (`FLIP_DISCARD`, waitable object, tearing allowed), NV12 → RGB in a pixel shader.
+- [ ] Audio: WASAPI shared-mode render with the existing jitter cushion; WASAPI capture for the mic.
+- [ ] Input: Raw Input for relative mouse; `WH_KEYBOARD_LL` hook for Win key, Alt-Tab and friends while focused;
+      ClipCursor when captured; let go of everything on focus loss.
+- [ ] Gamepads: GameInput (or XInput) to the item 2 protocol.
+- [ ] Clipboard (text, skip `ExcludeClipboardContentFromMonitorProcessing`) and drag-and-drop files.
+- [ ] Wi-Fi: the Windows equivalent of AWDL tuning (`WlanSetInterface` background scan off, streaming mode).
+- [ ] Packaging: signed zip + update channel for the client; winget later.
+## 4. Mac server (agreed)
+Decided: macOS 13+ (ScreenCaptureKit captures system audio, no loopback driver); menu-bar app started by a
+LaunchAgent at login, mirroring the Windows tray (no login-window streaming); virtual display comes with item 7.
+- [ ] Split `server/src` like the client: shared session/auth/pairing/transfer code, `windows/` and `macos/` sources.
+- [ ] Capture: `SCStream` of one display at native size and refresh rate, IOSurface-backed, cursor composited by SCK
+      (until item 6), frames only on change.
+- [ ] Encode: VideoToolbox HEVC, `RealTime`, `PrioritizeEncodingSpeedOverQuality`, low-latency rate control
+      (`EnableLowLatencyRateControl`), no B-frames, infinite GOP; reuse `crates/videotoolbox`.
+- [ ] Audio: SCK audio (exclude our own process) → the existing PCM16 path.
+- [ ] Mic: play into a virtual input device; decide on BlackHole vs our own Audio Server plug-in.
+- [ ] Input: `CGEventPost` for keys, mouse, wheel; Windows-key ↔ ⌘ mapping the other way round; Accessibility
+      permission prompt and a clear message when it's missing.
+- [ ] Clipboard (NSPasteboard, skip `org.nspasteboard.ConcealedType`) and received files into `~/Downloads/DisplayWire`.
+- [ ] Permissions UX: Screen Recording + Accessibility first-run walkthrough; pairing and device list in the menu bar.
+- [ ] Keep the Mac awake while streaming (`IOPMAssertion`); Bonjour/our discovery answer.
+- [ ] Packaging: same `.app` with a server mode, or a second app; Homebrew cask; signed updates.
+## 5. Adaptive bitrate + reference-frame invalidation (agreed)
+Decided: the Settings bitrate becomes a ceiling and the server adapts below it ("Fixed" toggle keeps today's
+behaviour); GCC-style controller on one-way delay trend plus loss; reference-frame invalidation for lost frames with a
+keyframe as fallback; FEC parity adapts 5–30% with the Settings value as the minimum.
+- [ ] Client: per-frame feedback (arrival spread, one-way delay from the synced clock, loss, FEC repairs) at ~20 Hz.
+- [ ] Server: controller (delay-gradient trend filter, overuse → multiplicative cut, loss > 10% → hard cut, slow
+      additive climb back to the ceiling); call `set_bitrate` (NVENC reconfigure, already wired).
+- [ ] Pacing follows the current bitrate; don't let the pacer queue build delay itself.
+- [ ] RFI: client sends the first lost frame id; server calls `nvEncInvalidateRefFrames` (keeps enough reference
+      frames, `maxNumRefFrames`); if the frame is too old or the encoder is MF, force a keyframe as today.
+- [ ] Adaptive FEC parity from smoothed loss and burst length.
+- [ ] Stats graph: show target bitrate and FEC % alongside actual.
+- [ ] Test with netprobe-style impairment (loss, bursts, delay ramps) and on the real Wi-Fi.
+## 6. Draw the cursor on the client (agreed)
+Decided: the client shows the PC's pointer shape as its own OS cursor (NSCursor on Mac, HCURSOR on Windows), so it
+moves with zero added latency; when the PC moves the pointer itself, the client warps its cursor to match.
+- [ ] Protocol: pointer shape (id + RGBA + hotspot, cached by id) and position/visibility messages; capability in Hello.
+- [ ] Server: stop compositing the pointer for clients that support it (keep it for old clients and captured/game mode
+      where the pointer is hidden anyway); convert monochrome/masked-colour shapes to RGBA (invert → outline fallback).
+- [ ] Mac: NSCursor from the shape with HiDPI scaling; Windows client: `CreateIconIndirect`.
+- [ ] Warp detection: a PC position change that our last injected input doesn't explain → `CGWarpMouseCursorPosition`
+      (Mac) / `SetCursorPos` (Windows), rate-limited so it never fights the user.
+- [ ] Hidden pointer on the PC (games, video players) hides it locally too.
+## 7. Monitor choice and a virtual display (agreed)
+Decided: hybrid: the main window streams the PC's main monitor; the client can open any other monitor in its own
+window (one more capture + encode session each). Virtual display: bundle the open-source, signed IddCx Virtual
+Display Driver (MIT); add a mode matching the client's size and refresh when connecting, remove it afterwards.
+- [ ] Protocol: monitor list (id, name, size, refresh, primary) and per-stream monitor id; several video streams per
+      session, each with its own frame ids, FEC and keyframe requests.
+- [ ] Server: capture + converter + encoder per stream, shared D3D device per adapter; GeForce NVENC session limit
+      (8) is plenty; monitor on another adapter needs its own device.
+- [ ] Input: pointer coordinates per stream's monitor rect (item 1's refresh generalised); keyboard goes to whichever
+      window has focus.
+- [ ] Client: "Monitors" menu: open another monitor in a new window; remember per PC which ones were open.
+- [ ] Bitrate: split the ceiling across open streams (item 5 controller owns the total).
+- [ ] VDD: installer offers it; on connect, add a mode for the client display (e.g. 3024×1964@120), optionally make
+      it primary and turn physical screens off for the session ("headless mode" setting); restore on disconnect,
+      including after a crash (persist what we changed).
+- [ ] Mac server (item 4): `CGVirtualDisplay` equivalent.
+## 8. HDR and AV1 (agreed)
+Decided: HDR is a manual per-PC toggle (off by default); codec is negotiated: client lists what it decodes in
+hardware, server what it encodes, AV1 preferred over HEVC, with an override in Settings.
+- [ ] Protocol: codec + bit depth + colour (BT.709 SDR / BT.2020 PQ) in Hello and per keyframe; HDR metadata
+      (mastering display, MaxCLL/MaxFALL) when the PC provides it.
+- [ ] Server HDR: duplicate with `DuplicateOutput1` in `R16G16B16A16_FLOAT`/`R10G10B10A2`, convert to P010 (PQ),
+      NVENC HEVC Main10 / AV1 10-bit; pointer compositing in HDR space (or item 6 makes it moot).
+- [ ] Mac HDR: VideoToolbox P010 output, `CALayer` with `wantsExtendedDynamicRangeContent`, BT.2100 PQ colourspace;
+      grey out the toggle when the display can't do EDR.
+- [ ] AV1: NVENC AV1 (RTX 40+), OBU packetisation, `av1C` already in `crates/videotoolbox`; Mac decode needs M3+
+      (check `VTIsHardwareDecodeSupported`); Windows client via D3D11 AV1 decode.
+- [ ] Re-run decodebench on real NVENC AV1 streams (the plan notes p99 spikes on synthetic clips).
+## 9. AMD and Intel encoders (agreed)
+Decided: direct AMF (AMD) and oneVPL/QSV (Intel) now, like direct NVENC; MF stays as the last fallback.
+Risk: no AMD/Intel hardware to test on here; needs community testers or cloud machines.
+- [ ] Encoder trait already exists (`AnyEncoder`); add `AmfEncoder` and `QsvEncoder`; choose by the adapter's vendor
+      id (0x1002 AMD, 0x8086 Intel), fall back to MF, then fail clearly.
+- [ ] AMF: ultra-low-latency usage, no B-frames, CBR with small VBV, `ForceIntraRefresh`/LTR for item 5's recovery.
+- [ ] QSV (oneVPL): low-power mode, `LowDelayBRC`, `MaxFrameSize`, D3D11 surface sharing with the capture device.
+- [ ] Per-vendor bitrate reconfigure and keyframe-on-demand; RFI where the SDK supports it (AMF LTR, QSV RefList).
+- [ ] Find testers: a "help wanted" issue with a `--profile` log template; consider a cloud Windows VM with an AMD GPU.
+- [ ] README: drop "NVIDIA" from the requirements when this lands.
+## 10. Security fixes before wider release (agreed)
+Decided: every open item under "Should fix > Security" below ships in the next release (0.7), before new features
+reach users. The firewall rule allows LAN + Tailscale only.
+
+## Not planned
+- Internet access without Tailscale (STUN hole punching, a relay, accounts). Tailscale stays the answer; we run no
+  servers. README explains a manual port-forward + firewall rule for people who insist.
+
 # Open source release checklist
 
 From the readiness audit on 2026-10-30. Ordered by priority.
@@ -33,7 +163,7 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 - [ ] **Connection blocking without the key** (`server/src/main.rs:499`). The single global handshake rate limit is spent before HS1 is checked. Verify first, rate-limit valid handshakes per source IP, and cap pending sessions per address.
 - [ ] **Service registers the exe wherever it sits** (`server/src/windows/service.rs:74-84`). Only allow install from `%ProgramFiles%\DisplayWire` (via `--setup`).
 - [ ] Call `sc`, `netsh`, `icacls`, `reg` and `cmd` by full `%SystemRoot%\System32` path. Load `nvEncodeAPI64.dll` with `LoadLibraryExW(…, LOAD_LIBRARY_SEARCH_SYSTEM32)` (`nvenc.rs:76`).
-- [ ] Limit the firewall rule to `profile=private,domain remoteip=localsubnet` (plus the tailnet range) (`service.rs:92-95`).
+- [ ] Limit the firewall rule to `profile=private,domain remoteip=localsubnet,100.64.0.0/10` (LAN + Tailscale) (`service.rs:92-95`); README: how to add a rule for other networks.
 - [ ] Answer discovery only from private/local addresses (`main.rs:490-495`), and correct the "server stays silent" claim in `docs/AUTH.md`.
 - [ ] Bound the clipboard read to `GlobalSize(h) / 2` (`server/src/windows/shell.rs:48-51`).
 - [x] Make `as_user` return an error instead of falling back to SYSTEM (`shell.rs:111-112`).
@@ -43,7 +173,7 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 - [ ] Defence in depth: drop unneeded privileges from the SYSTEM child token (`service.rs:210-217`).
 
 ### Bugs
-- [ ] **A resolution change freezes the stream** (`server/src/windows/capture.rs:273`, the TODO). Rebuild the pipeline at the new size; exclusive-fullscreen games hit this.
+- [ ] **A resolution change freezes the stream**: see Roadmap 1.
 - [ ] `--fps 0` divides by zero (`server/src/file.rs:25`), and `--pace-mbps 0` overflows (`main.rs:318`, `:364`). Add clap value ranges.
 - [ ] Each mic toggle starts a thread that clears the banner after 1.5 s, which can wipe a newer notice (`client/src/main.rs:307`).
 - [ ] Name the server `control` thread and handle its death (`main.rs:304`); stop ignoring `spawn` failures.

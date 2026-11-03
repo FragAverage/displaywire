@@ -3,15 +3,15 @@
 Discussed 2026-11-03, one item at a time. Suggested build order: 1 → 10 → 2 → 6 → 5, then 3 and 4, with 7, 8 and 9
 alongside; 11 (iPad) after 3, since it reuses the client split; 12 (LG) last, as a prototype.
 
-## 1. Survive a resolution change (agreed)
+## 1. Survive a resolution change (built, needs a real test)
 Decided: the Mac window keeps its size and fits the new picture; the server does a full rebuild (no NVENC
 in-place reconfigure); the Mac shows a short banner ("PC is now 2560×1440").
 Today `Capture::duplication` (`server/src/windows/capture.rs:273`) sees the new size and waits forever.
 The Mac side already copes: a keyframe with new parameter sets rebuilds the decoder (`receiver.rs:new_decoder`).
-- [ ] Capture: accept the new duplication, reallocate `frame`/`composed`/pointer textures, report a resize.
-- [ ] `ScreenSource`: rebuild `Converter` and encoder at the new (even) size, then force a keyframe.
-- [ ] Input: `Injector.screen` is read once at startup (`server/src/windows/input.rs:47`); refresh it on resize or the mouse lands in the wrong place.
-- [ ] Client: banner on a size change after the first frame (`UserEvent::VideoSize`, `client/src/main.rs:770`).
+- [x] Capture: accept the new duplication, reallocate `frame`/`composed`/pointer textures, report a resize.
+- [x] `ScreenSource`: rebuild `Converter` and encoder at the new (even) size, then force a keyframe.
+- [x] Input: `Injector.screen` is read once at startup (`server/src/windows/input.rs:47`); refresh it on resize or the mouse lands in the wrong place.
+- [x] Client: banner on a size change after the first frame (`UserEvent::VideoSize`, `client/src/main.rs:770`).
 - [ ] Test: change resolution in Windows Settings mid-stream; an exclusive-fullscreen game at a non-desktop size; lock screen; rotate a monitor.
 
 ## 2. Gamepads (agreed)

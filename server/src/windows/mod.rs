@@ -14,7 +14,7 @@ pub mod shell;
 pub mod tray;
 pub mod updater;
 
-use windows::Win32::Graphics::Direct3D11::{D3D11_QUERY_DESC, D3D11_QUERY_EVENT, ID3D11DeviceContext, ID3D11Query};
+use windows::Win32::Graphics::Direct3D11::{D3D11_QUERY_DESC, D3D11_QUERY_EVENT, ID3D11Device, ID3D11DeviceContext, ID3D11Query};
 use windows::Win32::Media::timeBeginPeriod;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -73,6 +73,22 @@ impl AnyEncoder {
             AnyEncoder::Nvenc(e) => e.encode(frame, time_100ns, keyframe),
         }
     }
+}
+
+/// The encoder `kind` (`--encoder`) asks for, at `w`×`h`.
+fn make_encoder(kind: &str, device: &ID3D11Device, w: u32, h: u32, fps: u32, bitrate: u32) -> Res<AnyEncoder> {
+    Ok(match kind {
+        "mft" => AnyEncoder::Mft(Encoder::new(device, w, h, fps, bitrate)?),
+        "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(device, w, h, fps, bitrate)?)),
+        "auto" => match NvEncoder::new(device, w, h, fps, bitrate) {
+            Ok(e) => AnyEncoder::Nvenc(Box::new(e)),
+            Err(e) => {
+                println!("encoder: direct NVENC unavailable ({e}); using Media Foundation");
+                AnyEncoder::Mft(Encoder::new(device, w, h, fps, bitrate)?)
+            }
+        },
+        other => return Err(format!("unknown --encoder {other} (use auto, nvenc or mft)").into()),
+    })
 }
 
 /// `--profile`: per-stage timings. The GPU wait makes the conversion's real
@@ -164,6 +180,10 @@ pub struct ScreenSource {
     pointer_dirty: bool,
     last_encode_ns: u64,
     interval_ns: u64,
+    /// `--encoder`, the frame rate and the current bitrate, to rebuild the encoder at a new size.
+    encoder_kind: String,
+    fps: u32,
+    bitrate: u32,
 }
 
 impl ScreenSource {
@@ -187,18 +207,7 @@ impl ScreenSource {
         let converter =
             Converter::new(&capture.device, &capture.context, &capture.composed, (capture.width, capture.height), (w, h), cli.fps)?;
         let bitrate = (cli.mbps * 1e6) as u32;
-        let encoder = match cli.encoder.as_str() {
-            "mft" => AnyEncoder::Mft(Encoder::new(&capture.device, w, h, cli.fps, bitrate)?),
-            "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(&capture.device, w, h, cli.fps, bitrate)?)),
-            "auto" => match NvEncoder::new(&capture.device, w, h, cli.fps, bitrate) {
-                Ok(e) => AnyEncoder::Nvenc(Box::new(e)),
-                Err(e) => {
-                    println!("encoder: direct NVENC unavailable ({e}); using Media Foundation");
-                    AnyEncoder::Mft(Encoder::new(&capture.device, w, h, cli.fps, bitrate)?)
-                }
-            },
-            other => return Err(format!("unknown --encoder {other} (use auto, nvenc or mft)").into()),
-        };
+        let encoder = make_encoder(&cli.encoder, &capture.device, w, h, cli.fps, bitrate)?;
         let profile = cli.profile.then(|| Profile::new(&capture.device)).transpose()?;
         println!("encoding {w}x{h} HEVC at {:.0} Mbps with {}", cli.mbps, encoder.name());
         Ok(ScreenSource {
@@ -211,7 +220,23 @@ impl ScreenSource {
             pointer_dirty: false,
             last_encode_ns: 0,
             interval_ns: 1_000_000_000 / cli.fps.max(1) as u64,
+            encoder_kind: cli.encoder.clone(),
+            fps: cli.fps,
+            bitrate,
         })
+    }
+
+    /// The desktop changed size (a resolution change, or a game switching mode): a converter and
+    /// encoder for the new size. The new encoder starts with a keyframe carrying the new size,
+    /// which is all a client needs to follow.
+    fn rebuild(&mut self) -> Res<()> {
+        let c = &self.capture;
+        let (w, h) = (c.width & !1, c.height & !1);
+        self.converter = Converter::new(&c.device, &c.context, &c.composed, (c.width, c.height), (w, h), self.fps)?;
+        self.encoder = make_encoder(&self.encoder_kind, &c.device, w, h, self.fps, self.bitrate)?;
+        self.in_flight.clear();
+        println!("encoding {w}x{h} HEVC with {}", self.encoder.name());
+        Ok(())
     }
 
     fn next(&mut self, force_keyframe: bool, timeout_ms: u32) -> Res<Option<EncodedFrame>> {
@@ -223,6 +248,9 @@ impl ScreenSource {
             timeout = timeout.min(ms as u32);
         }
         let change = self.capture.next(timeout)?;
+        if self.capture.take_resized() {
+            self.rebuild()?;
+        }
         self.pointer_dirty |= change.pointer;
         let capture_ns = timing::now_ns();
         let pointer_only = self.pointer_dirty && capture_ns >= pointer_due;
@@ -258,6 +286,7 @@ impl ScreenSource {
 
 impl Source for ScreenSource {
     fn set_bitrate(&mut self, bps: u32) {
+        self.bitrate = bps;
         self.encoder.set_bitrate(bps);
     }
 

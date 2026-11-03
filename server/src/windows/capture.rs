@@ -29,6 +29,9 @@ use super::{Context, Res};
 const RETRY_NS: u64 = 100_000_000;
 const GENERIC_ALL: u32 = 0x1000_0000;
 
+/// Bumped whenever the captured monitor changes size, so input mapping can re-read its bounds.
+pub static SCREEN_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub struct Capture {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
@@ -48,6 +51,8 @@ pub struct Capture {
     pub width: u32,
     pub height: u32,
     pub has_frame: bool,
+    /// The size changed since `take_resized` was last called.
+    resized: bool,
 }
 
 #[derive(Default)]
@@ -214,6 +219,7 @@ impl Capture {
             width,
             height,
             has_frame: false,
+            resized: false,
         })
     }
 
@@ -262,6 +268,23 @@ impl Capture {
         Ok(change)
     }
 
+    /// New textures at the new desktop size; the encoder side rebuilds after `take_resized`.
+    fn resize(&mut self, width: u32, height: u32) -> Res<()> {
+        self.frame = texture(&self.device, width, height)?;
+        self.composed = texture(&self.device, width, height)?;
+        self.staging = None;
+        (self.width, self.height) = (width, height);
+        self.has_frame = false;
+        self.resized = true;
+        SCREEN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether the size changed since the last call.
+    pub fn take_resized(&mut self) -> bool {
+        std::mem::take(&mut self.resized)
+    }
+
     /// The current duplication, recreating it (at most every `RETRY_NS`) if it was lost.
     fn duplication(&mut self, timeout_ms: u32) -> Option<IDXGIOutputDuplication> {
         if self.dup.is_none() && timing::now_ns() >= self.next_retry_ns {
@@ -270,8 +293,11 @@ impl Capture {
                 Ok(dup) => {
                     let mode = unsafe { dup.GetDesc() }.ModeDesc;
                     if (mode.Width, mode.Height) != (self.width, self.height) {
-                        // TODO: rebuild the pipeline at the new size; for now keep waiting.
-                        println!("desktop is now {}x{}, expected {}x{}", mode.Width, mode.Height, self.width, self.height);
+                        println!("desktop is now {}x{} (was {}x{})", mode.Width, mode.Height, self.width, self.height);
+                        match self.resize(mode.Width, mode.Height) {
+                            Ok(()) => self.dup = Some(dup),
+                            Err(e) => println!("capture: can't resize: {e}"),
+                        }
                     } else {
                         println!("desktop duplication restored");
                         self.dup = Some(dup);

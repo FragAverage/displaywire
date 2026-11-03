@@ -114,6 +114,8 @@ mod app {
         LauncherRows(Vec<crate::launcher::Row>),
         /// Transfer progress or outcome for the banner; `None` clears it.
         Notice(Option<String>),
+        /// Clears the banner's notice if it still says this (a timed notice ending).
+        NoticeExpired(String),
         Title(String),
         Fatal(String),
         /// A check for a newer version finished.
@@ -730,6 +732,7 @@ mod app {
                 }
                 _ => {}
             }
+            let proxy = self.proxy.clone();
             let Some(s) = &mut self.session else { return };
             match event {
                 UserEvent::Menu(_) | UserEvent::Launcher(_) | UserEvent::LauncherRows(_) | UserEvent::UpdateFound(_) | UserEvent::UpdateReady(_) => {}
@@ -741,11 +744,27 @@ mod app {
                     s.notice = text;
                     s.refresh_banner();
                 }
-                // One video pixel per screen pixel on first frame; the user can resize after.
+                UserEvent::NoticeExpired(text) => {
+                    if s.notice.as_deref() == Some(text.as_str()) {
+                        s.notice = None;
+                        s.refresh_banner();
+                    }
+                }
+                // One video pixel per screen pixel on first frame; the user can resize after. A later
+                // change of size (the PC's resolution, or a game's) keeps the window and fits the picture.
                 UserEvent::VideoSize(w, h) => {
                     if !s.sized {
                         let _ = s.window.request_inner_size(PhysicalSize::new(w, h));
                         s.sized = true;
+                    }
+                    if s.video.is_some_and(|v| v != (w, h)) {
+                        let text = format!("PC is now {w}×{h}");
+                        s.notice = Some(text.clone());
+                        s.refresh_banner();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            let _ = proxy.send_event(UserEvent::NoticeExpired(text));
+                        });
                     }
                     s.video = Some((w, h));
                 }

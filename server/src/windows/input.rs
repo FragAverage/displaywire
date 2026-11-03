@@ -2,6 +2,8 @@
 //! Parsec and Steam Remote Play use: scancodes for keys, relative motion for
 //! games, absolute positions for the desktop.
 
+use std::sync::atomic::Ordering::Relaxed;
+
 use proto::stream::{
     BUTTON_BACK, BUTTON_FORWARD, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Input, KEY_BITS,
 };
@@ -20,6 +22,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
+use super::capture::SCREEN_GENERATION;
+
 const SEC: u64 = 1_000_000_000;
 /// Everything is released if the client goes quiet this long (it sends its
 /// state at least every 50 ms while connected).
@@ -33,10 +37,21 @@ pub struct Injector {
     held: Input,
     last_seq: Option<u32>,
     last_input_ns: u64,
-    /// Streamed monitor in virtual-desktop pixels.
+    /// Streamed monitor in virtual-desktop pixels, as of capture's `SCREEN_GENERATION` `generation`.
     screen: RECT,
+    generation: u32,
     desktop: Option<HDESK>,
     last_error_ns: u64,
+}
+
+/// Where the streamed monitor is on the virtual desktop.
+fn streamed_monitor() -> RECT {
+    super::capture::primary_output()
+        .and_then(|(_, output, _)| Ok(unsafe { output.GetDesc()? }.DesktopCoordinates))
+        .unwrap_or_else(|e| {
+            println!("input: can't find the streamed monitor ({e}); using the primary one");
+            RECT { left: 0, top: 0, right: 1920, bottom: 1080 }
+        })
 }
 
 // HDESK is a plain handle used only from the control thread.
@@ -44,13 +59,8 @@ unsafe impl Send for Injector {}
 
 impl Injector {
     pub fn new() -> Injector {
-        let screen = super::capture::primary_output()
-            .and_then(|(_, output, _)| Ok(unsafe { output.GetDesc()? }.DesktopCoordinates))
-            .unwrap_or_else(|e| {
-                println!("input: can't find the streamed monitor ({e}); using the primary one");
-                RECT { left: 0, top: 0, right: 1920, bottom: 1080 }
-            });
-        Injector { held: Input::default(), last_seq: None, last_input_ns: 0, screen, desktop: None, last_error_ns: 0 }
+        let generation = SCREEN_GENERATION.load(Relaxed);
+        Injector { held: Input::default(), last_seq: None, last_input_ns: 0, screen: streamed_monitor(), generation, desktop: None, last_error_ns: 0 }
     }
 
     /// A new client session: forget sequence numbers and let go of everything.
@@ -134,7 +144,11 @@ impl Injector {
     }
 
     /// 0..=65535 across the streamed monitor → 0..=65535 across the virtual desktop.
-    fn to_virtual_desk(&self, x: u16, y: u16) -> (i32, i32) {
+    fn to_virtual_desk(&mut self, x: u16, y: u16) -> (i32, i32) {
+        let generation = SCREEN_GENERATION.load(Relaxed);
+        if generation != self.generation {
+            (self.screen, self.generation) = (streamed_monitor(), generation);
+        }
         let (vx, vy, vw, vh) = unsafe {
             (
                 GetSystemMetrics(SM_XVIRTUALSCREEN),

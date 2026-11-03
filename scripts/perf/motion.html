@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- Benchmark content for scripts/perf.py: the same moving picture every run, redrawn every display
+     frame (gradients, sharp shapes, text), so the stream has real work at the monitor's refresh rate. -->
+<meta charset="utf-8">
+<title>DisplayWire benchmark</title>
+<style>html, body { margin: 0; height: 100%; overflow: hidden; background: #000 }</style>
+<canvas id="c"></canvas>
+<script>
+const c = document.getElementById('c'), g = c.getContext('2d');
+function size() { c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio; }
+addEventListener('resize', size); size();
+// A fixed pseudo-random layout, so every run draws the same thing.
+let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const boxes = Array.from({ length: 60 }, () => ({ x: rnd(), y: rnd(), w: 40 + rnd() * 200, h: 40 + rnd() * 200, vx: rnd() - .5, vy: rnd() - .5, hue: rnd() * 360 }));
+const lines = Array.from({ length: 40 }, (_, i) => `Line ${i}: The quick brown fox jumps over the lazy dog 0123456789 — DisplayWire streaming benchmark`);
+const t0 = performance.now();
+function frame(now) {
+  const t = (now - t0) / 1000, W = c.width, H = c.height;
+  const grad = g.createLinearGradient(0, 0, W, H);
+  grad.addColorStop(0, `hsl(${(t * 40) % 360},70%,25%)`);
+  grad.addColorStop(1, `hsl(${(t * 40 + 180) % 360},70%,15%)`);
+  g.fillStyle = grad; g.fillRect(0, 0, W, H);
+  for (const b of boxes) {
+    const x = ((b.x + b.vx * t * .2) % 1 + 1) % 1 * W, y = ((b.y + b.vy * t * .2) % 1 + 1) % 1 * H;
+    g.fillStyle = `hsla(${(b.hue + t * 60) % 360},80%,60%,.85)`; g.fillRect(x, y, b.w, b.h);
+  }
+  g.fillStyle = '#fff'; g.font = `${Math.round(H / 60)}px Consolas, monospace`;
+  const lh = H / 30, off = (t * 120) % (lh * lines.length);
+  lines.forEach((l, i) => g.fillText(l, 40, ((i * lh - off) % (lh * lines.length) + lh * lines.length) % (lh * lines.length)));
+  g.font = `bold ${Math.round(H / 12)}px sans-serif`; g.fillText(t.toFixed(2), W - H / 2.2, H / 9);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>

@@ -57,6 +57,14 @@ impl AnyEncoder {
         }
     }
 
+    /// See `NvEncoder::invalidate`; false if this encoder can't.
+    fn invalidate(&mut self, time_100ns: i64) -> bool {
+        match self {
+            AnyEncoder::Mft(_) => false,
+            AnyEncoder::Nvenc(e) => e.invalidate(time_100ns).map_err(|err| println!("encoder: {err}")).is_ok(),
+        }
+    }
+
     fn set_bitrate(&mut self, bps: u32) {
         match self {
             AnyEncoder::Mft(e) => e.set_bitrate(bps),
@@ -306,6 +314,12 @@ impl Source for ScreenSource {
     fn set_bitrate(&mut self, bps: u32) {
         self.bitrate = bps;
         self.encoder.set_bitrate(bps);
+    }
+
+    fn invalidate(&mut self, capture_ns: &[u64]) -> bool {
+        // The encoder knows frames by the timestamp `next` gave them.
+        capture_ns.len() <= nvenc::REF_FRAMES as usize
+            && capture_ns.iter().all(|&c| c >= self.start_ns && self.encoder.invalidate(((c - self.start_ns) / 100) as i64))
     }
 
     fn set_pointer_in_video(&mut self, on: bool) {

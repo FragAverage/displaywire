@@ -45,6 +45,8 @@ const LIGHT: u8 = 16;
 const CURSOR: u8 = 17;
 const CURSOR_SHAPE: u8 = 18;
 const FEEDBACK: u8 = 19;
+const FRAME_LOST: u8 = 20;
+const RECOVERED: u8 = 21;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -314,6 +316,12 @@ pub enum Msg<'a> {
     Cursor { visible: bool, x: u16, y: u16, shape: u32 },
     CursorShape(CursorShape, &'a [u8]),
     Feedback(Feedback),
+    /// Client → server: frames `first..=last` never arrived. The server stops the encoder referencing
+    /// them (and answers `Recovered`), or sends a keyframe if it can't.
+    FrameLost { first: u32, last: u32 },
+    /// Server → client, just before frame `from`: from it on, no frame references any frame up to
+    /// `lost_upto` that was reported lost, so decoding can carry on there instead of at a keyframe.
+    Recovered { from: u32, lost_upto: u32 },
 }
 
 impl<'a> Msg<'a> {
@@ -420,6 +428,16 @@ impl<'a> Msg<'a> {
                 w.u16(f.expected);
                 w.u16(f.frames_lost);
                 w.u32(f.delay_us as u32);
+            }
+            Msg::FrameLost { first, last } => {
+                w.u8(FRAME_LOST);
+                w.u32(first);
+                w.u32(last);
+            }
+            Msg::Recovered { from, lost_upto } => {
+                w.u8(RECOVERED);
+                w.u32(from);
+                w.u32(lost_upto);
             }
             Msg::Light { slot, r, g, b } => {
                 w.u8(LIGHT);
@@ -540,6 +558,8 @@ impl<'a> Msg<'a> {
             }
             RUMBLE => Msg::Rumble { slot: r.u8()?, large: r.u8()?, small: r.u8()? },
             FEEDBACK => Msg::Feedback(Feedback { received: r.u16()?, expected: r.u16()?, frames_lost: r.u16()?, delay_us: r.u32()? as i32 }),
+            FRAME_LOST => Msg::FrameLost { first: r.u32()?, last: r.u32()? },
+            RECOVERED => Msg::Recovered { from: r.u32()?, lost_upto: r.u32()? },
             LIGHT => Msg::Light { slot: r.u8()?, r: r.u8()?, g: r.u8()?, b: r.u8()? },
             CURSOR => Msg::Cursor { visible: r.u8()? != 0, x: r.u16()?, y: r.u16()?, shape: r.u32()? },
             CURSOR_SHAPE => {
@@ -719,9 +739,14 @@ mod tests {
     #[test]
     fn feedback_round_trips_and_old_settings_mean_adaptive() {
         let mut buf = [0u8; crate::MAX_PLAIN];
-        let m = Msg::Feedback(Feedback { received: 900, expected: 1000, frames_lost: 2, delay_us: -1 });
-        let n = m.encode(&mut buf);
-        assert_eq!(Msg::decode(&buf[..n]), Some(m));
+        for m in [
+            Msg::Feedback(Feedback { received: 900, expected: 1000, frames_lost: 2, delay_us: -1 }),
+            Msg::FrameLost { first: 7, last: 9 },
+            Msg::Recovered { from: 12, lost_upto: 9 },
+        ] {
+            let n = m.encode(&mut buf);
+            assert_eq!(Msg::decode(&buf[..n]), Some(m));
+        }
         // A settings message from before `adaptive` existed: one byte shorter.
         let n = Msg::Settings(Settings { bitrate_kbps: 30_000, fps_cap: 0, fec_percent: 10, adaptive: false }).encode(&mut buf);
         let Some(Msg::Settings(s)) = Msg::decode(&buf[..n - 1]) else { panic!("decodes") };

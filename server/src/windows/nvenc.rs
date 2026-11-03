@@ -70,6 +70,9 @@ macro_rules! call {
     }};
 }
 
+/// Frames the encoder keeps as references: how far back a loss can be repaired without a keyframe.
+pub const REF_FRAMES: u32 = 8;
+
 impl NvEncoder {
     pub fn new(device: &ID3D11Device, width: u32, height: u32, fps: u32, bitrate: u32) -> Res<NvEncoder> {
         unsafe {
@@ -141,6 +144,9 @@ impl NvEncoder {
             hevc.set_repeatSPSPPS(1);
             hevc.set_chromaFormatIDC(1);
             hevc.set_outputAUD(0);
+            // Room for older frames to stay references, so a lost one can be invalidated (`invalidate`)
+            // and later frames predicted from one before it.
+            hevc.maxNumRefFramesInDPB = REF_FRAMES;
             // Same colour description the Media Foundation path declares (BT.709, limited range).
             let vui = &mut hevc.hevcVUIParameters;
             vui.videoSignalTypePresentFlag = 1;
@@ -178,6 +184,15 @@ impl NvEncoder {
             enc.cfg = Some(cfg);
             Ok(enc)
         }
+    }
+
+    /// Stops the encoder using the frame encoded with `time_100ns` as a reference: the client lost it.
+    pub fn invalidate(&mut self, time_100ns: i64) -> Res<()> {
+        let session = self.session;
+        unsafe {
+            call!(self, nvEncInvalidateRefFrames, "invalidate reference frame", session, time_100ns as u64);
+        }
+        Ok(())
     }
 
     /// Changes the target bitrate of the running encoder, without a keyframe.

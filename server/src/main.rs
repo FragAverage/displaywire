@@ -20,6 +20,7 @@ mod windows;
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -232,6 +233,11 @@ pub trait Source {
     fn set_bitrate(&mut self, _bps: u32) {}
     /// Whether the pointer is drawn into the video (off while the client draws it).
     fn set_pointer_in_video(&mut self, _on: bool) {}
+    /// Stops the frames captured at `capture_ns` being used as references (the client lost them).
+    /// False if that can't be done, and a keyframe is needed instead.
+    fn invalidate(&mut self, _capture_ns: &[u64]) -> bool {
+        false
+    }
     /// The pointer, for a client that draws it; None from sources without one.
     fn pointer(&self) -> Option<PointerState> {
         None
@@ -250,6 +256,8 @@ struct Shared {
     link: Mutex<Option<Link>>,
     last_seen_ns: AtomicU64,
     keyframe: AtomicBool,
+    /// Earliest frame the client reported lost and not yet dealt with (`Msg::FrameLost`).
+    lost: Mutex<Option<u32>>,
     /// `CAP_*` flags the client asked for in its hello.
     caps: AtomicU8,
     /// The client's stream settings (see `proto::stream::Settings`); the command line's until it sends them.
@@ -274,6 +282,7 @@ impl Shared {
             link: Mutex::new(None),
             last_seen_ns: AtomicU64::new(0),
             keyframe: AtomicBool::new(false),
+            lost: Mutex::new(None),
             caps: AtomicU8::new(0),
             fec_percent: AtomicU8::new(0),
             fps_cap: AtomicU16::new(0),
@@ -534,6 +543,10 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
     let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
     let mut pointer = PointerSender::default();
+    // Recent frames (id, capture time), to find what the encoder knows a lost frame by; and the newest
+    // frame invalidated, to announce with the next one (`Msg::Recovered`).
+    let mut recent: VecDeque<(u32, u64)> = VecDeque::new();
+    let mut recovered_upto: Option<u32> = None;
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
@@ -558,6 +571,18 @@ fn run(cli: Cli) -> Result<(), String> {
         if client_cursor {
             pointer.send(&*source, &link, &sock, &mut sealed);
         }
+        // The client lost frames: it drops everything from the first until told it can carry on, so
+        // everything from there to the newest frame stops being a reference. Too far back, or an
+        // encoder that can't, and a keyframe does it.
+        if let Some(first) = shared.lost.lock().unwrap().take() {
+            let since: Vec<u64> = recent.iter().filter(|&&(id, _)| id.wrapping_sub(first) < 1 << 31).map(|&(_, c)| c).collect();
+            let known = recent.front().is_some_and(|&(oldest, _)| first.wrapping_sub(oldest) < 1 << 31);
+            if known && !since.is_empty() && source.invalidate(&since) {
+                recovered_upto = recent.back().map(|&(id, _)| id);
+            } else {
+                shared.keyframe.store(true, Relaxed);
+            }
+        }
         let force = shared.keyframe.swap(false, Relaxed);
         // Frame-rate cap: wait before taking the next frame (which is then the latest
         // image), so skipped frames cost no encoding.
@@ -574,6 +599,21 @@ fn run(cli: Cli) -> Result<(), String> {
         if force && !frame.keyframe {
             shared.keyframe.store(true, Relaxed);
         }
+
+        if frame.keyframe {
+            recovered_upto = None;
+        } else if let Some(upto) = recovered_upto.take() {
+            let mut plain = [0u8; 16];
+            let n = Msg::Recovered { from: frame_id, lost_upto: upto }.encode(&mut plain);
+            // Twice: it's small, and losing it costs a keyframe.
+            for _ in 0..2 {
+                link.send(&sock, &plain[..n], &mut sealed);
+            }
+        }
+        if recent.len() == 32 {
+            recent.pop_front();
+        }
+        recent.push_back((frame_id, frame.capture_ns));
 
         let encoded_ns = now_ns();
         let mut next_send = encoded_ns;
@@ -1002,6 +1042,10 @@ fn control(
                         }
                     }
                     Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),
+                    Some(Msg::FrameLost { first, .. }) => {
+                        let mut lost = shared.lost.lock().unwrap();
+                        *lost = Some(lost.map_or(first, |l| l.min(first)));
+                    }
                     Some(Msg::Input(input)) => injector.apply(&input, now_ns()),
                     Some(Msg::Pads(pads)) => gamepads.apply(&pads, now_ns()),
                     Some(Msg::Mic(a, payload)) => {

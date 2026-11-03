@@ -35,6 +35,8 @@ const HELLO_INTERVAL_NS: u64 = 200 * MS;
 const BIN_NS: u64 = 100 * MS;
 const HISTORY_BINS: usize = 600;
 const KEYFRAME_RETRY_NS: u64 = 100 * MS;
+/// After a loss, how long to wait for the server's `Recovered` before asking for a keyframe.
+const RECOVERY_WAIT_NS: u64 = 150 * MS;
 /// Incomplete frames older than this are given up on.
 const PARTIAL_MAX_AGE_NS: u64 = 300 * MS;
 /// No video for this long: assume the server dropped us and say hello again.
@@ -106,6 +108,9 @@ struct Receiver {
     shown: Option<Image>,
     need_keyframe: bool,
     last_keyframe_request: u64,
+    /// Frames were lost: everything is dropped until a keyframe, or until the server says
+    /// (`Msg::Recovered`) where decoding can carry on.
+    recovery: Option<Recovery>,
     clock: Clock,
     stats: Stats,
     binner: Binner,
@@ -165,6 +170,7 @@ impl Receiver {
             shown: None,
             need_keyframe: true,
             last_keyframe_request: 0,
+            recovery: None,
             clock: Clock::default(),
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
@@ -334,6 +340,11 @@ impl Receiver {
                 let n = Msg::Feedback(f).encode(&mut buf);
                 self.link.send(&buf[..n]);
             }
+            if self.recovery.as_ref().is_some_and(|r| r.resume_from.is_none() && now - r.since_ns > RECOVERY_WAIT_NS) {
+                // No answer (an older server, or too far back for it): a keyframe instead.
+                self.recovery = None;
+                self.need_keyframe = true;
+            }
             if streaming && self.need_keyframe && now - self.last_keyframe_request > KEYFRAME_RETRY_NS {
                 self.send(Msg::KeyframeRequest);
                 self.last_keyframe_request = now;
@@ -409,6 +420,14 @@ impl Receiver {
                 }
                 Some(m @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => self.telemetry.transfers.handle(&m),
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),
+                Some(Msg::Recovered { from, lost_upto }) => {
+                    // Only an answer that covers the newest loss.
+                    if let Some(r) = &mut self.recovery
+                        && lost_upto.wrapping_sub(r.latest_lost) < 1 << 31
+                    {
+                        r.resume_from = Some(from);
+                    }
+                }
                 Some(Msg::Rumble { slot, large, small }) => self.pads.rumble(slot, large, small),
                 Some(Msg::CursorShape(shape, payload)) => {
                     if let Some(image) = self.cursors.push(shape, payload) {
@@ -439,7 +458,24 @@ impl Receiver {
             self.feedback.frames_lost += frame.skipped;
             self.stats.lost += frame.skipped;
             self.binner.lost(frame.skipped);
-            self.need_keyframe = true;
+            let first = frame.id.wrapping_sub(frame.skipped);
+            if !self.need_keyframe {
+                // Ask the server to stop referencing them; until it answers, nothing decodes.
+                self.send(Msg::FrameLost { first, last: frame.id.wrapping_sub(1) });
+                let since_ns = self.recovery.as_ref().map_or(frame.complete_ns, |r| r.since_ns);
+                self.recovery = Some(Recovery { since_ns, latest_lost: frame.id.wrapping_sub(1), resume_from: None });
+            }
+        }
+        if frame.keyframe {
+            self.recovery = None;
+        } else if let Some(r) = &self.recovery {
+            if r.resume_from.is_some_and(|from| frame.id.wrapping_sub(from) < 1 << 31) {
+                self.recovery = None;
+            } else {
+                self.stats.dropped += 1;
+                self.binner.lost(1);
+                return;
+            }
         }
         if self.need_keyframe && !frame.keyframe {
             self.stats.dropped += 1;
@@ -532,6 +568,15 @@ impl Receiver {
 }
 
 const FEEDBACK_EVERY_NS: u64 = 50 * MS;
+
+/// Waiting to carry on after lost frames.
+struct Recovery {
+    since_ns: u64,
+    /// The newest frame known lost (and so everything since the first loss not decoded).
+    latest_lost: u32,
+    /// From the server's `Recovered`: the first frame that can be decoded.
+    resume_from: Option<u32>,
+}
 
 /// Video arrivals since the last `Msg::Feedback`.
 #[derive(Default)]

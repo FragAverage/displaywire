@@ -322,6 +322,10 @@ impl Source for ScreenSource {
             && capture_ns.iter().all(|&c| c >= self.start_ns && self.encoder.invalidate(((c - self.start_ns) / 100) as i64))
     }
 
+    fn repaint(&mut self) {
+        self.repaint = true;
+    }
+
     fn set_pointer_in_video(&mut self, on: bool) {
         // Repaint so a still screen doesn't keep showing (or lack) the pointer.
         self.repaint |= on != self.pointer_in_video;

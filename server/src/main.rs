@@ -238,6 +238,8 @@ pub trait Source {
     fn invalidate(&mut self, _capture_ns: &[u64]) -> bool {
         false
     }
+    /// Encodes the current image again even if nothing changed (not as a keyframe).
+    fn repaint(&mut self) {}
     /// The pointer, for a client that draws it; None from sources without one.
     fn pointer(&self) -> Option<PointerState> {
         None
@@ -580,6 +582,9 @@ fn run(cli: Cli) -> Result<(), String> {
             if known && !since.is_empty() && source.invalidate(&since) {
                 recovered_upto = recent.back().map(|&(id, _)| id);
                 stats.recovered += 1;
+                // The client is waiting for the frame that carries on; on a still screen there
+                // may not be one for a while.
+                source.repaint();
             } else {
                 shared.keyframe.store(true, Relaxed);
                 stats.fell_back += 1;

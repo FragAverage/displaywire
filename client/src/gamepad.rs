@@ -32,7 +32,7 @@ const EMPTY_FOR_NS: u64 = 1_000_000_000;
 pub struct Poller {
     link: Arc<Link>,
     /// Whether the stream window has focus: macOS stops delivering pad input otherwise, so the pads are
-    /// reported released, as keys are.
+    /// reported released, as keys are, but stay plugged in (a game would see them disconnect).
     focused: Arc<AtomicBool>,
     slots: [Option<Retained<GCController>>; MAX_PADS],
     /// Made the first time a game rumbles that slot's pad; None if the pad can't.
@@ -80,15 +80,19 @@ impl Poller {
     pub fn poll(&mut self) {
         let now = now_ns();
         let mut pads = Pads::default();
-        if self.focused.load(Relaxed) {
-            self.assign_slots();
-            for (slot, c) in self.slots.iter().enumerate() {
-                if let Some(c) = c
-                    && let Some(gp) = unsafe { c.extendedGamepad() }
-                {
-                    pads.pads[pads.count as usize] = read(slot as u8, &gp);
-                    pads.count += 1;
+        self.assign_slots();
+        let focused = self.focused.load(Relaxed);
+        for (slot, c) in self.slots.iter().enumerate() {
+            if let Some(c) = c
+                && let Some(gp) = unsafe { c.extendedGamepad() }
+            {
+                let mut pad = read(slot as u8, &gp);
+                if !focused {
+                    // Released: nothing held, sticks centred, still the same kind of pad.
+                    pad = Pad { slot: pad.slot, kind: pad.kind, ..Default::default() };
                 }
+                pads.pads[pads.count as usize] = pad;
+                pads.count += 1;
             }
         }
         if pads.count == 0 {

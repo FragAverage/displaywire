@@ -4,8 +4,8 @@
 For each revision: builds its server on the PC (over SSH) and installs it over the service,
 builds its Mac app, shows the same moving picture full screen on the PC (scripts/perf/motion.html
 in Edge), connects for a while with per-frame timing on (DISPLAYWIRE_TRACE), and reads the
-server's own stats. Then prints a comparison and writes it to target/perf/report-*.md. The
-server of the last revision stays installed.
+server's own stats. Then prints a comparison and writes it to target/perf/report-*.md. Afterwards the PC gets `--restore`'s
+server (main by default) back.
 
     scripts/perf.py                        # main, v0.6.3, main again (the repeat shows the noise)
     scripts/perf.py --revs v0.6.3 main --seconds 60
@@ -193,6 +193,7 @@ def main():
     ap.add_argument("--addr", default="192.168.1.171", help="the PC's address as the Mac app has it saved")
     ap.add_argument("--seconds", type=int, default=30, help="measured time per run")
     ap.add_argument("--warmup", type=int, default=8, help="seconds dropped at the start of each run")
+    ap.add_argument("--restore", default="main", help="server to leave installed afterwards ('none' to keep the last one tested)")
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     toolchain = run(["rustc", "--version"]).split()[1]
@@ -217,6 +218,9 @@ def main():
             log(f"run {name}: done")
     finally:
         motion(a.pc, False)
+        if a.restore != "none" and a.revs[-1] != a.restore:
+            log(f"putting the {a.restore} server back")
+            build_server(a.pc, a.restore, toolchain)
         if os.path.exists(saved):
             shutil.move(saved, remembered)
 

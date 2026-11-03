@@ -172,6 +172,8 @@ fn submenu(mtm: MainThreadMarker, title: &str, items: Vec<Retained<NSMenuItem>>)
         menu.addItem(i);
     }
     let holder = NSMenuItem::new(mtm);
+    // A nested submenu shows its item's title (the menu bar shows the menu's own).
+    holder.setTitle(&NSString::from_str(title));
     holder.setSubmenu(Some(&menu));
     holder
 }

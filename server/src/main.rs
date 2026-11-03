@@ -579,8 +579,10 @@ fn run(cli: Cli) -> Result<(), String> {
             let known = recent.front().is_some_and(|&(oldest, _)| first.wrapping_sub(oldest) < 1 << 31);
             if known && !since.is_empty() && source.invalidate(&since) {
                 recovered_upto = recent.back().map(|&(id, _)| id);
+                stats.recovered += 1;
             } else {
                 shared.keyframe.store(true, Relaxed);
+                stats.fell_back += 1;
             }
         }
         let force = shared.keyframe.swap(false, Relaxed);
@@ -1073,6 +1075,9 @@ struct Stats {
     window_start: u64,
     frames: u32,
     keyframes: u32,
+    /// Losses repaired by invalidating references, and ones that needed a keyframe.
+    recovered: u32,
+    fell_back: u32,
     bytes: u64,
     encode_ns: u64,
     send_ns: u64,
@@ -1080,7 +1085,7 @@ struct Stats {
 
 impl Stats {
     fn new() -> Self {
-        Stats { window_start: now_ns(), frames: 0, keyframes: 0, bytes: 0, encode_ns: 0, send_ns: 0 }
+        Stats { window_start: now_ns(), frames: 0, keyframes: 0, recovered: 0, fell_back: 0, bytes: 0, encode_ns: 0, send_ns: 0 }
     }
 
     fn frame(&mut self, f: &EncodedFrame, encoded_ns: u64, sent_ns: u64, shared: &Shared) {
@@ -1094,8 +1099,13 @@ impl Stats {
             shared.fps.store(self.frames, Relaxed);
             shared.mbps_x10.store((self.bytes as f64 * 8.0 / elapsed as f64 * 1e4) as u32, Relaxed);
             let n = self.frames.max(1) as f64;
+            let losses = if self.recovered + self.fell_back > 0 {
+                format!("  losses repaired {} / by keyframe {}", self.recovered, self.fell_back)
+            } else {
+                String::new()
+            };
             println!(
-                "{:>4} fps  {:>6.1} Mbps  capture→encoded {:.2} ms  send {:.2} ms  keyframes {}",
+                "{:>4} fps  {:>6.1} Mbps  capture→encoded {:.2} ms  send {:.2} ms  keyframes {}{losses}",
                 self.frames,
                 self.bytes as f64 * 8.0 / elapsed as f64 * 1e3,
                 self.encode_ns as f64 / n / 1e6,

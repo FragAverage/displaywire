@@ -98,22 +98,24 @@ the PC moves the pointer itself, the client warps its cursor to match.
       An own `NSCursor` with a 2× bitmap rep would be sharp.
 - [ ] Windows client (item 3): the same through winit.
 
-## 7. Monitor choice and a virtual display (agreed)
+## 7. Monitor choice and a virtual display (7a, 7b done 2026-11-03, tested)
 Decided: hybrid: the main window streams the PC's main monitor; the client can open any other monitor in its own
 window (one more capture + encode session each). Virtual display: bundle the open-source, signed IddCx Virtual
 Display Driver (MIT); add a mode matching the client's size and refresh when connecting, remove it afterwards.
-- [ ] Protocol: monitor list (id, name, size, refresh, primary) and per-stream monitor id; several video streams per
-      session, each with its own frame ids, FEC and keyframe requests.
-- [ ] Server: capture + converter + encoder per stream, shared D3D device per adapter; GeForce NVENC session limit
-      (8) is plenty; monitor on another adapter needs its own device.
-- [ ] Input: pointer coordinates per stream's monitor rect (item 1's refresh generalised); keyboard goes to whichever
-      window has focus.
-- [ ] Client: "Monitors" menu: open another monitor in a new window; remember per PC which ones were open.
-- [ ] Bitrate: split the ceiling across open streams (item 5 controller owns the total).
-- [ ] VDD: installer offers it; on connect, add a mode for the client display (e.g. 3024×1964@120), optionally make
+- [x] 7a: `Msg::Monitors` (friendly name from the display configuration, size, refresh, primary) on connect,
+      change and every 10 s; View › Monitor switches the main window's monitor live; remembered per PC by name.
+      The primary monitor is the default (was the first enumerated).
+- [x] 7b (protocol 6): stream id on video, keyframe requests, lost/recovered, feedback, cursor and input;
+      `ShowMonitor`/`CloseStream`; one stream loop per stream on the server (own capture, encoder, repair); open
+      streams share the bitrate (the main stream's feedback steers it); input maps to each stream's monitor; the
+      Mac's View › Monitor › Open in New Window; extra windows reopen after a reconnect.
+- [ ] 7b follow-ups: per-stream rate control; remember open windows per PC; a placeholder in extra windows.
+- [ ] 7c VDD: installer offers it; on connect, add a mode for the client display (e.g. 3024×1964@120), optionally make
       it primary and turn physical screens off for the session ("headless mode" setting); restore on disconnect,
       including after a crash (persist what we changed).
 - [ ] Mac server (item 4): `CGVirtualDisplay` equivalent.
+- [ ] `lg-proto` is protocol 5: rebase it onto protocol 6 before the TV can stream from this server again.
+
 ## 8. HDR and AV1 (agreed)
 Decided: HDR is a manual per-PC toggle (off by default); codec is negotiated: client lists what it decodes in
 hardware, server what it encodes, AV1 preferred over HEVC, with an override in Settings.

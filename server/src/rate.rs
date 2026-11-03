@@ -17,6 +17,9 @@ const SEC: u64 = 1_000 * MS;
 const BASELINE_WINDOW_NS: u64 = 10 * SEC;
 /// Queueing this long (ms) means a queue is building: back off.
 const QUEUE_HIGH_US: i64 = 25_000;
+/// Delay must stay that high this many reports in a row (150 ms): Wi-Fi jitter and big frames
+/// make single spikes that aren't a queue.
+const QUEUE_HIGH_REPORTS: u32 = 3;
 /// Below this the link has room: climb.
 const QUEUE_LOW_US: i64 = 8_000;
 /// Smoothed loss above which to back off, and below which the link counts as clean.
@@ -45,6 +48,10 @@ pub struct RateControl {
     /// The queue when delay last caused a cut: it takes a while to drain, so only a longer one
     /// cuts again (loss still does).
     queue_at_cut_us: i64,
+    /// Reports in a row with the queue over `QUEUE_HIGH_US`.
+    high_reports: u32,
+    /// Why the last cut happened (queue µs, smoothed loss), for the log.
+    pub last_cut: Option<(i64, f64)>,
 }
 
 impl RateControl {
@@ -59,6 +66,8 @@ impl RateControl {
             delays: VecDeque::new(),
             last_cut_ns: 0,
             queue_at_cut_us: 0,
+            high_reports: 0,
+            last_cut: None,
         }
     }
 
@@ -109,11 +118,13 @@ impl RateControl {
         if queue_us < QUEUE_LOW_US {
             self.queue_at_cut_us = 0;
         }
-        let queueing = queue_us > QUEUE_HIGH_US && queue_us > self.queue_at_cut_us;
+        self.high_reports = if queue_us > QUEUE_HIGH_US { self.high_reports + 1 } else { 0 };
+        let queueing = self.high_reports >= QUEUE_HIGH_REPORTS && queue_us > self.queue_at_cut_us;
         if (queueing || self.loss > LOSS_HIGH) && now_ns.saturating_sub(self.last_cut_ns) >= CUT_EVERY_NS {
             let factor = if self.loss > 2.0 * LOSS_HIGH { 0.7 } else { 0.85 };
             self.target_kbps = (self.target_kbps * factor).max(floor);
             self.last_cut_ns = now_ns;
+            self.last_cut = Some((queue_us, self.loss));
             if queueing {
                 self.queue_at_cut_us = queue_us;
             }
@@ -157,6 +168,10 @@ mod tests {
         let mut rc = RateControl::new(50_000, 10, true);
         let mut t = 0;
         run(&mut rc, &mut t, 20, report(10, 0));
+        // A lone spike isn't a queue.
+        run(&mut rc, &mut t, 1, report(80, 0));
+        run(&mut rc, &mut t, 1, report(10, 0));
+        assert_eq!(rc.current().0, 50_000);
         // A queue builds: 40 ms over the 10 ms baseline. One cut while it drains...
         run(&mut rc, &mut t, 20, report(50, 0));
         assert_eq!(rc.current().0, 42_500);

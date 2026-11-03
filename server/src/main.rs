@@ -628,7 +628,11 @@ impl Rate {
         let (was_kbps, was_fec) = self.published;
         let now = now_ns();
         if (kbps.abs_diff(was_kbps) * 20 > was_kbps || fec != was_fec) && now - self.logged_ns > SEC {
-            println!("rate: {:.1} Mbps, loss protection {fec}%", kbps as f64 / 1000.0);
+            let why = match self.ctl.last_cut.take() {
+                Some((queue_us, loss)) if kbps < was_kbps => format!(" (queue {} ms, loss {:.1}%)", queue_us / 1000, loss * 100.0),
+                _ => String::new(),
+            };
+            println!("rate: {:.1} Mbps, loss protection {fec}%{why}", kbps as f64 / 1000.0);
             (self.published, self.logged_ns) = ((kbps, fec), now);
         }
     }

@@ -160,6 +160,30 @@ avoids that but needs a rootable TV), so this is for enthusiasts until LG offers
 - [ ] UI: the shared egui UI from item 3, sized for a TV (10-foot layout, remote navigation).
 - [ ] Decide after a prototype: is latency good enough to keep going, and is a store app ever possible?
 
+Prototype (branch `lg-proto`), in milestones:
+- [x] M1a: headless `webos/` crate (`displaywire-tv pair|connect|list`, `--dump` writes the HEVC stream); builds on the Mac.
+- [x] Toolchain: `scripts/build-webos.sh` (Docker + openlgtv/buildroot-nc4 `2026.08-webos`, Rust `armv7-unknown-linux-gnueabi`).
+      The toolchain's glibc is 2.12, so `webos/src/compat.rs` supplies `getauxval`. Runs under qemu.
+- [x] M1c: on the TV over Developer Mode SSH (binary in `/media/developer/temp/dw`): paired with FRAG-PC, streams
+      2560×1440 HEVC Main, rtt ~5 ms, PC capture → received on the TV ~7–18 ms, no loss; the dump decodes on the Mac.
+      Test TV: LG 50UM7450PLA (2019), webOS TV Lite 4.10.2, firmware 05.40.97, kernel 4.4.84 armv7l, glibc 2.24,
+      4K60 panel. Dev Mode jail has `/dev/urandom` but no `/dev/random`, and glibc has no `getrandom()`, so the
+      Docker build sets `getrandom_backend="linux_raw"`.
+- [ ] M1b: pair and connect from the Mac terminal (skipped: went straight to the TV).
+- [ ] Watch for: two session drops right after pairing in the first run, not seen since.
+- [ ] M2: video through LG's native pipeline. **Blocked on the test TV (2026-11-03):**
+      - The TV has NDL DirectMedia API v1 only (exports checked); v1 is H.264-only (webosbrew headers, moonlight-tv's
+        `ndl-webos4`, and the only codec string in LG's impl is `h264b`). No `libStarfishMediaAPIs`, so no SMP/HEVC route.
+      - `NDL_DirectMediaInit` and the SDL window work, but `NDL_DirectVideoOpen` fails for every source (0/1/2/3) and size
+        (2560×1440, 1080p, 720p), from SSH, as an installed app, with `NDL_DirectMediaSetAppState(foreground)`, and from
+        SSH while the app holds the window.
+      - Cause: the Developer Mode app jail on k5lp lacks `/dev/rtkmem` (present in the SSH jail). moonlight-tv's
+        `SS4S_webOS_IsJailConfigBroken` disables NDL and SMP on k3lp/k5lp for exactly this. Fix needs root; no public
+        root for this firmware (05.40.97, Jul 2025, 32-bit kernel 4.4).
+      - Built so far: `play`, `connect --show`, `window`, NDL/SDL via dlopen (`webos/src/{dl,ndl,screen,tv}.rs`),
+        `hevc::sps_size`, IPK packaging (`webos/app/`, `scripts/package-webos.sh`).
+- [ ] M3: IPK packaging and launch from the TV's home screen; audio; gamepad/keyboard/mouse/Magic Remote input.
+
 ## Not planned
 - Internet access without Tailscale (STUN hole punching, a relay, accounts). Tailscale stays the answer; we run no
   servers. README explains a manual port-forward + firewall rule for people who insist.

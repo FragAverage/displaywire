@@ -773,6 +773,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "displaywire-tv"
+version = "0.6.3"
+dependencies = [
+ "clap",
+ "hevc",
+ "pairing",
+ "proto",
+ "secure",
+ "timing",
+ "transport",
+]
+
+[[package]]
 name = "dlib"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

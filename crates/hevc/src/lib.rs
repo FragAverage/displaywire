@@ -89,6 +89,87 @@ pub fn to_sample(au: &[u8]) -> Sample {
     Sample { param_sets, data }
 }
 
+/// Picture size from an SPS NAL (with its 2-byte header), after the conformance window crop.
+pub fn sps_size(sps: &[u8]) -> Option<(u32, u32)> {
+    // Drop emulation prevention bytes (00 00 03 → 00 00).
+    let mut rbsp = Vec::with_capacity(sps.len());
+    let mut zeros = 0;
+    for &b in sps.get(2..)? {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    let mut r = Bits { data: &rbsp, pos: 0 };
+    r.skip(4); // sps_video_parameter_set_id
+    let max_sub_layers_minus1 = r.bits(3)?;
+    r.skip(1); // temporal_id_nesting
+    // profile_tier_level: general profile (88 bits) and level (8), then per sub-layer flags and fields.
+    r.skip(96);
+    let mut present = Vec::new();
+    for _ in 0..max_sub_layers_minus1 {
+        present.push((r.bits(1)? == 1, r.bits(1)? == 1));
+    }
+    if max_sub_layers_minus1 > 0 {
+        r.skip(2 * (8 - max_sub_layers_minus1 as usize));
+    }
+    for (profile, level) in present {
+        r.skip(if profile { 88 } else { 0 } + if level { 8 } else { 0 });
+    }
+    r.ue()?; // sps_seq_parameter_set_id
+    let chroma_format_idc = r.ue()?;
+    if chroma_format_idc == 3 {
+        r.skip(1); // separate_colour_plane_flag
+    }
+    let (mut width, mut height) = (r.ue()?, r.ue()?);
+    if r.bits(1)? == 1 {
+        let (sub_w, sub_h) = match chroma_format_idc {
+            1 => (2, 2),
+            2 => (2, 1),
+            _ => (1, 1),
+        };
+        let (left, right, top, bottom) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
+        width = width.checked_sub(sub_w * (left + right))?;
+        height = height.checked_sub(sub_h * (top + bottom))?;
+    }
+    Some((width, height))
+}
+
+/// Big-endian bit reader with Exp-Golomb codes.
+struct Bits<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl Bits<'_> {
+    fn skip(&mut self, n: usize) {
+        self.pos += n;
+    }
+
+    fn bits(&mut self, n: usize) -> Option<u32> {
+        let mut v = 0;
+        for _ in 0..n {
+            let byte = *self.data.get(self.pos / 8)?;
+            v = v << 1 | (byte >> (7 - self.pos % 8) & 1) as u32;
+            self.pos += 1;
+        }
+        Some(v)
+    }
+
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bits(1)? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some((1 << zeros) - 1 + self.bits(zeros)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +204,17 @@ mod tests {
         let s = to_sample(aus[1]);
         assert!(s.param_sets.is_none());
         assert_eq!(s.data, vec![0, 0, 0, 3, 1 << 1, 1, 6]);
+    }
+
+    #[test]
+    fn sps_size_of_a_real_nvenc_stream() {
+        // 2560x1440 HEVC Main from NVENC (as sent to the webOS client).
+        let sps = [
+            0x42, 0x01, 0x01, 0x21, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x99, 0xa0, 0x01,
+            0x40, 0x20, 0x05, 0xa1, 0x65, 0x97, 0x4a, 0x42, 0x11, 0x91, 0x75, 0x43, 0x01, 0x6a, 0x02, 0x02, 0x02, 0x08, 0x00, 0x00,
+            0x03, 0x00, 0x08, 0x00, 0x00, 0x03, 0x03, 0xc0, 0x40,
+        ];
+        assert_eq!(sps_size(&sps), Some((2560, 1440)));
+        assert_eq!(sps_size(&sps[..10]), None);
     }
 }

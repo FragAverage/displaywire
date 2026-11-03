@@ -1,0 +1,18 @@
+[package]
+name = "displaywire-tv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "DisplayWire client for LG webOS TVs (prototype)"
+
+[dependencies]
+proto.workspace = true
+timing.workspace = true
+transport.workspace = true
+secure.workspace = true
+pairing.workspace = true
+hevc.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }

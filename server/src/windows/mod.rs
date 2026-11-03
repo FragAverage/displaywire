@@ -9,6 +9,7 @@ mod nvenc;
 pub mod input;
 pub mod loopback;
 pub mod micout;
+mod monitors;
 pub mod service;
 pub mod setup;
 pub mod shell;
@@ -324,6 +325,22 @@ impl Source for ScreenSource {
 
     fn repaint(&mut self) {
         self.repaint = true;
+    }
+
+    fn monitors(&self) -> Option<proto::stream::Monitors> {
+        monitors::list(&self.capture.monitor).map(|(m, _)| m)
+    }
+
+    fn choose_monitor(&mut self, index: u8) -> Result<(), String> {
+        let (_, all) = monitors::list(&self.capture.monitor).ok_or("can't list the monitors")?;
+        let o = all.get(index as usize).ok_or("no such monitor")?;
+        if o.device == self.capture.monitor {
+            return Ok(());
+        }
+        capture::choose(Some(o.device.clone()));
+        // A new capture (perhaps on another adapter), then the rest at its size.
+        self.capture = Capture::new().map_err(|e| format!("capture {}: {e}", o.device))?;
+        self.rebuild().map_err(|e| e.to_string())
     }
 
     fn set_pointer_in_video(&mut self, on: bool) {

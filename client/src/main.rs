@@ -127,6 +127,8 @@ mod app {
         Cursor { visible: bool, x: u16, y: u16, shape: u32 },
         /// What a game asked of a gamepad (GameController lives on this thread).
         Rumble { slot: u8, large: u8, small: u8 },
+        /// The PC's monitors, and which is streaming.
+        Monitors(Box<proto::stream::Monitors>),
         Light { slot: u8, r: u8, g: u8, b: u8 },
         Title(String),
         Fatal(String),
@@ -167,6 +169,10 @@ mod app {
         /// Gamepads, read here on the main thread: GameController isn't safe to use from others (the
         /// controller list came back empty at times, which unplugged the pad on the PC).
         pads: crate::gamepad::Poller,
+        link: Arc<Link>,
+        /// The PC's monitors as last told, and whether the one remembered for it has been asked for.
+        monitors: Option<proto::stream::Monitors>,
+        monitor_restored: bool,
     }
 
     impl Session {
@@ -191,7 +197,30 @@ mod app {
             if let Some(r) = self.receiver.take() {
                 let _ = r.join();
             }
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                menu::set_monitors(mtm, None);
+            }
         }
+    }
+
+    /// The monitor this Mac last chose on the PC at `address`, by name (`monitors` state file).
+    fn remembered_monitor(address: &str) -> Option<String> {
+        let text = std::fs::read_to_string(dialog::state_file("monitors")?).ok()?;
+        text.lines().find_map(|l| l.split_once('\t').filter(|(a, _)| *a == address).map(|(_, n)| n.to_string()))
+    }
+
+    fn remember_monitor(address: &str, name: &str) {
+        let Some(path) = dialog::state_file("monitors") else { return };
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut text: String = old.lines().filter(|l| !l.starts_with(&format!("{address}\t"))).map(|l| format!("{l}\n")).collect();
+        text += &format!("{address}\t{name}\n");
+        let _ = std::fs::write(path, text);
+    }
+
+    fn send_msg(link: &Link, msg: proto::stream::Msg) {
+        let mut buf = [0u8; 64];
+        let n = msg.encode(&mut buf);
+        link.send(&buf[..n]);
     }
 
     /// The tiles: every saved PC (online if it answered), then any found on the network that aren't saved.
@@ -473,10 +502,10 @@ mod app {
             let name = servers::find(server).map(|s| s.name).filter(|n| !n.is_empty()).unwrap_or_else(|| server.to_string());
             let placeholder = overlay::Placeholder::attach(&window, &name);
             placeholder.set_detail("Connecting…");
-            let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
+            let (proxy, stop2, input2, telemetry2, link2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone(), link.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
-                .spawn(move || receiver::run(addr, link, input2, layer, proxy, telemetry2, stop2))
+                .spawn(move || receiver::run(addr, link2, input2, layer, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
             Ok(Session {
                 address: server.to_string(),
@@ -498,6 +527,9 @@ mod app {
                 pc_pointer: None,
                 local_pointer: None,
                 pads,
+                link,
+                monitors: None,
+                monitor_restored: false,
             })
         }
 
@@ -523,6 +555,14 @@ mod app {
                 menu::Action::ToggleStats => self.toggle_graph(),
                 menu::Action::Settings => self.edit_settings(),
                 menu::Action::Microphone => self.toggle_mic(),
+                menu::Action::Monitor(index) => {
+                    if let Some(s) = &self.session {
+                        send_msg(&s.link, proto::stream::Msg::ChooseMonitor { index });
+                        if let Some(mon) = s.monitors.as_ref().and_then(|m| m.iter().nth(index as usize)) {
+                            remember_monitor(&s.address, mon.name());
+                        }
+                    }
+                }
                 menu::Action::Mute => {
                     self.change_prefs(|p| p.muted = !p.muted);
                     let muted = self.session.as_ref().is_some_and(|s| s.telemetry.prefs.lock().unwrap().muted);
@@ -878,6 +918,22 @@ mod app {
                     s.refresh_banner();
                 }
                 UserEvent::Rumble { slot, large, small } => s.pads.rumble(slot, large, small),
+                UserEvent::Monitors(m) => {
+                    if let Some(mtm) = objc2::MainThreadMarker::new() {
+                        menu::set_monitors(mtm, Some(&m));
+                    }
+                    // Back to the monitor chosen last time on this PC.
+                    if !s.monitor_restored {
+                        s.monitor_restored = true;
+                        if let Some(name) = remembered_monitor(&s.address)
+                            && let Some(i) = m.iter().position(|mon| mon.name() == name)
+                            && i != m.streaming as usize
+                        {
+                            send_msg(&s.link, proto::stream::Msg::ChooseMonitor { index: i as u8 });
+                        }
+                    }
+                    s.monitors = Some(*m);
+                }
                 UserEvent::Light { slot, r, g, b } => s.pads.light(slot, r, g, b),
                 UserEvent::CursorImage(image) => {
                     // Pointers come in a handful of shapes; a long session can still pile them up.

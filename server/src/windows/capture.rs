@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource,
 };
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, RECT};
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetUserObjectInformationW, HDESK, OpenInputDesktop,
     SetThreadDesktop, UOI_NAME,
@@ -51,6 +51,8 @@ pub struct Capture {
     pointer: Pointer,
     pub width: u32,
     pub height: u32,
+    /// The GDI name of the monitor captured.
+    pub monitor: String,
     pub has_frame: bool,
     /// The size changed since `take_resized` was last called.
     resized: bool,
@@ -214,15 +216,34 @@ fn desktop_name(desk: HDESK) -> String {
     String::from_utf16_lossy(&buf).trim_end_matches('\0').to_string()
 }
 
-/// First monitor attached to the desktop, and its adapter.
-pub(super) fn primary_output() -> Res<(IDXGIAdapter1, IDXGIOutput, String)> {
+/// A monitor attached to the desktop, and the adapter it hangs off.
+pub(super) struct Output {
+    pub adapter: IDXGIAdapter1,
+    pub output: IDXGIOutput,
+    pub adapter_name: String,
+    /// GDI name (`\\.\DISPLAY2`): stable while the monitor stays connected.
+    pub device: String,
+    pub rect: RECT,
+}
+
+impl Output {
+    /// Windows' primary monitor is the one at the desktop's origin.
+    pub fn primary(&self) -> bool {
+        (self.rect.left, self.rect.top) == (0, 0)
+    }
+}
+
+/// Every monitor attached to the desktop, in DXGI's order.
+pub(super) fn outputs() -> Res<Vec<Output>> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
+    let mut found = Vec::new();
     for a in 0.. {
         let adapter = match unsafe { factory.EnumAdapters1(a) } {
             Ok(x) => x,
             Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
             Err(e) => return Err(e.into()),
         };
+        let adapter_name = String::from_utf16_lossy(&unsafe { adapter.GetDesc1()? }.Description).trim_end_matches('\0').to_string();
         for o in 0.. {
             let output = match unsafe { adapter.EnumOutputs(o) } {
                 Ok(x) => x,
@@ -231,20 +252,42 @@ pub(super) fn primary_output() -> Res<(IDXGIAdapter1, IDXGIOutput, String)> {
             };
             let desc = unsafe { output.GetDesc()? };
             if desc.AttachedToDesktop.as_bool() {
-                let adapter_name = unsafe { adapter.GetDesc1()? }.Description;
-                let name = String::from_utf16_lossy(&adapter_name);
-                return Ok((adapter, output, name.trim_end_matches('\0').to_string()));
+                let device = String::from_utf16_lossy(&desc.DeviceName).trim_end_matches('\0').to_string();
+                found.push(Output { adapter: adapter.clone(), output, adapter_name: adapter_name.clone(), device, rect: desc.DesktopCoordinates });
             }
         }
     }
-    Err("no monitor attached to the desktop".into())
+    Ok(found)
+}
+
+/// The monitor chosen to stream (`choose`), by GDI name; None for the primary one.
+static CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Streams `device` from the next `Capture::new` on (None: the primary monitor).
+pub(super) fn choose(device: Option<String>) {
+    *CHOSEN.lock().unwrap() = device;
+    SCREEN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The monitor to stream: the chosen one if it is still attached, else the primary, else the first.
+pub(super) fn streamed_output() -> Res<Output> {
+    let mut all = outputs()?;
+    let chosen = CHOSEN.lock().unwrap().clone();
+    let at = chosen
+        .and_then(|c| all.iter().position(|o| o.device == c))
+        .or_else(|| all.iter().position(Output::primary))
+        .unwrap_or(0);
+    if all.is_empty() {
+        return Err("no monitor attached to the desktop".into());
+    }
+    Ok(all.swap_remove(at))
 }
 
 impl Capture {
     pub fn new() -> Res<Capture> {
         // Started while the lock screen or a UAC prompt is up: capture that.
         let desktop = attach_input_desktop().inspect(|(_, name)| println!("capture: input desktop is {name}"));
-        let (adapter, output, adapter_name) = primary_output()?;
+        let Output { adapter, output, adapter_name, device: monitor, .. } = streamed_output()?;
         let mut device = None;
         let mut context = None;
         unsafe {
@@ -273,7 +316,7 @@ impl Capture {
         let dup = unsafe { output.DuplicateOutput(&device) }.ctx("DuplicateOutput")?;
         let desc = unsafe { dup.GetDesc() };
         let (width, height) = (desc.ModeDesc.Width, desc.ModeDesc.Height);
-        println!("capturing {width}x{height} on {adapter_name}");
+        println!("capturing {monitor} ({width}x{height}) on {adapter_name}");
         let frame = texture(&device, width, height)?;
         let composed = texture(&device, width, height)?;
         println!("capture ready");
@@ -290,6 +333,7 @@ impl Capture {
             pointer: Pointer::default(),
             width,
             height,
+            monitor,
             has_frame: false,
             resized: false,
         })
@@ -406,7 +450,7 @@ impl Capture {
         }
         println!("capture: following the input desktop ({name})");
         // The output was enumerated on the previous desktop; take a fresh one.
-        if let Ok(output) = primary_output().and_then(|(_, o, _)| Ok(o.cast::<IDXGIOutput1>()?)) {
+        if let Ok(output) = streamed_output().and_then(|o| Ok(o.output.cast::<IDXGIOutput1>()?)) {
             self.output = output;
         }
         if let Some((old, _)) = self.desktop.replace((desk, name)) {

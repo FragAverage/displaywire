@@ -240,6 +240,13 @@ pub trait Source {
     }
     /// Encodes the current image again even if nothing changed (not as a keyframe).
     fn repaint(&mut self) {}
+    /// The monitors there are to stream, and which one is; None for sources that aren't a screen.
+    fn monitors(&self) -> Option<proto::stream::Monitors> {
+        None
+    }
+    fn choose_monitor(&mut self, _index: u8) -> Result<(), String> {
+        Err("this source has no monitors".into())
+    }
     /// The pointer, for a client that draws it; None from sources without one.
     fn pointer(&self) -> Option<PointerState> {
         None
@@ -258,6 +265,8 @@ struct Shared {
     link: Mutex<Option<Link>>,
     last_seen_ns: AtomicU64,
     keyframe: AtomicBool,
+    /// A monitor the client asked to stream (`Msg::ChooseMonitor`), not yet switched to.
+    choose_monitor: Mutex<Option<u8>>,
     /// Earliest frame the client reported lost and not yet dealt with (`Msg::FrameLost`).
     lost: Mutex<Option<u32>>,
     /// `CAP_*` flags the client asked for in its hello.
@@ -285,6 +294,7 @@ impl Shared {
             last_seen_ns: AtomicU64::new(0),
             keyframe: AtomicBool::new(false),
             lost: Mutex::new(None),
+            choose_monitor: Mutex::new(None),
             caps: AtomicU8::new(0),
             fec_percent: AtomicU8::new(0),
             fps_cap: AtomicU16::new(0),
@@ -545,6 +555,9 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
     let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
     let mut pointer = PointerSender::default();
+    // The monitor list last sent, to whom and when, and when it was last looked at.
+    let mut monitors_sent: Option<(SocketAddr, proto::stream::Monitors, u64)> = None;
+    let mut monitors_checked = 0u64;
     // Recent frames (id, capture time), to find what the encoder knows a lost frame by; and the newest
     // frame invalidated, to announce with the next one (`Msg::Recovered`).
     let mut recent: VecDeque<(u32, u64)> = VecDeque::new();
@@ -567,6 +580,26 @@ fn run(cli: Cli) -> Result<(), String> {
         if kbps.abs_diff(applied_kbps) * 50 >= applied_kbps.max(1) {
             applied_kbps = kbps;
             source.set_bitrate(kbps * 1000);
+        }
+        if let Some(index) = shared.choose_monitor.lock().unwrap().take() {
+            match source.choose_monitor(index) {
+                Ok(()) => monitors_checked = 0,
+                Err(e) => println!("monitor {index}: {e}"),
+            }
+        }
+        // The monitors on connecting, and again whenever they change.
+        // The monitors on connecting, whenever they change, and every 10 s in case one was lost.
+        let now = now_ns();
+        if monitors_sent.as_ref().is_none_or(|(to, ..)| *to != link.addr) || now - monitors_checked > 2 * SEC {
+            monitors_checked = now;
+            if let Some(m) = source.monitors()
+                && monitors_sent.as_ref().is_none_or(|&(to, last, at)| to != link.addr || last != m || now - at > 10 * SEC)
+            {
+                let mut plain = [0u8; proto::MAX_PLAIN];
+                let n = Msg::Monitors(m).encode(&mut plain);
+                link.send(&sock, &plain[..n], &mut sealed);
+                monitors_sent = Some((link.addr, m, now));
+            }
         }
         let client_cursor = shared.caps.load(Relaxed) & proto::stream::CAP_CURSOR != 0;
         source.set_pointer_in_video(!client_cursor);
@@ -1049,6 +1082,7 @@ fn control(
                         }
                     }
                     Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),
+                    Some(Msg::ChooseMonitor { index }) => *shared.choose_monitor.lock().unwrap() = Some(index),
                     Some(Msg::FrameLost { first, .. }) => {
                         let mut lost = shared.lost.lock().unwrap();
                         *lost = Some(lost.map_or(first, |l| l.min(first)));

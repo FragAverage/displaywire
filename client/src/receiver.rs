@@ -413,6 +413,9 @@ impl Receiver {
                 }
                 Some(m @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => self.telemetry.transfers.handle(&m),
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),
+                Some(Msg::Monitors(m)) => {
+                    let _ = self.proxy.send_event(UserEvent::Monitors(Box::new(m)));
+                }
                 Some(Msg::Recovered { from, lost_upto }) => {
                     // Only an answer that covers the newest loss.
                     if let Some(r) = &mut self.recovery

@@ -47,6 +47,8 @@ const CURSOR_SHAPE: u8 = 18;
 const FEEDBACK: u8 = 19;
 const FRAME_LOST: u8 = 20;
 const RECOVERED: u8 = 21;
+const MONITORS: u8 = 22;
+const CHOOSE_MONITOR: u8 = 23;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -89,6 +91,55 @@ pub struct Feedback {
     /// Median capture → arrival time of the frames completed in this period, in µs on the server's
     /// clock (so it includes the clock-offset estimate's error; only its changes matter); -1 if none.
     pub delay_us: i32,
+}
+
+/// Monitors listed, and how long a name can be (bytes of UTF-8).
+pub const MAX_MONITORS: usize = 8;
+pub const MONITOR_NAME_LEN: usize = 32;
+
+/// One of the server's monitors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Monitor {
+    pub width: u16,
+    pub height: u16,
+    /// Hz.
+    pub refresh: u16,
+    pub primary: bool,
+    name: [u8; MONITOR_NAME_LEN],
+    name_len: u8,
+}
+
+impl Monitor {
+    pub fn new(width: u16, height: u16, refresh: u16, primary: bool, name: &str) -> Monitor {
+        let mut m = Monitor { width, height, refresh, primary, ..Default::default() };
+        // Cut at a character boundary.
+        let mut end = name.len().min(MONITOR_NAME_LEN);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        m.name[..end].copy_from_slice(&name.as_bytes()[..end]);
+        m.name_len = end as u8;
+        m
+    }
+
+    pub fn name(&self) -> &str {
+        std::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+    }
+}
+
+/// Server → client: the monitors (in a fixed order: `ChooseMonitor` names one by its place) and
+/// which is being streamed; on connecting and whenever they change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Monitors {
+    pub count: u8,
+    pub streaming: u8,
+    pub list: [Monitor; MAX_MONITORS],
+}
+
+impl Monitors {
+    pub fn iter(&self) -> impl Iterator<Item = &Monitor> {
+        self.list[..(self.count as usize).min(MAX_MONITORS)].iter()
+    }
 }
 
 /// Gamepads one client can have connected at once (XInput's limit).
@@ -322,6 +373,9 @@ pub enum Msg<'a> {
     /// Server → client, just before frame `from`: from it on, no frame references any frame up to
     /// `lost_upto` that was reported lost, so decoding can carry on there instead of at a keyframe.
     Recovered { from: u32, lost_upto: u32 },
+    Monitors(Monitors),
+    /// Client → server: stream monitor `index` of the last `Monitors`.
+    ChooseMonitor { index: u8 },
 }
 
 impl<'a> Msg<'a> {
@@ -428,6 +482,23 @@ impl<'a> Msg<'a> {
                 w.u16(f.expected);
                 w.u16(f.frames_lost);
                 w.u32(f.delay_us as u32);
+            }
+            Msg::Monitors(m) => {
+                w.u8(MONITORS);
+                w.u8(m.count.min(MAX_MONITORS as u8));
+                w.u8(m.streaming);
+                for mon in m.iter() {
+                    w.u16(mon.width);
+                    w.u16(mon.height);
+                    w.u16(mon.refresh);
+                    w.u8(mon.primary as u8);
+                    w.u8(mon.name_len);
+                    w.bytes(&mon.name[..mon.name_len as usize]);
+                }
+            }
+            Msg::ChooseMonitor { index } => {
+                w.u8(CHOOSE_MONITOR);
+                w.u8(index);
             }
             Msg::FrameLost { first, last } => {
                 w.u8(FRAME_LOST);
@@ -558,6 +629,26 @@ impl<'a> Msg<'a> {
             }
             RUMBLE => Msg::Rumble { slot: r.u8()?, large: r.u8()?, small: r.u8()? },
             FEEDBACK => Msg::Feedback(Feedback { received: r.u16()?, expected: r.u16()?, frames_lost: r.u16()?, delay_us: r.u32()? as i32 }),
+            MONITORS => {
+                let mut m = Monitors { count: r.u8()?, streaming: r.u8()?, ..Default::default() };
+                if m.count as usize > MAX_MONITORS {
+                    return None;
+                }
+                for mon in &mut m.list[..m.count as usize] {
+                    let (width, height, refresh, primary) = (r.u16()?, r.u16()?, r.u16()?, r.u8()? != 0);
+                    let len = r.u8()? as usize;
+                    if len > MONITOR_NAME_LEN {
+                        return None;
+                    }
+                    let mut name = [0u8; MONITOR_NAME_LEN];
+                    for b in &mut name[..len] {
+                        *b = r.u8()?;
+                    }
+                    *mon = Monitor { width, height, refresh, primary, name, name_len: len as u8 };
+                }
+                Msg::Monitors(m)
+            }
+            CHOOSE_MONITOR => Msg::ChooseMonitor { index: r.u8()? },
             FRAME_LOST => Msg::FrameLost { first: r.u32()?, last: r.u32()? },
             RECOVERED => Msg::Recovered { from: r.u32()?, lost_upto: r.u32()? },
             LIGHT => Msg::Light { slot: r.u8()?, r: r.u8()?, g: r.u8()?, b: r.u8()? },
@@ -751,5 +842,18 @@ mod tests {
         let n = Msg::Settings(Settings { bitrate_kbps: 30_000, fps_cap: 0, fec_percent: 10, adaptive: false }).encode(&mut buf);
         let Some(Msg::Settings(s)) = Msg::decode(&buf[..n - 1]) else { panic!("decodes") };
         assert!(s.adaptive);
+    }
+
+    #[test]
+    fn monitors_round_trip_with_names_cut_at_a_character() {
+        let mut m = Monitors { count: 2, streaming: 1, ..Default::default() };
+        m.list[0] = Monitor::new(2560, 1440, 240, true, "LC32G7xT");
+        m.list[1] = Monitor::new(3440, 1440, 120, false, &"é".repeat(20));
+        assert_eq!(m.list[1].name(), "é".repeat(16));
+        let mut buf = [0u8; crate::MAX_PLAIN];
+        let n = Msg::Monitors(m).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), Some(Msg::Monitors(m)));
+        let n = Msg::ChooseMonitor { index: 1 }.encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), Some(Msg::ChooseMonitor { index: 1 }));
     }
 }

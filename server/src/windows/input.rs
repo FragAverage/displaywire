@@ -46,8 +46,8 @@ pub struct Injector {
 
 /// Where the streamed monitor is on the virtual desktop.
 fn streamed_monitor() -> RECT {
-    super::capture::primary_output()
-        .and_then(|(_, output, _)| Ok(unsafe { output.GetDesc()? }.DesktopCoordinates))
+    super::capture::streamed_output()
+        .map(|o| o.rect)
         .unwrap_or_else(|e| {
             println!("input: can't find the streamed monitor ({e}); using the primary one");
             RECT { left: 0, top: 0, right: 1920, bottom: 1080 }

@@ -2,12 +2,13 @@
 //! full screen, minimise); ours go through a small Objective-C target that
 //! forwards them to the app's event loop.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{NSObject, NSString};
 use winit::event_loop::EventLoopProxy;
 
@@ -25,6 +26,8 @@ pub enum Action {
     WifiSetup,
     Shortcuts,
     CheckUpdates,
+    /// Stream the PC's monitor at this place in its list.
+    Monitor(u8),
 }
 
 static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
@@ -103,6 +106,13 @@ define_class!(
         fn shortcuts(&self, _sender: Option<&AnyObject>) {
             send(Action::Shortcuts);
         }
+
+        #[unsafe(method(chooseMonitor:))]
+        fn choose_monitor(&self, sender: Option<&AnyObject>) {
+            if let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) {
+                send(Action::Monitor(item.tag() as u8));
+            }
+        }
     }
 );
 
@@ -122,6 +132,38 @@ fn item(
         unsafe { it.setTarget(Some(t)) };
     }
     it
+}
+
+thread_local! {
+    /// View › Monitor, refilled from each `Msg::Monitors`, and the target its items call.
+    static MONITOR_MENU: RefCell<Option<(Retained<NSMenu>, Retained<Target>)>> = const { RefCell::new(None) };
+}
+
+/// Lists the PC's monitors under View › Monitor, the streamed one ticked; None while not connected.
+pub fn set_monitors(mtm: MainThreadMarker, monitors: Option<&proto::stream::Monitors>) {
+    MONITOR_MENU.with_borrow(|m| {
+        let Some((menu, target)) = m else { return };
+        menu.removeAllItems();
+        let Some(list) = monitors.filter(|l| l.count > 0) else {
+            let it = item(mtm, "Connect to choose", None, "", NSEventModifierFlags::empty(), None);
+            it.setEnabled(false);
+            menu.addItem(&it);
+            return;
+        };
+        for (i, mon) in list.iter().enumerate() {
+            let mut title = format!("{} · {}×{}", mon.name(), mon.width, mon.height);
+            if mon.refresh > 0 {
+                title += &format!(" · {} Hz", mon.refresh);
+            }
+            if mon.primary {
+                title += " · main";
+            }
+            let it = item(mtm, &title, Some(sel!(chooseMonitor:)), "", NSEventModifierFlags::empty(), Some(target));
+            it.setTag(i as isize);
+            it.setState(if i == list.streaming as usize { NSControlStateValueOn } else { NSControlStateValueOff });
+            menu.addItem(&it);
+        }
+    });
 }
 
 fn submenu(mtm: MainThreadMarker, title: &str, items: Vec<Retained<NSMenuItem>>) -> Retained<NSMenuItem> {
@@ -170,6 +212,10 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
             item(mtm, "Set Up Wi-Fi Tuning…", Some(sel!(wifiSetup:)), "", none, Some(t)),
         ],
     );
+    let monitor_menu = submenu(mtm, "Monitor", Vec::new());
+    if let Some(menu) = monitor_menu.submenu() {
+        MONITOR_MENU.with_borrow_mut(|m| *m = Some((menu, target.clone())));
+    }
     let view = submenu(
         mtm,
         "View",
@@ -177,6 +223,7 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
             item(mtm, "Enter Full Screen", Some(sel!(toggleFullScreen:)), "f", cmd | NSEventModifierFlags::Control, None),
             item(mtm, "Show Stats", Some(sel!(toggleStats:)), "s", NSEventModifierFlags::Control | NSEventModifierFlags::Option, Some(t)),
             item(mtm, "Mute Audio", Some(sel!(mute:)), "", none, Some(t)),
+            monitor_menu.clone(),
             item(mtm, "Microphone On/Off", Some(sel!(microphone:)), "v", NSEventModifierFlags::Control | NSEventModifierFlags::Option, Some(t)),
         ],
     );
@@ -196,6 +243,7 @@ pub fn install(mtm: MainThreadMarker, proxy: EventLoopProxy<UserEvent>) {
     }
     let app = NSApplication::sharedApplication(mtm);
     app.setMainMenu(Some(&bar));
+    set_monitors(mtm, None);
     // AppKit doesn't retain a menu item's target: keep ours for the life of the app.
     std::mem::forget(target);
 }

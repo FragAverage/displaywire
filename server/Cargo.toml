@@ -31,6 +31,7 @@ moq-nvenc = "0.1"
 # DS4 targets and Xbox rumble notifications are behind these features.
 vigem-client = { version = "0.1.4", features = ["unstable_ds4", "unstable_xtarget_notification"] }
 windows = { version = "0.62.2", features = [
+  "Win32_Devices_Display",
   "Win32_Devices_FunctionDiscovery",
   "Win32_Foundation",
   "Win32_Graphics_Direct3D",

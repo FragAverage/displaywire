@@ -19,7 +19,6 @@ use crate::app::UserEvent;
 use crate::audio;
 use crate::cursor;
 use crate::display::Layer;
-use crate::gamepad;
 use crate::input;
 use crate::link::Link;
 use crate::mic;
@@ -119,7 +118,6 @@ struct Receiver {
     audio: Option<audio::Player>,
     /// Open only while the microphone is on.
     mic: Option<mic::Capture>,
-    pads: gamepad::Poller,
     /// The PC's pointer, drawn here as the Mac cursor: images being put together, and the last state.
     cursors: cursor::Assembler,
     cursor_state: Option<(bool, u16, u16, u32)>,
@@ -157,7 +155,6 @@ impl Receiver {
     ) -> Result<Receiver, String> {
         link.set_read_timeout(Duration::from_millis(2)).map_err(|e| e.to_string())?;
         let proxy_for_audio = proxy.clone();
-        let pads = gamepad::Poller::new(link.clone(), input.focused.clone());
         Ok(Receiver {
             server,
             link,
@@ -177,7 +174,6 @@ impl Receiver {
             telemetry,
             sim_loss: std::env::var("DISPLAYWIRE_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
             mic: None,
-            pads,
             cursors: cursor::Assembler::default(),
             cursor_state: None,
             feedback: FeedbackCounts::default(),
@@ -327,9 +323,6 @@ impl Receiver {
             }
             self.pump_mic(alive);
             self.input.heartbeat();
-            if alive {
-                self.pads.poll();
-            }
             if self.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
                 self.need_keyframe = true;
                 self.feedback.frames_lost += 1;
@@ -428,7 +421,9 @@ impl Receiver {
                         r.resume_from = Some(from);
                     }
                 }
-                Some(Msg::Rumble { slot, large, small }) => self.pads.rumble(slot, large, small),
+                Some(Msg::Rumble { slot, large, small }) => {
+                    let _ = self.proxy.send_event(UserEvent::Rumble { slot, large, small });
+                }
                 Some(Msg::CursorShape(shape, payload)) => {
                     if let Some(image) = self.cursors.push(shape, payload) {
                         let _ = self.proxy.send_event(UserEvent::CursorImage(image));
@@ -440,7 +435,9 @@ impl Receiver {
                         let _ = self.proxy.send_event(UserEvent::Cursor { visible, x, y, shape });
                     }
                 }
-                Some(Msg::Light { slot, r, g, b }) => self.pads.light(slot, r, g, b),
+                Some(Msg::Light { slot, r, g, b }) => {
+                    let _ = self.proxy.send_event(UserEvent::Light { slot, r, g, b });
+                }
                 _ => {}
             }
         }

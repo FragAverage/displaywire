@@ -76,7 +76,7 @@ mod app {
     use winit::application::ApplicationHandler;
     use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
     use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-    use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
     use winit::window::{CursorGrabMode, CustomCursor, Window, WindowId};
 
@@ -125,6 +125,9 @@ mod app {
         /// The PC's pointer: a new image, and where it is (0..=65535 across the video) and which image it shows.
         CursorImage(Arc<crate::cursor::Image>),
         Cursor { visible: bool, x: u16, y: u16, shape: u32 },
+        /// What a game asked of a gamepad (GameController lives on this thread).
+        Rumble { slot: u8, large: u8, small: u8 },
+        Light { slot: u8, r: u8, g: u8, b: u8 },
         Title(String),
         Fatal(String),
         /// A check for a newer version finished.
@@ -161,6 +164,9 @@ mod app {
         cursor_made: Option<(u32, u32, CustomCursor)>,
         pc_pointer: Option<(bool, f64, f64, u32)>,
         local_pointer: Option<((f64, f64), Instant)>,
+        /// Gamepads, read here on the main thread: GameController isn't safe to use from others (the
+        /// controller list came back empty at times, which unplugged the pad on the PC).
+        pads: crate::gamepad::Poller,
     }
 
     impl Session {
@@ -453,6 +459,7 @@ mod app {
                 .with_title(format!("DisplayWire: {server}"))
                 .with_inner_size(LogicalSize::new(1280.0, 720.0));
             let window = el.create_window(attrs).map_err(|e| format!("create window: {e}"))?;
+            let pads = crate::gamepad::Poller::new(link.clone(), input.focused.clone());
             let layer = display::Layer::attach(&window);
             let stop = Arc::new(AtomicBool::new(false));
             let graph = load_graph_pref();
@@ -490,6 +497,7 @@ mod app {
                 cursor_made: None,
                 pc_pointer: None,
                 local_pointer: None,
+                pads,
             })
         }
 
@@ -813,6 +821,17 @@ mod app {
             }
         }
 
+        /// While streaming, wake every 4 ms to read the gamepads; otherwise sleep until an event.
+        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            match &mut self.session {
+                Some(s) => {
+                    s.pads.poll();
+                    el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(4)));
+                }
+                None => el.set_control_flow(ControlFlow::Wait),
+            }
+        }
+
         fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
             if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
                 && self.locked
@@ -858,6 +877,8 @@ mod app {
                     s.notice = text;
                     s.refresh_banner();
                 }
+                UserEvent::Rumble { slot, large, small } => s.pads.rumble(slot, large, small),
+                UserEvent::Light { slot, r, g, b } => s.pads.light(slot, r, g, b),
                 UserEvent::CursorImage(image) => {
                     // Pointers come in a handful of shapes; a long session can still pile them up.
                     if s.cursor_images.len() > 32 {

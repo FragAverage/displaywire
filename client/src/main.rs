@@ -71,7 +71,7 @@ mod app {
     use clap::Parser;
     use winit::application::ApplicationHandler;
     use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-    use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
+    use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
     use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
     use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
     use winit::window::{CursorGrabMode, Window, WindowId};
@@ -238,6 +238,8 @@ mod app {
         modifiers: ModifiersState,
         /// Pointer captured: relative motion for games (toggled with ⌃⌥M).
         locked: bool,
+        /// The click that captured the pointer (auto capture): its release isn't sent either.
+        swallow_release: Option<MouseButton>,
         error: Option<String>,
         menu_installed: bool,
         launcher: Option<crate::launcher::Launcher>,
@@ -571,6 +573,10 @@ mod app {
         fn set_locked(&mut self, locked: bool) {
             let Some(s) = &self.session else { return };
             if locked {
+                // macOS freezes the cursor where it is and still clicks whatever is under it, such as the Dock icon
+                // that just focused the window: park it over the stream first. (Warping lets go of a grab, so before.)
+                let size = s.window.inner_size();
+                let _ = s.window.set_cursor_position(PhysicalPosition::new(size.width / 2, size.height / 2));
                 let grabbed = s.window.set_cursor_grab(CursorGrabMode::Locked);
                 if let Err(e) = grabbed {
                     eprintln!("can't capture the pointer: {e}");
@@ -582,6 +588,11 @@ mod app {
             s.window.set_cursor_visible(!locked);
             self.locked = locked;
             println!("pointer {}", if locked { "captured (⌃⌥M to release)" } else { "released" });
+        }
+
+        /// The auto capture setting: capture whenever the stream window has focus.
+        fn auto_capture(&self) -> bool {
+            self.session.as_ref().is_some_and(|s| s.telemetry.prefs.lock().unwrap().auto_capture)
         }
 
         /// Window position (physical pixels) → fraction of the video, which
@@ -651,12 +662,17 @@ mod app {
                         el.exit();
                     }
                 }
-                WindowEvent::Focused(true) => input.focused.store(true, Relaxed),
                 WindowEvent::Focused(false) => {
                     input.focused.store(false, Relaxed);
                     input.release_all();
                     if self.locked {
                         self.set_locked(false);
+                    }
+                }
+                WindowEvent::Focused(true) => {
+                    input.focused.store(true, Relaxed);
+                    if !self.locked && self.auto_capture() {
+                        self.set_locked(true);
                     }
                 }
                 WindowEvent::DroppedFile(path) => self.send_file(&path),
@@ -688,7 +704,20 @@ mod app {
                     input.key(code, down, event.repeat);
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    input.button(button, state == ElementState::Pressed);
+                    let down = state == ElementState::Pressed;
+                    // Auto capture, released with ⌃⌥M: a click in the window captures again, and isn't sent.
+                    if down && !self.locked && self.auto_capture() {
+                        self.set_locked(true);
+                        if self.locked {
+                            self.swallow_release = Some(button);
+                            return;
+                        }
+                    }
+                    if !down && self.swallow_release == Some(button) {
+                        self.swallow_release = None;
+                        return;
+                    }
+                    input.button(button, down);
                 }
                 WindowEvent::MouseWheel { delta, .. } => match delta {
                     MouseScrollDelta::LineDelta(x, y) => input.wheel_lines(-x as f64, y as f64),
@@ -896,6 +925,7 @@ mod app {
             session: None,
             modifiers: ModifiersState::empty(),
             locked: false,
+            swallow_release: None,
             error: None,
             menu_installed: false,
             launcher: None,

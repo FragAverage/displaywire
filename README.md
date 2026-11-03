@@ -79,6 +79,10 @@ list of PCs, close the stream window or choose **Connection > Disconnect**.
 
 The ⌘ key acts as the Windows key on the PC. Switching away from the window lets go of every key and button.
 
+To skip ⌃⌥M, turn on **Capture the pointer when the window has focus** in Settings. The mouse is then captured
+whenever the stream window has focus. ⌃⌥M still releases it, a click in the window captures it again, and
+switching away (⌘Tab) releases it.
+
 ### Sound and microphone
 
 The PC's sound plays on your Mac, from every app, whichever output the app uses. DisplayWire's own sound is left out.

@@ -89,7 +89,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     alert.addButtonWithTitle(ns_string!("Save"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
 
-    let (w, h) = (360.0, 190.0);
+    let (w, h) = (360.0, 214.0);
     let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
     let rows = [h - 28.0, h - 62.0, h - 96.0, h - 128.0];
     let (lx, cx) = (0.0, 150.0);
@@ -125,6 +125,10 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     view.addSubview(&wifi);
     clipboard.setState(if current.clipboard { NSControlStateValueOn } else { NSControlStateValueOff });
     view.addSubview(&clipboard);
+    let capture = unsafe { NSButton::checkboxWithTitle_target_action(ns_string!("Capture the pointer when the window has focus"), None, None, mtm) };
+    capture.setFrame(rect(lx, 48.0, w, 20.0));
+    capture.setState(if current.auto_capture { NSControlStateValueOn } else { NSControlStateValueOff });
+    view.addSubview(&capture);
     alert.setAccessoryView(Some(&view));
 
     NSApplication::sharedApplication(mtm).activate();
@@ -142,6 +146,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
             muted: current.muted,
             clipboard: clipboard.state() == NSControlStateValueOn,
             quiet_wifi: wifi.state() == NSControlStateValueOn,
+            auto_capture: capture.state() == NSControlStateValueOn,
         }
         .clamped(),
     )
@@ -183,7 +188,7 @@ pub fn show_shortcuts() {
          ⌃⌥V    Microphone on or off (off at every start)\n\
          ⌃⌘F    Full screen\n\
          ⌘Q     Quit DisplayWire\n\n\
-         Everything else goes to the PC while this window has focus. The ⌘ key is the Windows key there."
+         Everything else goes to the PC while this window has focus. The ⌘ key is the Windows key there. To capture the pointer whenever this window has focus, turn it on in Settings."
     ));
     alert.addButtonWithTitle(ns_string!("OK"));
     NSApplication::sharedApplication(mtm).activate();

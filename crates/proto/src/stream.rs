@@ -25,6 +25,8 @@ pub const CAP_AUDIO: u8 = 1;
 pub const CAP_MIC: u8 = 2;
 /// Video as H.264 instead of HEVC (the client can only decode H.264, e.g. LG's LGNC).
 pub const CAP_H264: u8 = 4;
+/// Video no larger than 1920×1080 (scaled down to fit, keeping the aspect ratio).
+pub const CAP_MAX_1080P: u8 = 8;
 
 const HELLO: u8 = 1;
 const PING: u8 = 2;

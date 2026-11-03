@@ -171,6 +171,18 @@ pub struct ScreenSource {
     bitrate: u32,
 }
 
+/// The capture size scaled down to fit `max` (keeping the aspect ratio), and even for NV12.
+fn fit((w, h): (u32, u32), max: Option<(u32, u32)>) -> (u32, u32) {
+    let (w, h) = match max {
+        Some((mw, mh)) if w > mw || h > mh => {
+            let scale = (mw as f64 / w as f64).min(mh as f64 / h as f64);
+            ((w as f64 * scale).round() as u32, (h as f64 * scale).round() as u32)
+        }
+        _ => (w, h),
+    };
+    (w & !1, h & !1)
+}
+
 impl ScreenSource {
     pub fn open(cli: &Cli) -> Result<ScreenSource, String> {
         Self::try_open(cli).map_err(|e| format!("screen capture: {e}"))
@@ -187,8 +199,7 @@ impl ScreenSource {
             let _ = AvSetMmThreadCharacteristicsW(w!("Games"), &mut task);
         }
         let capture = Capture::new()?;
-        // NV12 needs even dimensions.
-        let (w, h) = (capture.width & !1, capture.height & !1);
+        let (w, h) = fit((capture.width, capture.height), None);
         let converter =
             Converter::new(&capture.device, &capture.context, &capture.composed, (capture.width, capture.height), (w, h), cli.fps)?;
         let bitrate = (cli.mbps * 1e6) as u32;
@@ -274,18 +285,22 @@ impl Source for ScreenSource {
         self.encoder.set_bitrate(bps);
     }
 
-    fn set_codec(&mut self, codec: Codec) -> Result<(), String> {
-        if codec == self.codec {
+    fn set_format(&mut self, codec: Codec, max_size: Option<(u32, u32)>) -> Result<(), String> {
+        let (cw, ch) = (self.capture.width, self.capture.height);
+        let size = fit((cw, ch), max_size);
+        if (codec, size) == (self.codec, self.size) {
             return Ok(());
         }
         if matches!(self.encoder, AnyEncoder::Mft(_)) {
-            return Err("only the direct NVENC encoder can switch codec".into());
+            return Err("only the direct NVENC encoder can switch format".into());
         }
-        let (w, h) = self.size;
-        let encoder = NvEncoder::new(&self.capture.device, w, h, self.fps, self.bitrate, codec).map_err(|e| e.to_string())?;
-        self.encoder = AnyEncoder::Nvenc(Box::new(encoder));
+        let c = &self.capture;
+        let converter = Converter::new(&c.device, &c.context, &c.composed, (cw, ch), size, self.fps).map_err(|e| e.to_string())?;
+        let encoder = NvEncoder::new(&c.device, size.0, size.1, self.fps, self.bitrate, codec).map_err(|e| e.to_string())?;
+        println!("encoding {}x{} {codec:?} with {}", size.0, size.1, encoder.name);
+        (self.converter, self.encoder) = (converter, AnyEncoder::Nvenc(Box::new(encoder)));
         self.in_flight.clear();
-        self.codec = codec;
+        (self.codec, self.size) = (codec, size);
         Ok(())
     }
 

@@ -192,9 +192,10 @@ pub trait Source {
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String>;
     /// Changes the video bitrate while running. Sources that can't just ignore it.
     fn set_bitrate(&mut self, _bps: u32) {}
-    /// Switches the codec for the next frames (the first is then a keyframe).
-    fn set_codec(&mut self, codec: Codec) -> Result<(), String> {
-        if codec == Codec::Hevc { Ok(()) } else { Err(format!("this source only makes HEVC, not {codec:?}")) }
+    /// Switches the codec, and the largest size to encode (scaling down to fit), for the next
+    /// frames; the first is then a keyframe.
+    fn set_format(&mut self, codec: Codec, max_size: Option<(u32, u32)>) -> Result<(), String> {
+        if codec == Codec::Hevc && max_size.is_none() { Ok(()) } else { Err("this source only makes HEVC at its own size".into()) }
     }
 }
 
@@ -490,7 +491,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut stats = Stats::new();
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
     let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
-    let mut applied_codec = Codec::Hevc;
+    let mut applied_format = (Codec::Hevc, None);
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
@@ -509,15 +510,16 @@ fn run(cli: Cli) -> Result<(), String> {
             applied_kbps = kbps;
             source.set_bitrate(kbps * 1000);
         }
-        let codec = if shared.caps.load(Relaxed) & proto::stream::CAP_H264 != 0 { Codec::H264 } else { Codec::Hevc };
-        if codec != applied_codec {
-            applied_codec = codec;
-            match source.set_codec(codec) {
-                Ok(()) => {
-                    println!("video: now {codec:?}");
-                    shared.keyframe.store(true, Relaxed);
-                }
-                Err(e) => println!("video: can't switch to {codec:?}: {e}"),
+        let caps = shared.caps.load(Relaxed);
+        let format = (
+            if caps & proto::stream::CAP_H264 != 0 { Codec::H264 } else { Codec::Hevc },
+            (caps & proto::stream::CAP_MAX_1080P != 0).then_some((1920, 1080)),
+        );
+        if format != applied_format {
+            applied_format = format;
+            match source.set_format(format.0, format.1) {
+                Ok(()) => shared.keyframe.store(true, Relaxed),
+                Err(e) => println!("video: can't switch to {format:?}: {e}"),
             }
         }
         let force = shared.keyframe.swap(false, Relaxed);

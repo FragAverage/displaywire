@@ -21,9 +21,10 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// What to ask the server for: both of LG's decoders here only take H.264.
+    /// What to ask the server for: both of LG's decoders here only take H.264, up to 1080p
+    /// (larger shows green on the 50UM7450PLA).
     pub fn caps(self) -> u8 {
-        proto::stream::CAP_H264
+        proto::stream::CAP_H264 | proto::stream::CAP_MAX_1080P
     }
 }
 

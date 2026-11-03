@@ -18,7 +18,7 @@ const SERVICE: &str = "DisplayWireServer";
 const UNINSTALL_KEY: &str = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\DisplayWireServer";
 
 pub fn is_installed() -> bool {
-    Command::new("sc").args(["query", SERVICE]).output().is_ok_and(|o| o.status.success())
+    Command::new(super::system_tool("sc.exe")).args(["query", SERVICE]).output().is_ok_and(|o| o.status.success())
 }
 
 fn is_elevated() -> bool {
@@ -44,12 +44,13 @@ fn relaunch_elevated(args: &str) -> Result<(), String> {
     if r.0 as usize > 32 { Ok(()) } else { Err("administrator permission was not given".into()) }
 }
 
-fn install_dir() -> PathBuf {
+pub(super) fn install_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into())).join("DisplayWire")
 }
 
+/// Runs a System32 tool (`cmd` without ".exe"), ignoring how it went.
 fn run(cmd: &str, args: &[&str]) {
-    let _ = Command::new(cmd).args(args).output();
+    let _ = Command::new(super::system_tool(&format!("{cmd}.exe"))).args(args).output();
 }
 
 /// The elevated install: needs administrator rights.
@@ -113,7 +114,7 @@ pub fn uninstall(purge: bool) -> Result<(), String> {
     }
     let remove: Vec<String> = paths.iter().map(|p| format!("rmdir /s /q \"{}\"", p.display())).collect();
     // `ping` is the delay (`timeout` needs a console); raw_arg keeps cmd's own quoting intact.
-    let _ = Command::new("cmd").raw_arg(format!("/c ping -n 4 127.0.0.1 >nul & {}", remove.join(" & "))).spawn();
+    let _ = Command::new(super::system_tool("cmd.exe")).raw_arg(format!("/c ping -n 4 127.0.0.1 >nul & {}", remove.join(" & "))).spawn();
     println!("DisplayWire Server has been removed.{}", if purge { "" } else { " Its paired devices and logs were kept in ProgramData\\DisplayWire." });
     Ok(())
 }

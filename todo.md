@@ -120,7 +120,7 @@ Risk: no AMD/Intel hardware to test on here; needs community testers or cloud ma
 - [ ] Per-vendor bitrate reconfigure and keyframe-on-demand; RFI where the SDK supports it (AMF LTR, QSV RefList).
 - [ ] Find testers: a "help wanted" issue with a `--profile` log template; consider a cloud Windows VM with an AMD GPU.
 - [ ] README: drop "NVIDIA" from the requirements when this lands.
-## 10. Security fixes before wider release (agreed)
+## 10. Security fixes before wider release (built 2026-11-03, see the list below)
 Decided: every open item under "Should fix > Security" below ships in the next release (0.7), before new features
 reach users. The firewall rule allows LAN + Tailscale only.
 
@@ -196,17 +196,21 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 ## Should fix
 
 ### Security
-- [ ] **Connection blocking without the key** (`server/src/main.rs:499`). The single global handshake rate limit is spent before HS1 is checked. Verify first, rate-limit valid handshakes per source IP, and cap pending sessions per address.
-- [ ] **Service registers the exe wherever it sits** (`server/src/windows/service.rs:74-84`). Only allow install from `%ProgramFiles%\DisplayWire` (via `--setup`).
-- [ ] Call `sc`, `netsh`, `icacls`, `reg` and `cmd` by full `%SystemRoot%\System32` path. Load `nvEncodeAPI64.dll` with `LoadLibraryExW(…, LOAD_LIBRARY_SEARCH_SYSTEM32)` (`nvenc.rs:76`).
-- [ ] Limit the firewall rule to `profile=private,domain remoteip=localsubnet,100.64.0.0/10` (LAN + Tailscale) (`service.rs:92-95`); README: how to add a rule for other networks.
-- [ ] Answer discovery only from private/local addresses (`main.rs:490-495`), and correct the "server stays silent" claim in `docs/AUTH.md`.
-- [ ] Bound the clipboard read to `GlobalSize(h) / 2` (`server/src/windows/shell.rs:48-51`).
+- [x] **Connection blocking without the key** (`server/src/main.rs:499`). The single global handshake rate limit is spent before HS1 is checked. Verify first, rate-limit valid handshakes per source IP, and cap pending sessions per address.
+- [x] **Service registers the exe wherever it sits** (`server/src/windows/service.rs:74-84`). Only allow install from `%ProgramFiles%\DisplayWire` (via `--setup`).
+- [x] Call `sc`, `netsh`, `icacls`, `reg` and `cmd` by full `%SystemRoot%\System32` path. Load `nvEncodeAPI64.dll` with `LoadLibraryExW(…, LOAD_LIBRARY_SEARCH_SYSTEM32)` (`nvenc.rs:76`).
+- [x] Limit the firewall rule to `profile=private,domain remoteip=localsubnet,100.64.0.0/10` (LAN + Tailscale) (`service.rs:92-95`); README: how to add a rule for other networks. Done as `remoteip=localsubnet,100.64.0.0/10` on every
+  profile: home networks are often marked Public, and the address filter is what matters.
+- [x] Answer discovery only from private/local addresses (`main.rs:490-495`), and correct the "server stays silent" claim in `docs/AUTH.md`.
+- [x] Bound the clipboard read to `GlobalSize(h) / 2` (`server/src/windows/shell.rs:48-51`).
 - [x] Make `as_user` return an error instead of falling back to SYSTEM (`shell.rs:111-112`).
-- [ ] Never print the key from the service child (`main.rs:273`). (The log folder is now admin-only.)
-- [ ] Cap concurrent incoming transfers and their total size (`crates/xfer/src/endpoint.rs:80`, `lib.rs:408`).
-- [ ] Fix `quote()` for arguments ending in a backslash (`service.rs:56-58`).
-- [ ] Defence in depth: drop unneeded privileges from the SYSTEM child token (`service.rs:210-217`).
+- [x] Never print the key from the service child (`main.rs:273`). (The log folder is now admin-only.) Already gone with
+  per-device keys: nothing prints a key.
+- [x] Cap concurrent incoming transfers and their total size (`crates/xfer/src/endpoint.rs:80`, `lib.rs:408`).
+- [x] Fix `quote()` for arguments ending in a backslash (`service.rs:56-58`).
+- [x] Defence in depth: drop unneeded privileges from the SYSTEM child token (`service.rs:210-217`). Removes debug,
+  driver loading, backup and 13 others; keeps TCB/impersonation (acting for the user), base priority, and
+  take-ownership/restore (`auth::lock_dir`).
 
 ### Bugs
 - [ ] **A resolution change freezes the stream**: see Roadmap 1.

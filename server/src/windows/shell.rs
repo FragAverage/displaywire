@@ -11,7 +11,7 @@ use windows::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -45,8 +45,10 @@ pub fn clipboard_text() -> Option<String> {
             if ptr.is_null() {
                 return None;
             }
+            // Another program wrote this: stop at the end of its block even if it isn't terminated.
+            let max = GlobalSize(hglobal) / 2;
             let mut len = 0;
-            while *ptr.add(len) != 0 {
+            while len < max && *ptr.add(len) != 0 {
                 len += 1;
             }
             let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));

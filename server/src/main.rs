@@ -574,18 +574,21 @@ fn open_screen(_cli: &Cli) -> Result<Box<dyn Source>, String> {
     Err("screen capture is only implemented on Windows; use --file".into())
 }
 
-/// Handshakes accepted per second, so a flood of (cheap to check) forgeries stays cheap.
+/// A token bucket: `per_sec` on average, up to `burst` at once.
 struct HandshakeLimiter {
+    per_sec: f64,
+    burst: f64,
     tokens: f64,
     last_ns: u64,
 }
 
 impl HandshakeLimiter {
-    const PER_SEC: f64 = 20.0;
-    const BURST: f64 = 40.0;
+    fn new(per_sec: f64, burst: f64) -> HandshakeLimiter {
+        HandshakeLimiter { per_sec, burst, tokens: burst, last_ns: now_ns() }
+    }
 
     fn allow(&mut self, now: u64) -> bool {
-        self.tokens = (self.tokens + (now - self.last_ns) as f64 / SEC as f64 * Self::PER_SEC).min(Self::BURST);
+        self.tokens = (self.tokens + (now - self.last_ns) as f64 / SEC as f64 * self.per_sec).min(self.burst);
         self.last_ns = now;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -607,9 +610,35 @@ struct Pending {
     client: Arc<str>,
 }
 
-/// Pending handshakes kept, and for how long.
+/// Pending handshakes kept (in all, and from one address), and for how long.
 const MAX_PENDING: usize = 16;
+const MAX_PENDING_PER_SOURCE: usize = 2;
 const PENDING_TTL_NS: u64 = 10 * SEC;
+
+/// Handshakes that verify, per source address: a device reconnecting needs one or two, and one
+/// address can't keep replacing everyone else's pending sessions. Forgeries never get this far.
+struct PerSource(std::collections::HashMap<std::net::IpAddr, HandshakeLimiter>);
+
+impl PerSource {
+    fn allow(&mut self, ip: std::net::IpAddr, now: u64) -> bool {
+        if self.0.len() > 256 {
+            self.0.retain(|_, l| now - l.last_ns < 60 * SEC);
+        }
+        self.0.entry(ip).or_insert_with(|| HandshakeLimiter::new(2.0, 5.0)).allow(now)
+    }
+}
+
+/// Addresses on this network (or this machine) that may discover the server: private, link-local
+/// and loopback. Discovery is a local broadcast; anything else asking is probing from outside.
+fn is_local(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+    }
+}
 
 /// This computer's IPv4 address on the network that reaches `peer`: what the peer should connect to.
 fn local_ip_toward(peer: SocketAddr) -> Option<[u8; 4]> {
@@ -636,11 +665,13 @@ fn control(
     let mut injector = Injector::new();
     let mut active: Option<(Link, ReplayWindow)> = None;
     let mut pending: Vec<Pending> = Vec::new();
-    let mut limiter = HandshakeLimiter { tokens: HandshakeLimiter::BURST, last_ns: now_ns() };
-    let mut pair_limiter = HandshakeLimiter { tokens: HandshakeLimiter::BURST, last_ns: now_ns() };
+    // Checking a forged handshake is hashing only; this bounds what a flood of them costs.
+    let mut verify_limiter = HandshakeLimiter::new(2000.0, 4000.0);
+    let mut per_source = PerSource(Default::default());
+    let mut pair_limiter = HandshakeLimiter::new(20.0, 40.0);
     let mut last_check = 0u64;
     let mut last_reject_log = 0u64;
-    let mut discovery_limiter = HandshakeLimiter { tokens: HandshakeLimiter::BURST, last_ns: now_ns() };
+    let mut discovery_limiter = HandshakeLimiter::new(20.0, 40.0);
     // Wake up regularly so held keys are released if the client goes quiet.
     let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
     loop {
@@ -674,7 +705,7 @@ fn control(
         };
         let datagram = &buf[..n];
         if let Some(nonce) = proto::discover::parse_query(datagram) {
-            if let Some(a) = announcement.filter(|_| discovery_limiter.allow(now)) {
+            if let Some(a) = announcement.filter(|_| is_local(from.ip()) && discovery_limiter.allow(now)) {
                 let mut a = a.clone();
                 a.address = local_ip_toward(from);
                 let m = proto::discover::reply(nonce, &a, &mut out);
@@ -684,7 +715,7 @@ fn control(
         }
         match secure::kind(datagram) {
             Some(secure::HS1) => {
-                if !limiter.allow(now) {
+                if !verify_limiter.allow(now) {
                     continue;
                 }
                 // Whichever device's key opens it is who is connecting.
@@ -693,12 +724,19 @@ fn control(
                 let accepted = keys.iter().find_map(|(id, key)| secure::accept(key, datagram, auth::unix_ms(), VERSION).ok().map(|r| (id.clone(), r)));
                 match accepted {
                     Some((client, (hs2, session, hello))) => {
+                        if !per_source.allow(from.ip(), now) {
+                            continue;
+                        }
                         let _ = sock.send_to(&hs2, from);
                         if hello.version != VERSION {
                             eprintln!("{from}: client speaks protocol {}, this server {VERSION}; update one of them", hello.version);
                             continue;
                         }
-                        if pending.len() == MAX_PENDING {
+                        if let Some(i) = pending.iter().position(|p| p.addr.ip() == from.ip())
+                            && pending.iter().filter(|p| p.addr.ip() == from.ip()).count() >= MAX_PENDING_PER_SOURCE
+                        {
+                            pending.remove(i);
+                        } else if pending.len() == MAX_PENDING {
                             pending.remove(0);
                         }
                         pending.push(Pending { addr: from, session: Arc::new(session), window: ReplayWindow::default(), caps: hello.caps, created_ns: now, client });

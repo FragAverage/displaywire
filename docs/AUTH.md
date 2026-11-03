@@ -11,8 +11,12 @@ v5). Replaces the unauthenticated protocol of v4 and earlier.
   encrypted and integrity-protected, with replay protection.
 - A passive attacker can't decrypt recorded traffic later, even if the key
   leaks afterwards (forward secrecy).
-- The server stays silent to anything unauthenticated: no replies, no
-  amplification, nothing to fingerprint beyond an open UDP port.
+- The server stays silent to anything unauthenticated, with two exceptions a
+  device needs before it has a key: discovery replies (only to private,
+  link-local and loopback addresses, rate-limited, and they name the PC and its
+  port), and pairing replies (only while someone has chosen **Pair new
+  device…** on the PC, see `docs/PAIRING.md`). No amplification beyond that
+  small reply, nothing to fingerprint from outside the local network.
 - Pairing must be possible **without sitting at the server**: the key is a
   small string that can be copied over SSH or any other channel.
 - No cost on the hot path beyond ~1 µs of ChaCha20-Poly1305 per datagram.
@@ -86,6 +90,10 @@ After the handshake every datagram is:
 
 - One active client at a time, as before. It becomes active on its first
   valid transport datagram, and times out as before after 3 s of silence.
+- Handshakes are checked before any rate limit applies (a forgery costs only
+  hashing), with a ceiling of 2000 checks a second. Handshakes that verify are
+  limited to 2 a second (bursts of 5) per source address, and one address holds
+  at most 2 of the 16 pending sessions, so a flood can't crowd out a real device.
 - Video, audio and everything else are sent only to the active client, only
   through its session.
 - Clipboard and file features exist only inside the session, so by construction

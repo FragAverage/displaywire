@@ -14,9 +14,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID, WAIT_OBJECT_0};
 use windows::Win32::Security::{
-    DuplicateTokenEx, SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TokenPrimary,
+    AdjustTokenPrivileges, DuplicateTokenEx, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_REMOVED,
+    SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TOKEN_PRIVILEGES, TokenPrimary,
     TokenSessionId,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -44,6 +45,29 @@ const SEC_MS: u32 = 1000;
 /// A child that exits sooner than this after starting is retried only after `RESTART_DELAY_MS`.
 const RESTART_DELAY_MS: u64 = 2000;
 const NO_SESSION: u32 = 0xFFFF_FFFF;
+/// Who the firewall lets in: this PC's own subnets, and Tailscale's address range.
+const FIREWALL_REMOTE: &str = "localsubnet,100.64.0.0/10";
+/// Privileges SYSTEM has that the server never needs, taken out of the child's token so a bug in
+/// it can't use them: loading drivers, debugging any process, reading or restoring any file, and so on.
+/// (It keeps what it uses: acting for the signed-in user, its own priority, owning its key folder.)
+const UNNEEDED_PRIVILEGES: [&str; 16] = [
+    "SeDebugPrivilege",
+    "SeLoadDriverPrivilege",
+    "SeBackupPrivilege",
+    "SeSystemEnvironmentPrivilege",
+    "SeManageVolumePrivilege",
+    "SeCreatePagefilePrivilege",
+    "SeCreatePermanentPrivilege",
+    "SeCreateTokenPrivilege",
+    "SeCreateSymbolicLinkPrivilege",
+    "SeLockMemoryPrivilege",
+    "SeProfileSingleProcessPrivilege",
+    "SeSystemProfilePrivilege",
+    "SeSystemtimePrivilege",
+    "SeTimeZonePrivilege",
+    "SeShutdownPrivilege",
+    "SeRelabelPrivilege",
+];
 
 static STATUS: AtomicIsize = AtomicIsize::new(0);
 static WAKE: AtomicIsize = AtomicIsize::new(0);
@@ -53,12 +77,27 @@ fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
+/// One argument quoted for a Windows command line (`CommandLineToArgvW` rules): backslashes are
+/// literal except before a quote, where they and the quote are escaped, including the closing one.
 fn quote(a: &std::ffi::OsStr) -> String {
-    format!("\"{}\"", a.to_string_lossy().replace('"', "\\\""))
+    let mut out = String::from('"');
+    let mut slashes = 0;
+    for c in a.to_string_lossy().chars() {
+        if c == '"' {
+            // Double the run of backslashes just written, then escape the quote.
+            out.extend(std::iter::repeat_n('\\', slashes + 1));
+        }
+        slashes = if c == '\\' { slashes + 1 } else { 0 };
+        out.push(c);
+    }
+    // A trailing run is doubled too, or it would escape the closing quote.
+    out.extend(std::iter::repeat_n('\\', slashes));
+    out.push('"');
+    out
 }
 
 fn sc(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("sc").args(args).output().map_err(|e| format!("sc.exe: {e}"))?;
+    let out = Command::new(super::system_tool("sc.exe")).args(args).output().map_err(|e| format!("sc.exe: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() { Ok(text) } else { Err(format!("sc {}: {text}", args.join(" "))) }
 }
@@ -75,6 +114,14 @@ fn log_path() -> std::path::PathBuf {
 /// Installs and starts the service. `args` are the server options to run it with.
 pub fn install(args: &[OsString]) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // The service runs this file as SYSTEM: only from the folder only administrators can write to.
+    let expected = super::setup::install_dir().join("displaywire-server.exe");
+    if !same_file(&exe, &expected) {
+        return Err(format!(
+            "the service only runs from {}; install with `displaywire-server --setup` (or double-click the exe)",
+            expected.display()
+        ));
+    }
     let mut bin = format!("{} --service", quote(exe.as_os_str()));
     for a in args {
         bin += &format!(" {}", quote(a));
@@ -88,13 +135,16 @@ pub fn install(args: &[OsString]) -> Result<(), String> {
         .map_err(|e| format!("{e}\n(run this from an administrator terminal)"))?;
     let _ = sc(&["description", NAME, "Streams this PC's screen to a DisplayWire client, including UAC prompts and the lock screen."]);
     let _ = sc(&["failure", NAME, "reset=", "86400", "actions=", "restart/5000"]);
-    // udp/9000 and friends: allow the program itself.
-    let _ = Command::new("netsh")
+    // udp/9000 and friends: allow the program itself, from the local network and Tailscale only
+    // (README: other networks need a rule of their own).
+    let netsh = super::system_tool("netsh.exe");
+    let _ = Command::new(&netsh)
         .args(["advfirewall", "firewall", "delete", "rule", "name=DisplayWire Server"])
         .output();
-    let _ = Command::new("netsh")
+    let _ = Command::new(&netsh)
         .args(["advfirewall", "firewall", "add", "rule", "name=DisplayWire Server", "dir=in", "action=allow", "protocol=UDP"])
         .arg(format!("program={}", exe.display()))
+        .arg(format!("remoteip={FIREWALL_REMOTE}"))
         .output();
     sc(&["start", NAME])?;
     println!("service {NAME} installed and started; it logs to {}", log_path().display());
@@ -105,7 +155,7 @@ pub fn uninstall() -> Result<(), String> {
     let _ = sc(&["stop", NAME]);
     std::thread::sleep(std::time::Duration::from_millis(1000));
     sc(&["delete", NAME]).map_err(|e| format!("{e}\n(run this from an administrator terminal)"))?;
-    let _ = Command::new("netsh")
+    let _ = Command::new(super::system_tool("netsh.exe"))
         .args(["advfirewall", "firewall", "delete", "rule", "name=DisplayWire Server"])
         .output();
     println!("service {NAME} removed");
@@ -199,6 +249,28 @@ fn target_session() -> Option<u32> {
     active.first().copied().or((console != NO_SESSION).then_some(console))
 }
 
+/// Whether `a` and `b` name the same file (case and `..` aside).
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
+        _ => false,
+    }
+}
+
+/// Removes `UNNEEDED_PRIVILEGES` from `token` for good. Each on its own: one SYSTEM doesn't hold
+/// would make a combined call report failure.
+fn remove_privileges(token: HANDLE) {
+    for name in UNNEEDED_PRIVILEGES {
+        let wname = wide(name);
+        let mut luid = LUID::default();
+        if unsafe { LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wname.as_ptr()), &mut luid) }.is_err() {
+            continue;
+        }
+        let tp = TOKEN_PRIVILEGES { PrivilegeCount: 1, Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_REMOVED }] };
+        let _ = unsafe { AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None) };
+    }
+}
+
 fn spawn(session: u32, args: &[OsString]) -> Result<Child, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // `--run`: this is the server itself, never the interactive installer.
@@ -219,6 +291,7 @@ fn spawn(session: u32, args: &[OsString]) -> Result<Child, String> {
     let result = (|| {
         unsafe { SetTokenInformation(token, TokenSessionId, (&raw const session).cast(), 4) }
             .map_err(|e| format!("SetTokenInformation: {e}"))?;
+        remove_privileges(token);
 
         // stdout/stderr → log file (the child has no console to show them on).
         let inheritable = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, bInheritHandle: true.into(), ..Default::default() };
@@ -308,5 +381,19 @@ fn supervise() {
     }
     if let Some(c) = child {
         kill(c);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote;
+
+    #[test]
+    fn quotes_like_command_line_to_argv() {
+        let q = |s: &str| quote(std::ffi::OsStr::new(s));
+        assert_eq!(q(r"C:\Program Files\x.exe"), r#""C:\Program Files\x.exe""#);
+        assert_eq!(q(r"C:\dir\"), r#""C:\dir\\""#);
+        assert_eq!(q(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(q(r#"a\"b"#), r#""a\\\"b""#);
     }
 }

@@ -11,6 +11,9 @@ const MS: u64 = 1_000_000;
 const LINGER_NS: u64 = 10_000 * MS;
 /// A receiver that hears nothing for this long is dropped.
 const IDLE_NS: u64 = 20_000 * MS;
+/// Transfers received at once. With the per-file limit this bounds the disk and memory one peer
+/// can tie up; further ones are refused until one finishes.
+pub const MAX_CONCURRENT_RECEIVES: usize = 4;
 
 /// Something to send to the other side.
 #[derive(Debug, PartialEq, Eq)]
@@ -75,6 +78,10 @@ impl Endpoint {
     }
 
     pub fn on_block(&mut self, now: u64, id: u32, index: u32, payload: &[u8]) -> Vec<Outgoing> {
+        let receiving = self.incoming.values().filter(|i| i.done_ns.is_none()).count();
+        if !self.incoming.contains_key(&id) && receiving >= MAX_CONCURRENT_RECEIVES {
+            return vec![Outgoing::Cancel { id, reason: reason::REFUSED }];
+        }
         let max = self.max_receive;
         let factory = self.factory.clone();
         let inc = self.incoming.entry(id).or_insert_with(|| Incoming { receiver: Receiver::new(max, factory), last_heard_ns: now, done_ns: None });
@@ -325,5 +332,19 @@ mod tests {
         let events = a.poll(3 * MS, &mut Vec::new());
         assert!(events.iter().any(|e| matches!(e, Event::SendFailed { .. })));
         assert!(a.is_idle());
+    }
+
+    #[test]
+    fn too_many_receives_at_once_are_refused() {
+        let store = Store::default();
+        let mut rx = endpoint(1 << 20, &store);
+        for id in 1..=MAX_CONCURRENT_RECEIVES as u32 {
+            assert!(rx.on_block(0, id, 1, &[0; 16]).is_empty(), "transfer {id} should be accepted");
+        }
+        let extra = MAX_CONCURRENT_RECEIVES as u32 + 1;
+        let out = rx.on_block(0, extra, 1, &[0; 16]);
+        assert!(matches!(out.as_slice(), [Outgoing::Cancel { id, reason: reason::REFUSED }] if *id == extra));
+        // Ones already under way carry on.
+        assert!(rx.on_block(0, 1, 2, &[0; 16]).is_empty());
     }
 }

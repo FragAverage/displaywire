@@ -8,7 +8,7 @@ use std::ffi::c_void;
 
 use moq_nvenc::sys::nvEncodeAPI::*;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
 use windows::core::{Interface, s, w};
 
 use super::Res;
@@ -73,7 +73,9 @@ macro_rules! call {
 impl NvEncoder {
     pub fn new(device: &ID3D11Device, width: u32, height: u32, fps: u32, bitrate: u32) -> Res<NvEncoder> {
         unsafe {
-            let lib = LoadLibraryW(w!("nvEncodeAPI64.dll")).map_err(|e| format!("nvEncodeAPI64.dll: {e} (NVIDIA driver installed?)"))?;
+            // From System32 only, where the driver puts it: never a planted copy elsewhere on the search path.
+            let lib = LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
+                .map_err(|e| format!("nvEncodeAPI64.dll: {e} (NVIDIA driver installed?)"))?;
             let create = GetProcAddress(lib, s!("NvEncodeAPICreateInstance")).ok_or("NvEncodeAPICreateInstance not found")?;
             let create: CreateInstance = std::mem::transmute(create);
 

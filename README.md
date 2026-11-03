@@ -16,7 +16,8 @@ were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and yo
 - **Mac:** macOS 12 or later, Apple Silicon or Intel.
 - Both on the same network, or on the same [Tailscale](https://tailscale.com) network (use the PC's Tailscale address in
   **Add PC…**). A wired connection on at least one side helps a lot. DisplayWire uses UDP port 9000 on the PC; the
-  installer opens it in the Windows firewall.
+  installer opens it in the Windows firewall for the local network and Tailscale only. To reach the PC any other
+  way (a port forward, another VPN), add a firewall rule for `displaywire-server.exe` yourself.
 
 ## Install
 

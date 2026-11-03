@@ -75,6 +75,15 @@ impl AnyEncoder {
     }
 }
 
+/// `name` (e.g. "sc.exe") in the real System32, never found through PATH or the current folder:
+/// the service and the installer run these as SYSTEM or an administrator.
+pub fn system_tool(name: &str) -> std::path::PathBuf {
+    let mut buf = [0u16; 260];
+    let n = unsafe { windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    let dir = if n > 0 && n < buf.len() { String::from_utf16_lossy(&buf[..n]) } else { r"C:\Windows\System32".into() };
+    std::path::Path::new(&dir).join(name)
+}
+
 /// The encoder `kind` (`--encoder`) asks for, at `w`×`h`.
 fn make_encoder(kind: &str, device: &ID3D11Device, w: u32, h: u32, fps: u32, bitrate: u32) -> Res<AnyEncoder> {
     Ok(match kind {

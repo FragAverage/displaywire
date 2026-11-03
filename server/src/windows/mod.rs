@@ -4,6 +4,7 @@
 mod capture;
 mod convert;
 mod encoder;
+pub mod gamepad;
 mod nvenc;
 pub mod input;
 pub mod loopback;

@@ -34,6 +34,8 @@ const SEC: u64 = 1_000_000_000;
 const CLIENT_TIMEOUT_NS: u64 = 3 * SEC;
 
 #[cfg(windows)]
+use windows::gamepad::Gamepads;
+#[cfg(windows)]
 use windows::input::Injector;
 
 /// Input is only injected on Windows.
@@ -48,6 +50,29 @@ impl Injector {
     fn reset(&mut self) {}
     fn tick(&mut self, _now_ns: u64) {}
     fn apply(&mut self, _input: &proto::stream::Input, _now_ns: u64) {}
+}
+
+/// Virtual gamepads are only made on Windows.
+#[cfg(not(windows))]
+struct Gamepads {
+    feedback: std::sync::mpsc::Receiver<Feedback>,
+}
+
+#[cfg(not(windows))]
+struct Feedback {
+    slot: u8,
+    large: u8,
+    small: u8,
+}
+
+#[cfg(not(windows))]
+impl Gamepads {
+    fn new() -> Gamepads {
+        Gamepads { feedback: std::sync::mpsc::channel().1 }
+    }
+    fn reset(&mut self) {}
+    fn tick(&mut self, _now_ns: u64) {}
+    fn apply(&mut self, _pads: &proto::stream::Pads, _now_ns: u64) {}
 }
 
 #[derive(Parser)]
@@ -663,6 +688,7 @@ fn control(
     let mut plain = [0u8; 2048];
     let mut out = [0u8; proto::MAX_DATAGRAM];
     let mut injector = Injector::new();
+    let mut gamepads = Gamepads::new();
     let mut active: Option<(Link, ReplayWindow)> = None;
     let mut pending: Vec<Pending> = Vec::new();
     // Checking a forged handshake is hashing only; this bounds what a flood of them costs.
@@ -677,6 +703,15 @@ fn control(
     loop {
         let now = now_ns();
         injector.tick(now);
+        gamepads.tick(now);
+        // What games asked of the pads goes back to the active client.
+        while let Ok(f) = gamepads.feedback.try_recv() {
+            if let Some((link, _)) = &active {
+                let mut plain = [0u8; 16];
+                let m = Msg::Rumble { slot: f.slot, large: f.large, small: f.small }.encode(&mut plain);
+                link.send(sock, &plain[..m], &mut out);
+            }
+        }
         if shared.link.lock().unwrap().is_none() {
             active = None;
         }
@@ -693,6 +728,7 @@ fn control(
                 *shared.link.lock().unwrap() = None;
                 active = None;
                 injector.reset();
+                gamepads.reset();
             }
         }
         let (n, from) = match sock.recv_from(&mut buf) {
@@ -779,6 +815,7 @@ fn control(
                     shared.last_seen_ns.store(now, Relaxed);
                     shared.keyframe.store(true, Relaxed);
                     injector.reset();
+                    gamepads.reset();
                     active = Some((link, p.window));
                     Some(len)
                 } else {
@@ -820,6 +857,7 @@ fn control(
                     }
                     Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),
                     Some(Msg::Input(input)) => injector.apply(&input, now_ns()),
+                    Some(Msg::Pads(pads)) => gamepads.apply(&pads, now_ns()),
                     Some(Msg::Mic(a, payload)) => {
                         shared.last_seen_ns.store(now_ns(), Relaxed);
                         if let Some(m) = &mut mic {
@@ -831,6 +869,7 @@ fn control(
                         *shared.link.lock().unwrap() = None;
                         active = None;
                         injector.reset();
+                        gamepads.reset();
                     }
                     _ => {}
                 }

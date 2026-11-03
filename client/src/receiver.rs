@@ -18,6 +18,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::app::UserEvent;
 use crate::audio;
 use crate::display::Layer;
+use crate::gamepad;
 use crate::input;
 use crate::link::Link;
 use crate::mic;
@@ -112,6 +113,7 @@ struct Receiver {
     audio: Option<audio::Player>,
     /// Open only while the microphone is on.
     mic: Option<mic::Capture>,
+    pads: gamepad::Poller,
     mic_seq: u32,
     /// Chunks sent and peak level since the last report, and when that was.
     mic_stats: (u32, i16, u64),
@@ -144,6 +146,7 @@ impl Receiver {
     ) -> Result<Receiver, String> {
         link.set_read_timeout(Duration::from_millis(2)).map_err(|e| e.to_string())?;
         let proxy_for_audio = proxy.clone();
+        let pads = gamepad::Poller::new(link.clone(), input.focused.clone());
         Ok(Receiver {
             server,
             link,
@@ -162,6 +165,7 @@ impl Receiver {
             telemetry,
             sim_loss: std::env::var("DISPLAYWIRE_SIM_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map(SimLoss::new),
             mic: None,
+            pads,
             mic_seq: 0,
             mic_stats: (0, 0, 0),
             audio: audio::Player::new()
@@ -308,6 +312,9 @@ impl Receiver {
             }
             self.pump_mic(alive);
             self.input.heartbeat();
+            if alive {
+                self.pads.poll();
+            }
             if self.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
                 self.need_keyframe = true;
             }
@@ -385,6 +392,8 @@ impl Receiver {
                 }
                 Some(m @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => self.telemetry.transfers.handle(&m),
                 Some(Msg::Pong { client_ns, server_ns, .. }) => self.clock.update(rx, client_ns, server_ns),
+                Some(Msg::Rumble { slot, large, small }) => self.pads.rumble(slot, large, small),
+                Some(Msg::Light { slot, r, g, b }) => self.pads.light(slot, r, g, b),
                 _ => {}
             }
         }

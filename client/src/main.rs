@@ -12,6 +12,8 @@ mod discovery;
 #[cfg(target_os = "macos")]
 mod display;
 #[cfg(target_os = "macos")]
+mod gamepad;
+#[cfg(target_os = "macos")]
 mod input;
 #[cfg(target_os = "macos")]
 mod keys;
@@ -649,7 +651,9 @@ mod app {
                         el.exit();
                     }
                 }
+                WindowEvent::Focused(true) => input.focused.store(true, Relaxed),
                 WindowEvent::Focused(false) => {
+                    input.focused.store(false, Relaxed);
                     input.release_all();
                     if self.locked {
                         self.set_locked(false);

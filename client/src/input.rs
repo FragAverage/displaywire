@@ -2,6 +2,7 @@
 //! button state, sent on each change and re-sent every `HEARTBEAT_NS`, so a
 //! lost packet can't leave a key held down on the server.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use proto::stream::{BUTTON_BACK, BUTTON_FORWARD, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Input, Msg};
@@ -19,6 +20,8 @@ pub struct Sender {
     link: Arc<Link>,
     state: Mutex<State>,
     iso_keyboard: bool,
+    /// Whether the stream window has focus (gamepads read it too).
+    pub focused: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -31,7 +34,7 @@ struct State {
 
 impl Sender {
     pub fn new(link: Arc<Link>) -> Sender {
-        Sender { link, state: Mutex::default(), iso_keyboard: iso_keyboard() }
+        Sender { link, state: Mutex::default(), iso_keyboard: iso_keyboard(), focused: Arc::new(AtomicBool::new(true)) }
     }
 
     /// Returns false for keys Windows has no scancode for.

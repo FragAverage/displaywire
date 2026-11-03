@@ -37,6 +37,9 @@ const SETTINGS: u8 = 10;
 const XFER: u8 = 11;
 const XFER_ACK: u8 = 12;
 const XFER_CANCEL: u8 = 13;
+const PADS: u8 = 14;
+const RUMBLE: u8 = 15;
+const LIGHT: u8 = 16;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -48,6 +51,76 @@ pub const BUTTON_RIGHT: u8 = 2;
 pub const BUTTON_MIDDLE: u8 = 4;
 pub const BUTTON_BACK: u8 = 8;
 pub const BUTTON_FORWARD: u8 = 16;
+
+/// Gamepads one client can have connected at once (XInput's limit).
+pub const MAX_PADS: usize = 4;
+
+/// `Pad::buttons`, in XInput's layout, plus the PlayStation touchpad click in a bit XInput leaves free.
+pub mod pad {
+    pub const DPAD_UP: u16 = 0x0001;
+    pub const DPAD_DOWN: u16 = 0x0002;
+    pub const DPAD_LEFT: u16 = 0x0004;
+    pub const DPAD_RIGHT: u16 = 0x0008;
+    /// Menu / Options.
+    pub const START: u16 = 0x0010;
+    /// View / Share.
+    pub const BACK: u16 = 0x0020;
+    pub const LEFT_THUMB: u16 = 0x0040;
+    pub const RIGHT_THUMB: u16 = 0x0080;
+    pub const LEFT_SHOULDER: u16 = 0x0100;
+    pub const RIGHT_SHOULDER: u16 = 0x0200;
+    /// Xbox / PS button.
+    pub const GUIDE: u16 = 0x0400;
+    pub const TOUCHPAD: u16 = 0x0800;
+    /// Cross on PlayStation pads; the face buttons go by position.
+    pub const A: u16 = 0x1000;
+    pub const B: u16 = 0x2000;
+    pub const X: u16 = 0x4000;
+    pub const Y: u16 = 0x8000;
+}
+
+/// What a pad should look like on the PC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PadKind {
+    #[default]
+    Xbox,
+    /// A DualShock 4 (a DualSense on the client shows up as one).
+    PlayStation,
+}
+
+/// One gamepad's complete state. Sticks are -32768..=32767 with up positive, as in XInput.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Pad {
+    /// 0..MAX_PADS: which player; stable while the pad stays connected.
+    pub slot: u8,
+    pub kind: PadKind,
+    pub buttons: u16,
+    pub left_trigger: u8,
+    pub right_trigger: u8,
+    pub lx: i16,
+    pub ly: i16,
+    pub rx: i16,
+    pub ry: i16,
+    /// Gyro (deg/s × 16) and accelerometer (g × 8192), x/y/z, when the pad has them.
+    pub motion: Option<([i16; 3], [i16; 3])>,
+    /// Touchpad fingers, 0..=65535 across and down the pad.
+    pub touches: [Option<(u16, u16)>; 2],
+}
+
+/// Client → server: every connected pad. Like `Input` it is the whole state, sent on every change and
+/// regularly in between, so a lost datagram can't leave a button held; a pad missing from it is unplugged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Pads {
+    pub seq: u32,
+    pub count: u8,
+    pub pads: [Pad; MAX_PADS],
+}
+
+impl Pads {
+    pub fn iter(&self) -> impl Iterator<Item = &Pad> {
+        self.pads[..(self.count as usize).min(MAX_PADS)].iter()
+    }
+}
 
 /// Client → server keyboard and mouse. Carries the complete key and button
 /// state, so a lost datagram can't leave anything stuck down; motion and
@@ -189,6 +262,12 @@ pub enum Msg<'a> {
     XferAck { id: u32, next: u32, sack: u64 },
     /// Either way: stop sending transfer `id`.
     XferCancel { id: u32, reason: u8 },
+    /// Client → server: the client's gamepads.
+    Pads(Pads),
+    /// Server → client: what a game asked pad `slot`'s motors to do (0 = off).
+    Rumble { slot: u8, large: u8, small: u8 },
+    /// Server → client: the light bar colour a game set on PlayStation pad `slot`.
+    Light { slot: u8, r: u8, g: u8, b: u8 },
 }
 
 impl<'a> Msg<'a> {
@@ -239,6 +318,46 @@ impl<'a> Msg<'a> {
                     w.u16(v as u16);
                 }
                 w.u16(i.repeat);
+            }
+            Msg::Pads(p) => {
+                w.u8(PADS);
+                w.u32(p.seq);
+                let pads: Vec<&Pad> = p.iter().collect();
+                w.u8(pads.len() as u8);
+                for pad in pads {
+                    let flags = pad.motion.is_some() as u8 | (pad.touches[0].is_some() as u8) << 1 | (pad.touches[1].is_some() as u8) << 2;
+                    w.u8(pad.slot);
+                    w.u8(pad.kind as u8);
+                    w.u16(pad.buttons);
+                    w.u8(pad.left_trigger);
+                    w.u8(pad.right_trigger);
+                    for v in [pad.lx, pad.ly, pad.rx, pad.ry] {
+                        w.u16(v as u16);
+                    }
+                    w.u8(flags);
+                    let (gyro, accel) = pad.motion.unwrap_or_default();
+                    for v in gyro.into_iter().chain(accel) {
+                        w.u16(v as u16);
+                    }
+                    for t in pad.touches {
+                        let (x, y) = t.unwrap_or_default();
+                        w.u16(x);
+                        w.u16(y);
+                    }
+                }
+            }
+            Msg::Rumble { slot, large, small } => {
+                w.u8(RUMBLE);
+                w.u8(slot);
+                w.u8(large);
+                w.u8(small);
+            }
+            Msg::Light { slot, r, g, b } => {
+                w.u8(LIGHT);
+                w.u8(slot);
+                w.u8(r);
+                w.u8(g);
+                w.u8(b);
             }
             Msg::Xfer { id, index, payload } => {
                 w.u8(XFER);
@@ -317,6 +436,40 @@ impl<'a> Msg<'a> {
                     repeat: r.u16()?,
                 })
             }
+            PADS => {
+                let mut p = Pads { seq: r.u32()?, count: r.u8()?, ..Default::default() };
+                if p.count as usize > MAX_PADS {
+                    return None;
+                }
+                for pad in &mut p.pads[..p.count as usize] {
+                    let slot = r.u8()?;
+                    let kind = match r.u8()? {
+                        0 => PadKind::Xbox,
+                        1 => PadKind::PlayStation,
+                        _ => return None,
+                    };
+                    if slot as usize >= MAX_PADS {
+                        return None;
+                    }
+                    let (buttons, left_trigger, right_trigger) = (r.u16()?, r.u8()?, r.u8()?);
+                    let (lx, ly, rx, ry) = (r.u16()? as i16, r.u16()? as i16, r.u16()? as i16, r.u16()? as i16);
+                    let flags = r.u8()?;
+                    let mut m = [0i16; 6];
+                    for v in &mut m {
+                        *v = r.u16()? as i16;
+                    }
+                    let mut touches = [None; 2];
+                    for (i, t) in touches.iter_mut().enumerate() {
+                        let (x, y) = (r.u16()?, r.u16()?);
+                        *t = (flags & (2 << i) != 0).then_some((x, y));
+                    }
+                    let motion = (flags & 1 != 0).then_some(([m[0], m[1], m[2]], [m[3], m[4], m[5]]));
+                    *pad = Pad { slot, kind, buttons, left_trigger, right_trigger, lx, ly, rx, ry, motion, touches };
+                }
+                Msg::Pads(p)
+            }
+            RUMBLE => Msg::Rumble { slot: r.u8()?, large: r.u8()?, small: r.u8()? },
+            LIGHT => Msg::Light { slot: r.u8()?, r: r.u8()?, g: r.u8()?, b: r.u8()? },
             XFER => Msg::Xfer { id: r.u32()?, index: r.u32()?, payload: r.rest() },
             XFER_ACK => Msg::XferAck { id: r.u32()?, next: r.u32()?, sack: r.u64()? },
             XFER_CANCEL => Msg::XferCancel { id: r.u32()?, reason: r.u8()? },
@@ -431,6 +584,31 @@ mod tests {
         let mut buf = [0u8; 64];
         let v = Video { frame: 0, frag: 3, frags: 3, parity: 0, last_len: 0, keyframe: false, capture_ns: 0 };
         let n = Msg::Video(v, &[]).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), None);
+    }
+
+    #[test]
+    fn pads_round_trip() {
+        let mut p = Pads { seq: 7, count: 2, ..Default::default() };
+        p.pads[0] = Pad { slot: 0, buttons: pad::A | pad::DPAD_UP, left_trigger: 255, lx: -32768, ry: 32767, ..Default::default() };
+        p.pads[1] = Pad {
+            slot: 3,
+            kind: PadKind::PlayStation,
+            buttons: pad::TOUCHPAD | pad::GUIDE,
+            motion: Some(([1, -2, 3], [-8192, 0, 8192])),
+            touches: [None, Some((65535, 12))],
+            ..Default::default()
+        };
+        let mut buf = [0u8; crate::MAX_PLAIN];
+        let n = Msg::Pads(p).encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), Some(Msg::Pads(p)));
+        for m in [Msg::Rumble { slot: 1, large: 200, small: 3 }, Msg::Light { slot: 2, r: 1, g: 2, b: 3 }] {
+            let n = m.encode(&mut buf);
+            assert_eq!(Msg::decode(&buf[..n]), Some(m));
+        }
+        // A slot out of range is rejected.
+        p.pads[1].slot = MAX_PADS as u8;
+        let n = Msg::Pads(p).encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), None);
     }
 }

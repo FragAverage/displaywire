@@ -12,6 +12,7 @@ use vigem_client::{Client, DS4Report, DualShock4Wired, TargetId, XButtons, XGame
 const SEC: u64 = 1_000_000_000;
 /// Pads are unplugged if the client goes quiet this long (it sends their state every 50 ms).
 const IDLE_UNPLUG_NS: u64 = SEC;
+const ERROR_NO_MORE_ITEMS: u32 = 259;
 
 enum Target {
     Xbox(Xbox360Wired<Arc<Client>>),
@@ -86,9 +87,15 @@ impl Gamepads {
         let mut present = [false; MAX_PADS];
         for p in pads.iter() {
             present[p.slot as usize] = true;
-            if let Err(e) = self.update(p) {
-                println!("gamepads: slot {}: {e}", p.slot);
-                self.targets[p.slot as usize] = None;
+            match self.update(p) {
+                Ok(()) => {}
+                // ViGEmBus had no read from Windows waiting for this report (nothing has the pad open
+                // yet, or not at this instant): harmless, the next report goes through.
+                Err(vigem_client::Error::WinError(ERROR_NO_MORE_ITEMS)) => {}
+                Err(e) => {
+                    println!("gamepads: slot {}: {e}", p.slot);
+                    self.targets[p.slot as usize] = None;
+                }
             }
         }
         for (slot, target) in self.targets.iter_mut().enumerate() {

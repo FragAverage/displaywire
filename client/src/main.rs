@@ -107,7 +107,10 @@ mod app {
 
     /// Sent from the receiver thread to the UI thread.
     pub enum UserEvent {
-        VideoSize(u32, u32),
+        /// Stream `0` (the main window) or another's video size.
+        VideoSize(u8, u32, u32),
+        /// The connection came back as a new session: extra streams have to be asked for again.
+        Reconnected,
         /// A new graph sample is ready (only sent while the graph is showing).
         Graph,
         /// What the banner should say; `None` hides it.
@@ -124,7 +127,7 @@ mod app {
         NoticeExpired(String),
         /// The PC's pointer: a new image, and where it is (0..=65535 across the video) and which image it shows.
         CursorImage(Arc<crate::cursor::Image>),
-        Cursor { visible: bool, x: u16, y: u16, shape: u32 },
+        Cursor { stream: u8, visible: bool, x: u16, y: u16, shape: u32 },
         /// What a game asked of a gamepad (GameController lives on this thread).
         Rumble { slot: u8, large: u8, small: u8 },
         /// The PC's monitors, and which is streaming.
@@ -164,8 +167,11 @@ mod app {
         /// last moved to and when.
         cursor_images: HashMap<u32, Arc<crate::cursor::Image>>,
         cursor_made: Option<(u32, u32, CustomCursor)>,
-        pc_pointer: Option<(bool, f64, f64, u32)>,
-        local_pointer: Option<((f64, f64), Instant)>,
+        pc_pointer: Option<(u8, bool, f64, f64, u32)>,
+        local_pointer: Option<(u8, (f64, f64), Instant)>,
+        /// Other monitors in windows of their own, and how the receiver hears of them.
+        extra: Vec<ExtraWindow>,
+        stream_windows: std::sync::mpsc::Sender<(u8, Option<display::Layer>)>,
         /// Gamepads, read here on the main thread: GameController isn't safe to use from others (the
         /// controller list came back empty at times, which unplugged the pad on the PC).
         pads: crate::gamepad::Poller,
@@ -175,7 +181,24 @@ mod app {
         monitor_restored: bool,
     }
 
+    /// A window showing another of the PC's monitors (stream 1 and up).
+    struct ExtraWindow {
+        stream: u8,
+        monitor: u8,
+        window: Window,
+        video: Option<(u32, u32)>,
+        sized: bool,
+    }
+
     impl Session {
+        /// The window and video size of stream `stream`.
+        fn stream_window(&self, stream: u8) -> Option<(&Window, Option<(u32, u32)>)> {
+            if stream == 0 {
+                return Some((&self.window, self.video));
+            }
+            self.extra.iter().find(|e| e.stream == stream).map(|e| (&e.window, e.video))
+        }
+
         /// Shows the connection status if there is one, else the transfer notice.
         fn refresh_banner(&self) {
             if let Some(p) = &self.placeholder {
@@ -502,10 +525,11 @@ mod app {
             let name = servers::find(server).map(|s| s.name).filter(|n| !n.is_empty()).unwrap_or_else(|| server.to_string());
             let placeholder = overlay::Placeholder::attach(&window, &name);
             placeholder.set_detail("Connecting…");
+            let (stream_windows, windows_rx) = std::sync::mpsc::channel();
             let (proxy, stop2, input2, telemetry2, link2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone(), link.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
-                .spawn(move || receiver::run(addr, link2, input2, layer, proxy, telemetry2, stop2))
+                .spawn(move || receiver::run(addr, link2, input2, receiver::Screens { main: layer, others: windows_rx }, proxy, telemetry2, stop2))
                 .map_err(|e| e.to_string())?;
             Ok(Session {
                 address: server.to_string(),
@@ -526,6 +550,8 @@ mod app {
                 cursor_made: None,
                 pc_pointer: None,
                 local_pointer: None,
+                extra: Vec::new(),
+                stream_windows,
                 pads,
                 link,
                 monitors: None,
@@ -543,7 +569,7 @@ mod app {
             }
         }
 
-        fn on_menu(&mut self, _el: &ActiveEventLoop, action: menu::Action) {
+        fn on_menu(&mut self, el: &ActiveEventLoop, action: menu::Action) {
             match action {
                 menu::Action::Connect | menu::Action::Disconnect => {
                     // Back to the list of PCs.
@@ -557,12 +583,13 @@ mod app {
                 menu::Action::Microphone => self.toggle_mic(),
                 menu::Action::Monitor(index) => {
                     if let Some(s) = &self.session {
-                        send_msg(&s.link, proto::stream::Msg::ChooseMonitor { index });
+                        send_msg(&s.link, proto::stream::Msg::ShowMonitor { stream: 0, monitor: index });
                         if let Some(mon) = s.monitors.as_ref().and_then(|m| m.iter().nth(index as usize)) {
                             remember_monitor(&s.address, mon.name());
                         }
                     }
                 }
+                menu::Action::OpenMonitor(monitor) => self.open_monitor(el, monitor),
                 menu::Action::Mute => {
                     self.change_prefs(|p| p.muted = !p.muted);
                     let muted = self.session.as_ref().is_some_and(|s| s.telemetry.prefs.lock().unwrap().muted);
@@ -684,43 +711,78 @@ mod app {
 
         /// Window position (physical pixels) → fraction of the video, which
         /// is letterboxed to keep its aspect ratio.
-        fn to_video(&self, pos: PhysicalPosition<f64>) -> Option<(f64, f64)> {
-            let s = self.session.as_ref()?;
-            let (vw, vh) = s.video?;
-            let (scale, x0, y0) = video_fit(s)?;
+        fn to_video(&self, stream: u8, pos: PhysicalPosition<f64>) -> Option<(f64, f64)> {
+            let (window, video) = self.session.as_ref()?.stream_window(stream)?;
+            let (vw, vh) = video?;
+            let (scale, x0, y0) = video_fit(window, video)?;
             Some(((pos.x - x0) / (vw as f64 * scale), (pos.y - y0) / (vh as f64 * scale)))
+        }
+
+        /// Shows monitor `monitor` in a new window (a stream of its own).
+        fn open_monitor(&mut self, el: &ActiveEventLoop, monitor: u8) {
+            let Some(s) = &mut self.session else { return };
+            let Some(stream) = (1..proto::stream::MAX_STREAMS as u8).find(|id| !s.extra.iter().any(|e| e.stream == *id)) else {
+                return dialog::show_message("Too many windows", "Close one of the other monitor windows first.");
+            };
+            let name = s.monitors.as_ref().and_then(|m| m.iter().nth(monitor as usize)).map_or(String::new(), |m| m.name().to_string());
+            let attrs = Window::default_attributes()
+                .with_title(format!("DisplayWire: {} · {name}", s.address))
+                .with_inner_size(LogicalSize::new(1280.0, 720.0));
+            let window = match el.create_window(attrs) {
+                Ok(w) => w,
+                Err(e) => return eprintln!("monitor window: {e}"),
+            };
+            let layer = display::Layer::attach(&window);
+            let _ = s.stream_windows.send((stream, Some(layer)));
+            send_msg(&s.link, proto::stream::Msg::ShowMonitor { stream, monitor });
+            s.extra.push(ExtraWindow { stream, monitor, window, video: None, sized: false });
+            show_pc_pointer(s, el, self.locked);
+        }
+
+        fn close_monitor(&mut self, stream: u8) {
+            let Some(s) = &mut self.session else { return };
+            s.extra.retain(|e| e.stream != stream);
+            let _ = s.stream_windows.send((stream, None));
+            send_msg(&s.link, proto::stream::Msg::CloseStream { stream });
         }
     }
 
     /// Physical pixels per video pixel in the window (the video is letterboxed to fit), and the
     /// video's top-left corner.
-    fn video_fit(s: &Session) -> Option<(f64, f64, f64)> {
-        let (vw, vh) = s.video?;
-        let size = s.window.inner_size();
+    fn video_fit(window: &Window, video: Option<(u32, u32)>) -> Option<(f64, f64, f64)> {
+        let (vw, vh) = video?;
+        let size = window.inner_size();
         let scale = (size.width as f64 / vw as f64).min(size.height as f64 / vh as f64);
         Some((scale, (size.width as f64 - vw as f64 * scale) / 2.0, (size.height as f64 - vh as f64 * scale) / 2.0))
     }
 
     /// Fraction of the video → window position (physical pixels).
-    fn from_video(s: &Session, fx: f64, fy: f64) -> Option<PhysicalPosition<f64>> {
-        let (vw, vh) = s.video?;
-        let (scale, x0, y0) = video_fit(s)?;
+    fn from_video(window: &Window, video: Option<(u32, u32)>, fx: f64, fy: f64) -> Option<PhysicalPosition<f64>> {
+        let (vw, vh) = video?;
+        let (scale, x0, y0) = video_fit(window, video)?;
         Some(PhysicalPosition::new(x0 + fx * vw as f64 * scale, y0 + fy * vh as f64 * scale))
     }
 
     /// Shows the PC's pointer as this window's cursor, at the size the PC shows it in the video.
     /// While the pointer is captured (games) the cursor stays hidden.
     fn show_pc_pointer(s: &mut Session, el: &ActiveEventLoop, locked: bool) {
-        let Some((visible, _, _, shape)) = s.pc_pointer else { return };
+        let Some((_, visible, _, _, shape)) = s.pc_pointer else { return };
         if locked {
             return;
         }
         s.window.set_cursor_visible(visible);
-        let (Some(image), Some((scale, _, _))) = (s.cursor_images.get(&shape), video_fit(s)) else { return };
+        for e in &s.extra {
+            e.window.set_cursor_visible(visible);
+        }
+        let (Some(image), Some((scale, _, _))) = (s.cursor_images.get(&shape), video_fit(&s.window, s.video)) else { return };
         // winit makes the cursor one point per pixel, so scale to points.
         let factor = scale / s.window.scale_factor();
         let key = (factor * 100.0).round() as u32;
-        if s.cursor_made.as_ref().is_some_and(|m| (m.0, m.1) == (shape, key)) {
+        if let Some(m) = s.cursor_made.as_ref().filter(|m| (m.0, m.1) == (shape, key)) {
+            // A window opened since gets it too.
+            for e in &s.extra {
+                e.window.set_cursor(m.2.clone());
+            }
             return;
         }
         let (rgba, w, h, hx, hy) = crate::cursor::scaled(image, factor);
@@ -728,6 +790,9 @@ mod app {
             Ok(source) => {
                 let cursor = el.create_custom_cursor(source);
                 s.window.set_cursor(cursor.clone());
+                for e in &s.extra {
+                    e.window.set_cursor(cursor.clone());
+                }
                 s.cursor_made = Some((shape, key, cursor));
             }
             Err(e) => eprintln!("cursor: {e}"),
@@ -775,9 +840,19 @@ mod app {
             }
         }
 
-        fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
             let Some(input) = self.session.as_ref().map(|s| s.input.clone()) else { return };
+            // Which stream's window: 0 is the main one.
+            let stream = match &self.session {
+                Some(s) if s.window.id() == id => 0,
+                Some(s) => match s.extra.iter().find(|e| e.window.id() == id) {
+                    Some(e) => e.stream,
+                    None => return,
+                },
+                None => return,
+            };
             match event {
+                WindowEvent::CloseRequested if stream != 0 => self.close_monitor(stream),
                 WindowEvent::CloseRequested => {
                     // Back to the list of PCs (⌘Q quits); with a server given on the command line, close means done.
                     if self.interactive {
@@ -850,10 +925,10 @@ mod app {
                     MouseScrollDelta::PixelDelta(p) => input.wheel_pixels(-p.x, p.y),
                 },
                 WindowEvent::CursorMoved { position, .. } if !self.locked => {
-                    if let Some((x, y)) = self.to_video(position) {
-                        input.absolute(x, y);
+                    if let Some((x, y)) = self.to_video(stream, position) {
+                        input.absolute(stream, x, y);
                         if let Some(s) = &mut self.session {
-                            s.local_pointer = Some(((x, y), Instant::now()));
+                            s.local_pointer = Some((stream, (x, y), Instant::now()));
                         }
                     }
                 }
@@ -929,7 +1004,7 @@ mod app {
                             && let Some(i) = m.iter().position(|mon| mon.name() == name)
                             && i != m.streaming as usize
                         {
-                            send_msg(&s.link, proto::stream::Msg::ChooseMonitor { index: i as u8 });
+                            send_msg(&s.link, proto::stream::Msg::ShowMonitor { stream: 0, monitor: i as u8 });
                         }
                     }
                     s.monitors = Some(*m);
@@ -943,23 +1018,25 @@ mod app {
                     s.cursor_images.insert(image.id, image);
                     show_pc_pointer(s, el, self.locked);
                 }
-                UserEvent::Cursor { visible, x, y, shape } => {
+                UserEvent::Cursor { stream, visible, x, y, shape } => {
                     let (fx, fy) = (x as f64 / 65535.0, y as f64 / 65535.0);
-                    s.pc_pointer = Some((visible, fx, fy, shape));
+                    s.pc_pointer = Some((stream, visible, fx, fy, shape));
                     show_pc_pointer(s, el, self.locked);
                     // The PC moved its pointer itself (a dialog centring it, a game): follow, unless this
                     // Mac's pointer moved lately, which the PC is just catching up with.
                     if !self.locked
                         && s.input.focused.load(Relaxed)
-                        && let Some(((lx, ly), at)) = s.local_pointer
+                        && let Some((on, (lx, ly), at)) = s.local_pointer
+                        && on == stream
                         && at.elapsed() > Duration::from_millis(250)
                         && (0.0..=1.0).contains(&lx)
                         && (0.0..=1.0).contains(&ly)
                         && ((fx - lx).abs() > 0.004 || (fy - ly).abs() > 0.004)
-                        && let Some(pos) = from_video(s, fx, fy)
+                        && let Some((window, video)) = s.stream_window(stream)
+                        && let Some(pos) = from_video(window, video, fx, fy)
                     {
-                        let _ = s.window.set_cursor_position(pos);
-                        s.local_pointer = Some(((fx, fy), Instant::now()));
+                        let _ = window.set_cursor_position(pos);
+                        s.local_pointer = Some((stream, (fx, fy), Instant::now()));
                     }
                 }
                 UserEvent::NoticeExpired(text) => {
@@ -970,7 +1047,21 @@ mod app {
                 }
                 // One video pixel per screen pixel on first frame; the user can resize after. A later
                 // change of size (the PC's resolution, or a game's) keeps the window and fits the picture.
-                UserEvent::VideoSize(w, h) => {
+                UserEvent::VideoSize(stream, w, h) if stream != 0 => {
+                    if let Some(e) = s.extra.iter_mut().find(|e| e.stream == stream) {
+                        if !e.sized {
+                            let _ = e.window.request_inner_size(PhysicalSize::new(w, h));
+                            e.sized = true;
+                        }
+                        e.video = Some((w, h));
+                    }
+                }
+                UserEvent::Reconnected => {
+                    for e in &s.extra {
+                        send_msg(&s.link, proto::stream::Msg::ShowMonitor { stream: e.stream, monitor: e.monitor });
+                    }
+                }
+                UserEvent::VideoSize(_, w, h) => {
                     if !s.sized {
                         let _ = s.window.request_inner_size(PhysicalSize::new(w, h));
                         s.sized = true;

@@ -62,9 +62,13 @@ impl Sender {
     }
 
     /// Pointer position as a fraction (0..=1) of the streamed screen.
-    pub fn absolute(&self, x: f64, y: f64) {
+    /// The pointer at (`x`, `y`), fractions of stream `stream`'s video.
+    pub fn absolute(&self, stream: u8, x: f64, y: f64) {
         let norm = |v: f64| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
-        self.update(|m| m.absolute = Some((norm(x), norm(y))));
+        self.update(|m| {
+            m.stream = stream;
+            m.absolute = Some((norm(x), norm(y)));
+        });
     }
 
     /// Relative motion in mouse counts.

@@ -199,6 +199,8 @@ pub struct ScreenSource {
     pointer_dirty: bool,
     last_encode_ns: u64,
     interval_ns: u64,
+    /// Which stream this is (input finds its monitor by it).
+    stream: u8,
     /// Whether the pointer is drawn into the video (the client draws it otherwise).
     pointer_in_video: bool,
     /// Encode the current image again even if nothing changed.
@@ -210,11 +212,12 @@ pub struct ScreenSource {
 }
 
 impl ScreenSource {
-    pub fn open(cli: &Cli) -> Result<ScreenSource, String> {
-        Self::try_open(cli).map_err(|e| format!("screen capture: {e}"))
+    /// Stream `stream` of monitor `monitor` (its place in `monitors::list`), or the primary one.
+    pub fn open(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<ScreenSource, String> {
+        Self::try_open(cli, stream, monitor).map_err(|e| format!("screen capture: {e}"))
     }
 
-    fn try_open(cli: &Cli) -> Res<ScreenSource> {
+    fn try_open(cli: &Cli, stream: u8, monitor: Option<u8>) -> Res<ScreenSource> {
         unsafe {
             // Full-resolution capture on scaled displays.
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -224,7 +227,9 @@ impl ScreenSource {
             let mut task = 0;
             let _ = AvSetMmThreadCharacteristicsW(w!("Games"), &mut task);
         }
-        let capture = Capture::new()?;
+        let device = monitor.and_then(|m| capture::outputs().ok()?.into_iter().nth(m as usize)).map(|o| o.device);
+        let capture = Capture::new(device.as_deref())?;
+        capture::set_stream(stream, Some(capture.monitor.clone()));
         // NV12 needs even dimensions.
         let (w, h) = (capture.width & !1, capture.height & !1);
         let converter =
@@ -243,6 +248,7 @@ impl ScreenSource {
             pointer_dirty: false,
             last_encode_ns: 0,
             interval_ns: 1_000_000_000 / cli.fps.max(1) as u64,
+            stream,
             pointer_in_video: true,
             repaint: false,
             encoder_kind: cli.encoder.clone(),
@@ -311,6 +317,14 @@ impl ScreenSource {
     }
 }
 
+impl Drop for ScreenSource {
+    fn drop(&mut self) {
+        if self.stream != 0 {
+            capture::set_stream(self.stream, None);
+        }
+    }
+}
+
 impl Source for ScreenSource {
     fn set_bitrate(&mut self, bps: u32) {
         self.bitrate = bps;
@@ -337,9 +351,9 @@ impl Source for ScreenSource {
         if o.device == self.capture.monitor {
             return Ok(());
         }
-        capture::choose(Some(o.device.clone()));
         // A new capture (perhaps on another adapter), then the rest at its size.
-        self.capture = Capture::new().map_err(|e| format!("capture {}: {e}", o.device))?;
+        self.capture = Capture::new(Some(&o.device)).map_err(|e| format!("capture {}: {e}", o.device))?;
+        capture::set_stream(self.stream, Some(o.device.clone()));
         self.rebuild().map_err(|e| e.to_string())
     }
 

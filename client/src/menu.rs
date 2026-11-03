@@ -26,8 +26,9 @@ pub enum Action {
     WifiSetup,
     Shortcuts,
     CheckUpdates,
-    /// Stream the PC's monitor at this place in its list.
+    /// Stream the PC's monitor at this place in its list, in the main window or a new one.
     Monitor(u8),
+    OpenMonitor(u8),
 }
 
 static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
@@ -107,6 +108,13 @@ define_class!(
             send(Action::Shortcuts);
         }
 
+        #[unsafe(method(openMonitor:))]
+        fn open_monitor(&self, sender: Option<&AnyObject>) {
+            if let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) {
+                send(Action::OpenMonitor(item.tag() as u8));
+            }
+        }
+
         #[unsafe(method(chooseMonitor:))]
         fn choose_monitor(&self, sender: Option<&AnyObject>) {
             if let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) {
@@ -162,6 +170,18 @@ pub fn set_monitors(mtm: MainThreadMarker, monitors: Option<&proto::stream::Moni
             it.setTag(i as isize);
             it.setState(if i == list.streaming as usize { NSControlStateValueOn } else { NSControlStateValueOff });
             menu.addItem(&it);
+        }
+        if list.count > 1 {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let header = item(mtm, "Open in New Window", None, "", NSEventModifierFlags::empty(), None);
+            header.setEnabled(false);
+            menu.addItem(&header);
+            for (i, mon) in list.iter().enumerate().filter(|&(i, _)| i != list.streaming as usize) {
+                let it = item(mtm, mon.name(), Some(sel!(openMonitor:)), "", NSEventModifierFlags::empty(), Some(target));
+                it.setTag(i as isize);
+                it.setIndentationLevel(1);
+                menu.addItem(&it);
+            }
         }
     });
 }

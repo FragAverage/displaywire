@@ -144,7 +144,7 @@ mod tests {
     use super::*;
 
     fn report(delay_ms: i32, lost: u16) -> Feedback {
-        Feedback { received: 1000 - lost, expected: 1000, frames_lost: 0, delay_us: delay_ms * 1000 }
+        Feedback { stream: 0, received: 1000 - lost, expected: 1000, frames_lost: 0, delay_us: delay_ms * 1000 }
     }
 
     /// Feeds `n` reports 50 ms apart from `*t`.

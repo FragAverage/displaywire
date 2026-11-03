@@ -37,16 +37,16 @@ pub struct Injector {
     held: Input,
     last_seq: Option<u32>,
     last_input_ns: u64,
-    /// Streamed monitor in virtual-desktop pixels, as of capture's `SCREEN_GENERATION` `generation`.
-    screen: RECT,
+    /// Each stream's monitor in virtual-desktop pixels, as of capture's `SCREEN_GENERATION` `generation`.
+    screens: std::collections::HashMap<u8, RECT>,
     generation: u32,
     desktop: Option<HDESK>,
     last_error_ns: u64,
 }
 
 /// Where the streamed monitor is on the virtual desktop.
-fn streamed_monitor() -> RECT {
-    super::capture::streamed_output()
+fn streamed_monitor(stream: u8) -> RECT {
+    super::capture::stream_output(stream)
         .map(|o| o.rect)
         .unwrap_or_else(|e| {
             println!("input: can't find the streamed monitor ({e}); using the primary one");
@@ -60,7 +60,7 @@ unsafe impl Send for Injector {}
 impl Injector {
     pub fn new() -> Injector {
         let generation = SCREEN_GENERATION.load(Relaxed);
-        Injector { held: Input::default(), last_seq: None, last_input_ns: 0, screen: streamed_monitor(), generation, desktop: None, last_error_ns: 0 }
+        Injector { held: Input::default(), last_seq: None, last_input_ns: 0, screens: Default::default(), generation, desktop: None, last_error_ns: 0 }
     }
 
     /// A new client session: forget sequence numbers and let go of everything.
@@ -86,7 +86,7 @@ impl Injector {
         let mut events = Vec::new();
         // Move first, so a click lands where the pointer now is.
         if let Some((x, y)) = input.absolute {
-            let (x, y) = self.to_virtual_desk(x, y);
+            let (x, y) = self.to_virtual_desk(input.stream, x, y);
             events.push(mouse(x, y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK));
         }
         if input.dx != 0 || input.dy != 0 {
@@ -144,11 +144,13 @@ impl Injector {
     }
 
     /// 0..=65535 across the streamed monitor → 0..=65535 across the virtual desktop.
-    fn to_virtual_desk(&mut self, x: u16, y: u16) -> (i32, i32) {
+    fn to_virtual_desk(&mut self, stream: u8, x: u16, y: u16) -> (i32, i32) {
         let generation = SCREEN_GENERATION.load(Relaxed);
         if generation != self.generation {
-            (self.screen, self.generation) = (streamed_monitor(), generation);
+            self.screens.clear();
+            self.generation = generation;
         }
+        let s = *self.screens.entry(stream).or_insert_with(|| streamed_monitor(stream));
         let (vx, vy, vw, vh) = unsafe {
             (
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -157,7 +159,6 @@ impl Injector {
                 GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2),
             )
         };
-        let s = self.screen;
         let px = s.left as i64 + x as i64 * (s.right - s.left - 1) as i64 / 65535;
         let py = s.top as i64 + y as i64 * (s.bottom - s.top - 1) as i64 / 65535;
         (((px - vx as i64) * 65535 / (vw - 1) as i64) as i32, ((py - vy as i64) * 65535 / (vh - 1) as i64) as i32)

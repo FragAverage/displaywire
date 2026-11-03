@@ -52,12 +52,12 @@ pub fn run(
     server: SocketAddr,
     link: Arc<Link>,
     input: Arc<input::Sender>,
-    layer: Layer,
+    screens: Screens,
     proxy: EventLoopProxy<UserEvent>,
     telemetry: Arc<Telemetry>,
     stop: Arc<AtomicBool>,
 ) {
-    if let Err(e) = Receiver::new(server, link, input, layer, proxy.clone(), telemetry).and_then(|mut r| r.run(&stop)) {
+    if let Err(e) = Receiver::new(server, link, input, screens, proxy.clone(), telemetry).and_then(|mut r| r.run(&stop)) {
         let _ = proxy.send_event(UserEvent::Fatal(e));
     }
 }
@@ -93,12 +93,10 @@ struct Decoder {
     session: Session,
 }
 
-struct Receiver {
-    server: SocketAddr,
-    link: Arc<Link>,
-    input: Arc<input::Sender>,
+/// One video stream: the main window's (0), or another monitor's in a window of its own.
+struct VideoStream {
+    id: u8,
     layer: Layer,
-    proxy: EventLoopProxy<UserEvent>,
     reassembler: Reassembler,
     decoder: Option<Decoder>,
     /// Filled by the decoder callback, which runs before `decode` returns.
@@ -110,6 +108,51 @@ struct Receiver {
     /// Frames were lost: everything is dropped until a keyframe, or until the server says
     /// (`Msg::Recovered`) where decoding can carry on.
     recovery: Option<Recovery>,
+    /// What the next `Msg::Feedback` reports, for the server's rate control.
+    feedback: FeedbackCounts,
+    last_video: u64,
+}
+
+impl VideoStream {
+    fn new(id: u8, layer: Layer) -> VideoStream {
+        VideoStream {
+            id,
+            layer,
+            reassembler: Reassembler::default(),
+            decoder: None,
+            decoded: Arc::default(),
+            shown: None,
+            need_keyframe: true,
+            last_keyframe_request: 0,
+            recovery: None,
+            feedback: FeedbackCounts::default(),
+            last_video: 0,
+        }
+    }
+}
+
+/// From the UI thread: stream `id` opened with this window's layer, or (None) closed.
+pub type StreamWindows = std::sync::mpsc::Receiver<(u8, Option<Layer>)>;
+
+/// Where video goes: the main window's layer (stream 0), and other streams' as their windows open.
+pub struct Screens {
+    pub main: Layer,
+    pub others: StreamWindows,
+}
+
+fn send_msg(link: &Link, msg: Msg) {
+    let mut buf = [0u8; 64];
+    let n = msg.encode(&mut buf);
+    link.send(&buf[..n]);
+}
+
+struct Receiver {
+    server: SocketAddr,
+    link: Arc<Link>,
+    input: Arc<input::Sender>,
+    proxy: EventLoopProxy<UserEvent>,
+    streams: Vec<VideoStream>,
+    stream_windows: StreamWindows,
     clock: Clock,
     stats: Stats,
     binner: Binner,
@@ -120,9 +163,7 @@ struct Receiver {
     mic: Option<mic::Capture>,
     /// The PC's pointer, drawn here as the Mac cursor: images being put together, and the last state.
     cursors: cursor::Assembler,
-    cursor_state: Option<(bool, u16, u16, u32)>,
-    /// What the next `Msg::Feedback` reports, for the server's rate control.
-    feedback: FeedbackCounts,
+    cursor_state: Option<(u8, bool, u16, u16, u32)>,
     mic_seq: u32,
     /// Chunks sent and peak level since the last report, and when that was.
     mic_stats: (u32, i16, u64),
@@ -149,7 +190,7 @@ impl Receiver {
         server: SocketAddr,
         link: Arc<Link>,
         input: Arc<input::Sender>,
-        layer: Layer,
+        screens: Screens,
         proxy: EventLoopProxy<UserEvent>,
         telemetry: Arc<Telemetry>,
     ) -> Result<Receiver, String> {
@@ -159,15 +200,9 @@ impl Receiver {
             server,
             link,
             input,
-            layer,
             proxy,
-            reassembler: Reassembler::default(),
-            decoder: None,
-            decoded: Arc::default(),
-            shown: None,
-            need_keyframe: true,
-            last_keyframe_request: 0,
-            recovery: None,
+            streams: vec![VideoStream::new(0, screens.main)],
+            stream_windows: screens.others,
             clock: Clock::default(),
             stats: Stats::new(),
             binner: Binner::new(now_ns(), BIN_NS),
@@ -176,7 +211,6 @@ impl Receiver {
             mic: None,
             cursors: cursor::Assembler::default(),
             cursor_state: None,
-            feedback: FeedbackCounts::default(),
             mic_seq: 0,
             mic_stats: (0, 0, 0),
             audio: audio::Player::new()
@@ -194,9 +228,7 @@ impl Receiver {
     }
 
     fn send(&self, msg: Msg) {
-        let mut buf = [0u8; 64];
-        let n = msg.encode(&mut buf);
-        self.link.send(&buf[..n]);
+        send_msg(&self.link, msg);
     }
 
     /// Opens or closes the microphone to match the switch, and sends what it has captured.
@@ -240,7 +272,6 @@ impl Receiver {
     fn run(&mut self, stop: &AtomicBool) -> Result<(), String> {
         let begin = now_ns();
         let (mut next_hello, mut next_ping, mut next_bin, mut ping_id) = (0, 0, 0, 0u32);
-        let mut last_video = 0u64;
         // Whether video has arrived on this session. The server sends frames only when
         // the screen changes, so a quiet screen is not a stall once video has started.
         let mut got_video = false;
@@ -285,7 +316,6 @@ impl Receiver {
                     next_hs = now + HELLO_INTERVAL_NS;
                 }
             }
-            let streaming = last_video > 0 && now - last_video < VIDEO_STALL_NS;
             let want = if !alive {
                 Some(if ever_connected { "Connection lost: reconnecting…".to_string() } else { format!("Connecting to {}…", self.server) })
             } else if !got_video {
@@ -323,24 +353,32 @@ impl Receiver {
             }
             self.pump_mic(alive);
             self.input.heartbeat();
-            if self.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
-                self.need_keyframe = true;
-                self.feedback.frames_lost += 1;
+            // Windows opened or closed on the UI thread.
+            while let Ok((id, layer)) = self.stream_windows.try_recv() {
+                self.streams.retain(|v| v.id != id);
+                if let Some(layer) = layer {
+                    self.streams.push(VideoStream::new(id, layer));
+                }
             }
-            if got_video && alive && now >= self.feedback.due_ns {
-                let f = self.feedback.take(now);
-                let mut buf = [0u8; 32];
-                let n = Msg::Feedback(f).encode(&mut buf);
-                self.link.send(&buf[..n]);
-            }
-            if self.recovery.as_ref().is_some_and(|r| r.resume_from.is_none() && now - r.since_ns > RECOVERY_WAIT_NS) {
-                // No answer (an older server, or too far back for it): a keyframe instead.
-                self.recovery = None;
-                self.need_keyframe = true;
-            }
-            if streaming && self.need_keyframe && now - self.last_keyframe_request > KEYFRAME_RETRY_NS {
-                self.send(Msg::KeyframeRequest);
-                self.last_keyframe_request = now;
+            for v in &mut self.streams {
+                if v.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
+                    v.need_keyframe = true;
+                    v.feedback.frames_lost += 1;
+                }
+                if got_video && alive && v.last_video > 0 && now >= v.feedback.due_ns {
+                    let f = proto::stream::Feedback { stream: v.id, ..v.feedback.take(now) };
+                    send_msg(&self.link, Msg::Feedback(f));
+                }
+                if v.recovery.as_ref().is_some_and(|r| r.resume_from.is_none() && now - r.since_ns > RECOVERY_WAIT_NS) {
+                    // No answer (an older server, or too far back for it): a keyframe instead.
+                    v.recovery = None;
+                    v.need_keyframe = true;
+                }
+                let streaming = v.last_video > 0 && now - v.last_video < VIDEO_STALL_NS;
+                if streaming && v.need_keyframe && now - v.last_keyframe_request > KEYFRAME_RETRY_NS {
+                    send_msg(&self.link, Msg::KeyframeRequest { stream: v.id });
+                    v.last_keyframe_request = now;
+                }
             }
             if now >= next_bin {
                 next_bin = now + BIN_NS;
@@ -381,6 +419,10 @@ impl Receiver {
                         }
                         self.link.set_session(Some(Arc::new(session)));
                         window = ReplayWindow::default();
+                        if ever_connected {
+                            // A new session on the server has only the main stream: reopen the rest.
+                            let _ = self.proxy.send_event(UserEvent::Reconnected);
+                        }
                         (last_rx, ever_connected, alive_since, got_video) = (rx, true, rx, false);
                         // The server starts again from a keyframe; don't wait for the stall timer.
                         next_hello = 0;
@@ -396,13 +438,16 @@ impl Receiver {
             match Msg::decode(&plain[..len]) {
                 Some(Msg::Video(..)) if self.sim_loss.as_mut().is_some_and(SimLoss::drop_this) => {}
                 Some(Msg::Video(v, payload)) => {
-                    self.feedback.datagram(v.frame, v.frags as u32 + v.parity as u32, rx);
-                    last_video = rx;
                     got_video = true;
                     self.stats.bytes += n as u64;
                     self.binner.bytes(n);
-                    if let Some(frame) = self.reassembler.push(v, payload, rx) {
-                        self.on_frame(frame);
+                    if let Some(i) = self.streams.iter().position(|s| s.id == v.stream) {
+                        let st = &mut self.streams[i];
+                        st.last_video = rx;
+                        st.feedback.datagram(v.frame, v.frags as u32 + v.parity as u32, rx);
+                        if let Some(frame) = st.reassembler.push(v, payload, rx) {
+                            self.on_frame(i, frame);
+                        }
                     }
                 }
                 Some(Msg::Audio(a, payload)) => {
@@ -416,9 +461,9 @@ impl Receiver {
                 Some(Msg::Monitors(m)) => {
                     let _ = self.proxy.send_event(UserEvent::Monitors(Box::new(m)));
                 }
-                Some(Msg::Recovered { from, lost_upto }) => {
+                Some(Msg::Recovered { stream, from, lost_upto }) => {
                     // Only an answer that covers the newest loss.
-                    if let Some(r) = &mut self.recovery
+                    if let Some(r) = self.streams.iter_mut().find(|v| v.id == stream).and_then(|v| v.recovery.as_mut())
                         && lost_upto.wrapping_sub(r.latest_lost) < 1 << 31
                     {
                         r.resume_from = Some(from);
@@ -432,10 +477,14 @@ impl Receiver {
                         let _ = self.proxy.send_event(UserEvent::CursorImage(image));
                     }
                 }
-                Some(Msg::Cursor { visible, x, y, shape }) => {
-                    if self.cursor_state != Some((visible, x, y, shape)) {
-                        self.cursor_state = Some((visible, x, y, shape));
-                        let _ = self.proxy.send_event(UserEvent::Cursor { visible, x, y, shape });
+                Some(Msg::Cursor { stream, visible, x, y, shape }) => {
+                    // Each stream says where the pointer is on its monitor; the one it's on matters.
+                    if visible || self.cursor_state.is_none_or(|c| c.0 == stream) {
+                        let state = (stream, visible, x, y, shape);
+                        if self.cursor_state != Some(state) {
+                            self.cursor_state = Some(state);
+                            let _ = self.proxy.send_event(UserEvent::Cursor { stream, visible, x, y, shape });
+                        }
                     }
                 }
                 Some(Msg::Light { slot, r, g, b }) => {
@@ -450,34 +499,35 @@ impl Receiver {
         Ok(())
     }
 
-    fn on_frame(&mut self, frame: Frame) {
+    fn on_frame(&mut self, i: usize, frame: Frame) {
+        let st = &mut self.streams[i];
         if let Some(o) = self.clock.offset() {
-            self.feedback.delays.push((frame.complete_ns as i64 + o - frame.capture_ns as i64) / 1000);
+            st.feedback.delays.push((frame.complete_ns as i64 + o - frame.capture_ns as i64) / 1000);
         }
         if frame.skipped > 0 {
-            self.feedback.frames_lost += frame.skipped;
+            st.feedback.frames_lost += frame.skipped;
             self.stats.lost += frame.skipped;
             self.binner.lost(frame.skipped);
             let first = frame.id.wrapping_sub(frame.skipped);
-            if !self.need_keyframe {
+            if !st.need_keyframe {
                 // Ask the server to stop referencing them; until it answers, nothing decodes.
-                self.send(Msg::FrameLost { first, last: frame.id.wrapping_sub(1) });
-                let since_ns = self.recovery.as_ref().map_or(frame.complete_ns, |r| r.since_ns);
-                self.recovery = Some(Recovery { since_ns, latest_lost: frame.id.wrapping_sub(1), resume_from: None });
+                send_msg(&self.link, Msg::FrameLost { stream: st.id, first, last: frame.id.wrapping_sub(1) });
+                let since_ns = st.recovery.as_ref().map_or(frame.complete_ns, |r| r.since_ns);
+                st.recovery = Some(Recovery { since_ns, latest_lost: frame.id.wrapping_sub(1), resume_from: None });
             }
         }
         if frame.keyframe {
-            self.recovery = None;
-        } else if let Some(r) = &self.recovery {
+            st.recovery = None;
+        } else if let Some(r) = &st.recovery {
             if r.resume_from.is_some_and(|from| frame.id.wrapping_sub(from) < 1 << 31) {
-                self.recovery = None;
+                st.recovery = None;
             } else {
                 self.stats.dropped += 1;
                 self.binner.lost(1);
                 return;
             }
         }
-        if self.need_keyframe && !frame.keyframe {
+        if st.need_keyframe && !frame.keyframe {
             self.stats.dropped += 1;
             self.binner.lost(1);
             return;
@@ -487,27 +537,28 @@ impl Receiver {
         }
         let sample = hevc::to_sample(&frame.data);
         if let Some(ps) = sample.param_sets
-            && self.decoder.as_ref().is_none_or(|d| d.param_sets != ps)
-                && let Err(e) = self.new_decoder(ps) {
-                    eprintln!("decoder: {e}");
-                    self.need_keyframe = true;
-                    return;
-                }
-        let Some(decoder) = &self.decoder else {
-            self.need_keyframe = true;
+            && st.decoder.as_ref().is_none_or(|d| d.param_sets != ps)
+            && let Err(e) = new_decoder(st, ps, &self.proxy)
+        {
+            eprintln!("decoder: {e}");
+            st.need_keyframe = true;
+            return;
+        }
+        let Some(decoder) = &st.decoder else {
+            st.need_keyframe = true;
             return;
         };
 
         let start = now_ns();
         let submitted = decoder.session.decode(0, &sample.data, false);
         let decoded_ns = now_ns();
-        let result = self.decoded.lock().unwrap().take();
+        let result = st.decoded.lock().unwrap().take();
         match (submitted, result) {
             (Ok(()), Some(Ok(image))) => {
-                self.layer.show(&image);
-                self.shown = Some(image);
+                st.layer.show(&image);
+                st.shown = Some(image);
                 if frame.keyframe {
-                    self.need_keyframe = false;
+                    st.need_keyframe = false;
                 }
                 self.stats.frames += 1;
                 self.stats.decode.push((decoded_ns - start) as i64);
@@ -540,31 +591,32 @@ impl Receiver {
                 eprintln!("decode failed on frame {}: {status}", frame.id);
                 self.stats.errors += 1;
                 self.binner.lost(1);
-                self.need_keyframe = true;
+                st.need_keyframe = true;
             }
         }
     }
+}
 
-    fn new_decoder(&mut self, param_sets: [Vec<u8>; 3]) -> Result<(), String> {
-        let format = Format::hevc(&param_sets)?;
-        let (w, h) = format.dimensions();
-        let decoded = self.decoded.clone();
-        let session = Session::new(
-            format,
-            Some(PIXEL_FORMAT_NV12),
-            Box::new(move |out: Output| {
-                let r = match out.image {
-                    Some(img) if out.status == 0 => Ok(img),
-                    _ => Err(out.status),
-                };
-                *decoded.lock().unwrap() = Some(r);
-            }),
-        )?;
-        println!("stream {w}x{h}");
-        let _ = self.proxy.send_event(UserEvent::VideoSize(w as u32, h as u32));
-        self.decoder = Some(Decoder { param_sets, session });
-        Ok(())
-    }
+/// A decoder for stream `st` from new parameter sets (the first keyframe, or a new size).
+fn new_decoder(st: &mut VideoStream, param_sets: [Vec<u8>; 3], proxy: &EventLoopProxy<UserEvent>) -> Result<(), String> {
+    let format = Format::hevc(&param_sets)?;
+    let (w, h) = format.dimensions();
+    let decoded = st.decoded.clone();
+    let session = Session::new(
+        format,
+        Some(PIXEL_FORMAT_NV12),
+        Box::new(move |out: Output| {
+            let r = match out.image {
+                Some(img) if out.status == 0 => Ok(img),
+                _ => Err(out.status),
+            };
+            *decoded.lock().unwrap() = Some(r);
+        }),
+    )?;
+    println!("stream {}: {w}x{h}", st.id);
+    let _ = proxy.send_event(UserEvent::VideoSize(st.id, w as u32, h as u32));
+    st.decoder = Some(Decoder { param_sets, session });
+    Ok(())
 }
 
 const FEEDBACK_EVERY_NS: u64 = 50 * MS;
@@ -635,6 +687,7 @@ impl FeedbackCounts {
         let delay_us = self.delays.get(self.delays.len() / 2).map_or(-1, |&d| d.clamp(0, i32::MAX as i64) as i32);
         let clip = |v: u32| v.min(u16::MAX as u32) as u16;
         let f = proto::stream::Feedback {
+            stream: 0,
             received: clip(self.received),
             expected: clip(self.expected),
             frames_lost: clip(self.frames_lost),

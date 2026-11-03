@@ -20,7 +20,7 @@ mod windows;
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,7 +77,7 @@ impl Gamepads {
     fn apply(&mut self, _pads: &proto::stream::Pads, _now_ns: u64) {}
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(about = "Stream this machine's screen to a displaywire client")]
 pub struct Cli {
     #[arg(long, default_value_t = 9000)]
@@ -264,11 +264,8 @@ struct Shared {
     /// The authenticated client, if any.
     link: Mutex<Option<Link>>,
     last_seen_ns: AtomicU64,
-    keyframe: AtomicBool,
-    /// A monitor the client asked to stream (`Msg::ChooseMonitor`), not yet switched to.
-    choose_monitor: Mutex<Option<u8>>,
-    /// Earliest frame the client reported lost and not yet dealt with (`Msg::FrameLost`).
-    lost: Mutex<Option<u32>>,
+    /// The video streams running: 0 always, others while the client shows more monitors.
+    streams: Mutex<HashMap<u8, Arc<StreamCtl>>>,
     /// `CAP_*` flags the client asked for in its hello.
     caps: AtomicU8,
     /// The client's stream settings (see `proto::stream::Settings`); the command line's until it sends them.
@@ -285,16 +282,47 @@ struct Shared {
     ui_handle: std::sync::OnceLock<uiserver::Handle>,
 }
 
+/// What the control thread tells one stream's loop.
+#[derive(Default)]
+struct StreamCtl {
+    keyframe: AtomicBool,
+    /// Earliest frame the client reported lost and not yet dealt with (`Msg::FrameLost`).
+    lost: Mutex<Option<u32>>,
+    /// A monitor the client asked this stream to show (`Msg::ShowMonitor`), not yet switched to.
+    monitor: Mutex<Option<u8>>,
+    /// The client closed this stream's window, or went away.
+    stop: AtomicBool,
+}
+
 impl Shared {
+    fn stream(&self, id: u8) -> Option<Arc<StreamCtl>> {
+        self.streams.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Every stream starts again from a keyframe (a new session, a new hello).
+    fn keyframe_all(&self) {
+        for ctl in self.streams.lock().unwrap().values() {
+            ctl.keyframe.store(true, Relaxed);
+        }
+    }
+
+    /// Stops every stream but the main one.
+    fn close_extra_streams(&self) {
+        self.streams.lock().unwrap().retain(|&id, ctl| {
+            if id != 0 {
+                ctl.stop.store(true, Relaxed);
+            }
+            id == 0
+        });
+    }
+
     fn new(clients: clients::Store, pairing: pairing::Pairing) -> Shared {
         Shared {
             clients: Mutex::new(clients),
             pairing,
             link: Mutex::new(None),
             last_seen_ns: AtomicU64::new(0),
-            keyframe: AtomicBool::new(false),
-            lost: Mutex::new(None),
-            choose_monitor: Mutex::new(None),
+            streams: Mutex::new(HashMap::from([(0, Arc::new(StreamCtl::default()))])),
             caps: AtomicU8::new(0),
             fec_percent: AtomicU8::new(0),
             fps_cap: AtomicU16::new(0),
@@ -489,10 +517,10 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     let server_name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "displaywire-server".into());
     let _tuning = (!cli.no_wifi_tuning).then(wlan::tune).flatten();
-    let mut source: Box<dyn Source> = match &cli.file {
+    let source: Box<dyn Source> = match &cli.file {
         _ if cli.control_only => Box::new(NoSource),
         Some(path) => Box::new(file::FileSource::open(path, cli.fps)?),
-        None => open_screen(&cli)?,
+        None => open_screen(&cli, 0, None)?,
     };
 
     let sock = udp_socket(SocketAddr::from(([0, 0, 0, 0], cli.port))).map_err(|e| format!("bind udp/{}: {e}", cli.port))?;
@@ -526,7 +554,8 @@ fn run(cli: Cli) -> Result<(), String> {
             windows::tray::start(shared.clone());
             windows::updater::start();
         }
-        std::thread::spawn(move || control(&sock, &shared, announcement.as_ref(), &transfers, mic));
+        let opener = stream_opener(&cli, &shared, &sock)?;
+        std::thread::spawn(move || control(&sock, &shared, announcement.as_ref(), &transfers, mic, &opener));
     }
     if cli.control_only {
         match shared.ui_handle.get() {
@@ -548,13 +577,58 @@ fn run(cli: Cli) -> Result<(), String> {
         }
     }
     println!("displaywire-server on udp/{}, waiting for a client", cli.port);
+    let main = shared.stream(0).ok_or("no main stream")?;
+    stream_loop(0, source, main, &shared, &sock, 8e3 / cli.pace_mbps, None)
+}
 
-    let pace_ns_per_byte = 8e3 / cli.pace_mbps;
+/// Starts stream `id` showing `monitor` for the session at the given address, in a thread of its own
+/// (capture has to happen on the thread that opened it).
+type StreamOpener = Box<dyn Fn(u8, u8, SocketAddr) + Send>;
+
+fn stream_opener(cli: &Cli, shared: &Arc<Shared>, sock: &UdpSocket) -> Result<StreamOpener, String> {
+    let (cli, shared, sock) = (Arc::new(cli.clone()), shared.clone(), sock.try_clone().map_err(|e| e.to_string())?);
+    Ok(Box::new(move |id, monitor, owner| {
+        let ctl = Arc::new(StreamCtl::default());
+        shared.streams.lock().unwrap().insert(id, ctl.clone());
+        let (cli, shared, sock) = (cli.clone(), shared.clone(), sock.try_clone());
+        let spawned = std::thread::Builder::new().name(format!("stream-{id}")).spawn(move || {
+            let result = sock.map_err(|e| e.to_string()).and_then(|sock| {
+                let source = open_screen(&cli, id, Some(monitor))?;
+                println!("stream {id}: showing monitor {monitor}");
+                stream_loop(id, source, ctl.clone(), &shared, &sock, 8e3 / cli.pace_mbps, Some(owner))
+            });
+            match result {
+                Ok(()) => println!("stream {id}: closed"),
+                Err(e) => println!("stream {id}: {e}"),
+            }
+            let mut streams = shared.streams.lock().unwrap();
+            if streams.get(&id).is_some_and(|c| Arc::ptr_eq(c, &ctl)) {
+                streams.remove(&id);
+            }
+        });
+        if let Err(e) = spawned {
+            println!("stream {id}: {e}");
+        }
+    }))
+}
+
+/// One video stream: captures, encodes and sends frames of `source` to the client, following
+/// what the control thread asks (`ctl`). The main stream (0) runs for good; another stops with
+/// `ctl.stop` or when the session `owner` that opened it ends.
+fn stream_loop(
+    id: u8,
+    mut source: Box<dyn Source>,
+    ctl: Arc<StreamCtl>,
+    shared: &Shared,
+    sock: &UdpSocket,
+    pace_ns_per_byte: f64,
+    owner: Option<SocketAddr>,
+) -> Result<(), String> {
     let mut frame_id = 0u32;
     let mut stats = Stats::new();
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
-    let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
-    let mut pointer = PointerSender::default();
+    let mut applied_kbps = 0;
+    let mut pointer = PointerSender::new(id);
     // The monitor list last sent, to whom and when, and when it was last looked at.
     let mut monitors_sent: Option<(SocketAddr, proto::stream::Monitors, u64)> = None;
     let mut monitors_checked = 0u64;
@@ -565,51 +639,57 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
+        // A stream other than the main one belongs to the session that opened it.
+        if ctl.stop.load(Relaxed) || owner.is_some_and(|o| link.as_ref().is_none_or(|l| l.addr != o)) {
+            return Ok(());
+        }
         let Some(link) = link else {
             std::thread::sleep(Duration::from_millis(20));
             continue;
         };
-        if now_ns().saturating_sub(shared.last_seen_ns.load(Relaxed)) > CLIENT_TIMEOUT_NS {
+        if id == 0 && now_ns().saturating_sub(shared.last_seen_ns.load(Relaxed)) > CLIENT_TIMEOUT_NS {
             println!("{}: timed out", link.addr);
             shared.link.lock().unwrap().take_if(|l| l.addr == link.addr);
             continue;
         }
 
-        // Rate control moves in small steps; the encoder is told about real changes only.
-        let kbps = shared.bitrate_kbps.load(Relaxed);
+        // Rate control moves in small steps; the encoder is told about real changes only. Open
+        // streams share the bitrate.
+        let streams = shared.streams.lock().unwrap().len().max(1) as u32;
+        let kbps = shared.bitrate_kbps.load(Relaxed) / streams;
         if kbps.abs_diff(applied_kbps) * 50 >= applied_kbps.max(1) {
             applied_kbps = kbps;
             source.set_bitrate(kbps * 1000);
         }
-        if let Some(index) = shared.choose_monitor.lock().unwrap().take() {
+        if let Some(index) = ctl.monitor.lock().unwrap().take() {
             match source.choose_monitor(index) {
                 Ok(()) => monitors_checked = 0,
-                Err(e) => println!("monitor {index}: {e}"),
+                Err(e) => println!("stream {id}: monitor {index}: {e}"),
             }
         }
-        // The monitors on connecting, and again whenever they change.
-        // The monitors on connecting, whenever they change, and every 10 s in case one was lost.
+        // The monitors on connecting, whenever they change, and every 10 s in case one was lost (the
+        // main stream says, listing which monitor it shows).
         let now = now_ns();
-        if monitors_sent.as_ref().is_none_or(|(to, ..)| *to != link.addr) || now - monitors_checked > 2 * SEC {
+        if id == 0 && monitors_sent.as_ref().is_none_or(|(to, ..)| *to != link.addr) || now - monitors_checked > 2 * SEC {
             monitors_checked = now;
             if let Some(m) = source.monitors()
                 && monitors_sent.as_ref().is_none_or(|&(to, last, at)| to != link.addr || last != m || now - at > 10 * SEC)
             {
                 let mut plain = [0u8; proto::MAX_PLAIN];
                 let n = Msg::Monitors(m).encode(&mut plain);
-                link.send(&sock, &plain[..n], &mut sealed);
+                link.send(sock, &plain[..n], &mut sealed);
                 monitors_sent = Some((link.addr, m, now));
             }
         }
         let client_cursor = shared.caps.load(Relaxed) & proto::stream::CAP_CURSOR != 0;
         source.set_pointer_in_video(!client_cursor);
         if client_cursor {
-            pointer.send(&*source, &link, &sock, &mut sealed);
+            pointer.send(&*source, &link, sock, &mut sealed);
         }
         // The client lost frames: it drops everything from the first until told it can carry on, so
         // everything from there to the newest frame stops being a reference. Too far back, or an
         // encoder that can't, and a keyframe does it.
-        if let Some(first) = shared.lost.lock().unwrap().take() {
+        if let Some(first) = ctl.lost.lock().unwrap().take() {
             let since: Vec<u64> = recent.iter().filter(|&&(id, _)| id.wrapping_sub(first) < 1 << 31).map(|&(_, c)| c).collect();
             let known = recent.front().is_some_and(|&(oldest, _)| first.wrapping_sub(oldest) < 1 << 31);
             if known && !since.is_empty() && source.invalidate(&since) {
@@ -619,11 +699,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 // may not be one for a while.
                 source.repaint();
             } else {
-                shared.keyframe.store(true, Relaxed);
+                ctl.keyframe.store(true, Relaxed);
                 stats.fell_back += 1;
             }
         }
-        let force = shared.keyframe.swap(false, Relaxed);
+        let force = ctl.keyframe.swap(false, Relaxed);
         // Frame-rate cap: wait before taking the next frame (which is then the latest
         // image), so skipped frames cost no encoding.
         let cap = shared.fps_cap.load(Relaxed);
@@ -632,22 +712,22 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         let Some(frame) = source.next_frame(force, 100)? else {
             if force {
-                shared.keyframe.store(true, Relaxed);
+                ctl.keyframe.store(true, Relaxed);
             }
             continue;
         };
         if force && !frame.keyframe {
-            shared.keyframe.store(true, Relaxed);
+            ctl.keyframe.store(true, Relaxed);
         }
 
         if frame.keyframe {
             recovered_upto = None;
         } else if let Some(upto) = recovered_upto.take() {
             let mut plain = [0u8; 16];
-            let n = Msg::Recovered { from: frame_id, lost_upto: upto }.encode(&mut plain);
+            let n = Msg::Recovered { stream: id, from: frame_id, lost_upto: upto }.encode(&mut plain);
             // Twice: it's small, and losing it costs a keyframe.
             for _ in 0..2 {
-                link.send(&sock, &plain[..n], &mut sealed);
+                link.send(sock, &plain[..n], &mut sealed);
             }
         }
         if recent.len() == 32 {
@@ -658,13 +738,13 @@ fn run(cli: Cli) -> Result<(), String> {
         let encoded_ns = now_ns();
         let mut next_send = encoded_ns;
         last_frame_ns = now_ns();
-        video::packetize(frame_id, frame.keyframe, frame.capture_ns, &frame.data, shared.fec_percent.load(Relaxed) as u32, |pkt| {
+        video::packetize(id, frame_id, frame.keyframe, frame.capture_ns, &frame.data, shared.fec_percent.load(Relaxed) as u32, |pkt| {
             sleep_until(next_send);
-            let wire = link.send(&sock, pkt, &mut sealed);
+            let wire = link.send(sock, pkt, &mut sealed);
             next_send = next_send.max(now_ns()) + (wire as f64 * pace_ns_per_byte) as u64;
         });
         frame_id = frame_id.wrapping_add(1);
-        stats.frame(&frame, encoded_ns, now_ns(), &shared);
+        stats.frame(id, &frame, encoded_ns, now_ns(), shared);
     }
 }
 
@@ -722,6 +802,7 @@ impl Rate {
 /// image when it changes and every two seconds (so a lost piece mends itself).
 #[derive(Default)]
 struct PointerSender {
+    stream: u8,
     to: Option<SocketAddr>,
     state: Option<PointerState>,
     state_ns: u64,
@@ -730,9 +811,13 @@ struct PointerSender {
 }
 
 impl PointerSender {
+    fn new(stream: u8) -> PointerSender {
+        PointerSender { stream, ..Default::default() }
+    }
+
     fn send(&mut self, source: &dyn Source, link: &auth::Link, sock: &UdpSocket, sealed: &mut [u8]) {
         if self.to != Some(link.addr) {
-            *self = PointerSender { to: Some(link.addr), ..Default::default() };
+            *self = PointerSender { stream: self.stream, to: Some(link.addr), ..Default::default() };
         }
         let Some(p) = source.pointer() else { return };
         let now = now_ns();
@@ -759,7 +844,7 @@ impl PointerSender {
             (self.image, self.image_ns) = (Some(p.shape), now);
         }
         if self.state != Some(p) || now - self.state_ns > SEC {
-            let n = Msg::Cursor { visible: p.visible, x: p.x, y: p.y, shape: p.shape }.encode(&mut plain);
+            let n = Msg::Cursor { stream: self.stream, visible: p.visible, x: p.x, y: p.y, shape: p.shape }.encode(&mut plain);
             link.send(sock, &plain[..n], sealed);
             (self.state, self.state_ns) = (Some(p), now);
         }
@@ -767,8 +852,8 @@ impl PointerSender {
 }
 
 #[cfg(windows)]
-fn open_screen(cli: &Cli) -> Result<Box<dyn Source>, String> {
-    Ok(Box::new(windows::ScreenSource::open(cli)?))
+fn open_screen(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<Box<dyn Source>, String> {
+    Ok(Box::new(windows::ScreenSource::open(cli, stream, monitor)?))
 }
 
 /// Starts playing the client's microphone, if there's somewhere to play it.
@@ -809,7 +894,7 @@ fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
 }
 
 #[cfg(not(windows))]
-fn open_screen(_cli: &Cli) -> Result<Box<dyn Source>, String> {
+fn open_screen(_cli: &Cli, _stream: u8, _monitor: Option<u8>) -> Result<Box<dyn Source>, String> {
     Err("screen capture is only implemented on Windows; use --file".into())
 }
 
@@ -897,6 +982,7 @@ fn control(
     announcement: Option<&proto::discover::Announcement>,
     transfers: &transfer::Transfers,
     mut mic: Option<mic::Sink>,
+    open_stream: &StreamOpener,
 ) {
     let mut buf = [0u8; 2048];
     let mut plain = [0u8; 2048];
@@ -1028,7 +1114,9 @@ fn control(
                     *shared.link.lock().unwrap() = Some(link.clone());
                     shared.caps.store(p.caps, Relaxed);
                     shared.last_seen_ns.store(now, Relaxed);
-                    shared.keyframe.store(true, Relaxed);
+                    // A new session starts with the main stream only; the client reopens the rest.
+                    shared.close_extra_streams();
+                    shared.keyframe_all();
                     injector.reset();
                     gamepads.reset();
                     rate.reset();
@@ -1042,7 +1130,7 @@ fn control(
                     Some(Msg::Hello { caps, .. }) => {
                         shared.caps.store(caps, Relaxed);
                         shared.last_seen_ns.store(now_ns(), Relaxed);
-                        shared.keyframe.store(true, Relaxed);
+                        shared.keyframe_all();
                     }
                     Some(Msg::Ping { id, client_ns }) => {
                         shared.last_seen_ns.store(now_ns(), Relaxed);
@@ -1067,7 +1155,8 @@ fn control(
                             );
                         }
                     }
-                    Some(Msg::Feedback(f)) => {
+                    // The main stream's reports steer the shared bitrate.
+                    Some(Msg::Feedback(f)) if f.stream == 0 => {
                         rate.on_feedback(now_ns(), &f);
                         rate.publish(shared);
                     }
@@ -1081,11 +1170,25 @@ fn control(
                             }
                         }
                     }
-                    Some(Msg::KeyframeRequest) => shared.keyframe.store(true, Relaxed),
-                    Some(Msg::ChooseMonitor { index }) => *shared.choose_monitor.lock().unwrap() = Some(index),
-                    Some(Msg::FrameLost { first, .. }) => {
-                        let mut lost = shared.lost.lock().unwrap();
-                        *lost = Some(lost.map_or(first, |l| l.min(first)));
+                    Some(Msg::KeyframeRequest { stream }) => {
+                        if let Some(ctl) = shared.stream(stream) {
+                            ctl.keyframe.store(true, Relaxed);
+                        }
+                    }
+                    Some(Msg::ShowMonitor { stream, monitor }) => match shared.stream(stream) {
+                        Some(ctl) => *ctl.monitor.lock().unwrap() = Some(monitor),
+                        None => open_stream(stream, monitor, from),
+                    },
+                    Some(Msg::CloseStream { stream }) if stream != 0 => {
+                        if let Some(ctl) = shared.streams.lock().unwrap().remove(&stream) {
+                            ctl.stop.store(true, Relaxed);
+                        }
+                    }
+                    Some(Msg::FrameLost { stream, first, .. }) => {
+                        if let Some(ctl) = shared.stream(stream) {
+                            let mut lost = ctl.lost.lock().unwrap();
+                            *lost = Some(lost.map_or(first, |l| l.min(first)));
+                        }
                     }
                     Some(Msg::Input(input)) => injector.apply(&input, now_ns()),
                     Some(Msg::Pads(pads)) => gamepads.apply(&pads, now_ns()),
@@ -1127,7 +1230,7 @@ impl Stats {
         Stats { window_start: now_ns(), frames: 0, keyframes: 0, recovered: 0, fell_back: 0, bytes: 0, encode_ns: 0, send_ns: 0 }
     }
 
-    fn frame(&mut self, f: &EncodedFrame, encoded_ns: u64, sent_ns: u64, shared: &Shared) {
+    fn frame(&mut self, stream: u8, f: &EncodedFrame, encoded_ns: u64, sent_ns: u64, shared: &Shared) {
         self.frames += 1;
         self.keyframes += f.keyframe as u32;
         self.bytes += f.data.len() as u64;
@@ -1135,16 +1238,19 @@ impl Stats {
         self.send_ns += sent_ns - encoded_ns;
         let elapsed = sent_ns - self.window_start;
         if elapsed >= SEC {
-            shared.fps.store(self.frames, Relaxed);
-            shared.mbps_x10.store((self.bytes as f64 * 8.0 / elapsed as f64 * 1e4) as u32, Relaxed);
+            if stream == 0 {
+                shared.fps.store(self.frames, Relaxed);
+                shared.mbps_x10.store((self.bytes as f64 * 8.0 / elapsed as f64 * 1e4) as u32, Relaxed);
+            }
             let n = self.frames.max(1) as f64;
             let losses = if self.recovered + self.fell_back > 0 {
                 format!("  losses repaired {} / by keyframe {}", self.recovered, self.fell_back)
             } else {
                 String::new()
             };
+            let which = if stream == 0 { String::new() } else { format!("[stream {stream}] ") };
             println!(
-                "{:>4} fps  {:>6.1} Mbps  capture→encoded {:.2} ms  send {:.2} ms  keyframes {}{losses}",
+                "{which}{:>4} fps  {:>6.1} Mbps  capture→encoded {:.2} ms  send {:.2} ms  keyframes {}{losses}",
                 self.frames,
                 self.bytes as f64 * 8.0 / elapsed as f64 * 1e3,
                 self.encode_ns as f64 / n / 1e6,

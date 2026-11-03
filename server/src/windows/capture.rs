@@ -260,34 +260,45 @@ pub(super) fn outputs() -> Res<Vec<Output>> {
     Ok(found)
 }
 
-/// The monitor chosen to stream (`choose`), by GDI name; None for the primary one.
-static CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Which monitor each stream shows, by GDI name (for input to land on the right one).
+static STREAMS: std::sync::Mutex<Option<std::collections::HashMap<u8, String>>> = std::sync::Mutex::new(None);
 
-/// Streams `device` from the next `Capture::new` on (None: the primary monitor).
-pub(super) fn choose(device: Option<String>) {
-    *CHOSEN.lock().unwrap() = device;
+/// Records that `stream` shows `device` (None: it stopped).
+pub(super) fn set_stream(stream: u8, device: Option<String>) {
+    let mut streams = STREAMS.lock().unwrap();
+    let map = streams.get_or_insert_with(Default::default);
+    match device {
+        Some(d) => map.insert(stream, d),
+        None => map.remove(&stream),
+    };
     SCREEN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The monitor to stream: the chosen one if it is still attached, else the primary, else the first.
-pub(super) fn streamed_output() -> Res<Output> {
+/// The monitor `stream` shows (the primary one if it isn't known).
+pub(super) fn stream_output(stream: u8) -> Res<Output> {
+    let device = STREAMS.lock().unwrap().as_ref().and_then(|m| m.get(&stream).cloned());
+    output(device.as_deref())
+}
+
+/// Monitor `device` if it is attached, else the primary, else the first.
+pub(super) fn output(device: Option<&str>) -> Res<Output> {
     let mut all = outputs()?;
-    let chosen = CHOSEN.lock().unwrap().clone();
-    let at = chosen
-        .and_then(|c| all.iter().position(|o| o.device == c))
-        .or_else(|| all.iter().position(Output::primary))
-        .unwrap_or(0);
     if all.is_empty() {
         return Err("no monitor attached to the desktop".into());
     }
+    let at = device
+        .and_then(|d| all.iter().position(|o| o.device == d))
+        .or_else(|| all.iter().position(Output::primary))
+        .unwrap_or(0);
     Ok(all.swap_remove(at))
 }
 
 impl Capture {
-    pub fn new() -> Res<Capture> {
+    /// Captures monitor `device` (by GDI name), or the primary one.
+    pub fn new(device: Option<&str>) -> Res<Capture> {
         // Started while the lock screen or a UAC prompt is up: capture that.
         let desktop = attach_input_desktop().inspect(|(_, name)| println!("capture: input desktop is {name}"));
-        let Output { adapter, output, adapter_name, device: monitor, .. } = streamed_output()?;
+        let Output { adapter, output, adapter_name, device: monitor, .. } = output(device)?;
         let mut device = None;
         let mut context = None;
         unsafe {
@@ -450,7 +461,7 @@ impl Capture {
         }
         println!("capture: following the input desktop ({name})");
         // The output was enumerated on the previous desktop; take a fresh one.
-        if let Ok(output) = streamed_output().and_then(|o| Ok(o.output.cast::<IDXGIOutput1>()?)) {
+        if let Ok(output) = output(Some(&self.monitor)).and_then(|o| Ok(o.output.cast::<IDXGIOutput1>()?)) {
             self.output = output;
         }
         if let Some((old, _)) = self.desktop.replace((desk, name)) {

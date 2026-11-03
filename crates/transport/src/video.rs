@@ -15,13 +15,13 @@ pub fn parity_count(data_frags: usize, percent: u32) -> usize {
 
 /// Calls `send` with each datagram of the frame: the data fragments in order,
 /// then `fec_percent`% (rounded up) repair fragments.
-pub fn packetize(frame: u32, keyframe: bool, capture_ns: u64, data: &[u8], fec_percent: u32, mut send: impl FnMut(&[u8])) {
+pub fn packetize(stream: u8, frame: u32, keyframe: bool, capture_ns: u64, data: &[u8], fec_percent: u32, mut send: impl FnMut(&[u8])) {
     let mut buf = [0u8; proto::MAX_DATAGRAM];
     let frags = data.len().div_ceil(VIDEO_PAYLOAD).max(1);
     assert!(frags <= u16::MAX as usize, "frame too large: {} bytes", data.len());
     let parity = parity_count(frags, fec_percent);
     let last_len = data.len() - (frags - 1) * VIDEO_PAYLOAD;
-    let header = |frag: usize| Video { frame, frag: frag as u16, frags: frags as u16, parity: parity as u8, last_len: last_len as u16, keyframe, capture_ns };
+    let header = |frag: usize| Video { stream, frame, frag: frag as u16, frags: frags as u16, parity: parity as u8, last_len: last_len as u16, keyframe, capture_ns };
 
     for i in 0..frags {
         let chunk = &data[(i * VIDEO_PAYLOAD).min(data.len())..((i + 1) * VIDEO_PAYLOAD).min(data.len())];
@@ -177,7 +177,7 @@ mod tests {
 
     fn packets(frame: u32, data: &[u8], fec: u32) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        packetize(frame, frame == 0, 100 + frame as u64, data, fec, |p| out.push(p.to_vec()));
+        packetize(0, frame, frame == 0, 100 + frame as u64, data, fec, |p| out.push(p.to_vec()));
         out
     }
 

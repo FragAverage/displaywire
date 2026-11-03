@@ -2,10 +2,10 @@
 
 use crate::{Reader, Writer};
 
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 /// Bytes taken by a `Video` header.
-pub const VIDEO_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 2 + 2 + 1 + 2 + 8;
+pub const VIDEO_HEADER_LEN: usize = 2 + 1 + 1 + 1 + 4 + 2 + 2 + 1 + 2 + 8;
 /// Bytes in every video fragment but the last data one, and in every parity
 /// fragment. Even, as the Reed-Solomon code needs.
 pub const VIDEO_PAYLOAD: usize = (crate::MAX_PLAIN - VIDEO_HEADER_LEN) & !1;
@@ -48,7 +48,8 @@ const FEEDBACK: u8 = 19;
 const FRAME_LOST: u8 = 20;
 const RECOVERED: u8 = 21;
 const MONITORS: u8 = 22;
-const CHOOSE_MONITOR: u8 = 23;
+const SHOW_MONITOR: u8 = 23;
+const CLOSE_STREAM: u8 = 24;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -83,6 +84,7 @@ pub struct CursorShape {
 /// Client → server, every 50 ms while video flows: how the video got here, for the server's rate control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Feedback {
+    pub stream: u8,
     /// Video datagrams that arrived, and how many the frames they belong to were sent as (data + repair).
     pub received: u16,
     pub expected: u16,
@@ -92,6 +94,9 @@ pub struct Feedback {
     /// clock (so it includes the clock-offset estimate's error; only its changes matter); -1 if none.
     pub delay_us: i32,
 }
+
+/// Video streams at once: the main window's and up to three more monitors.
+pub const MAX_STREAMS: usize = 4;
 
 /// Monitors listed, and how long a name can be (bytes of UTF-8).
 pub const MAX_MONITORS: usize = 8;
@@ -219,6 +224,8 @@ impl Pads {
 pub struct Input {
     /// Increases by one per message; older messages are ignored.
     pub seq: u32,
+    /// The stream whose window the pointer is over: `absolute` is across that stream's monitor.
+    pub stream: u8,
     pub keys: [u8; KEY_BITS / 8],
     pub buttons: u8,
     /// Pointer position, 0..=65535 across the streamed screen.
@@ -235,7 +242,7 @@ pub struct Input {
 
 impl Default for Input {
     fn default() -> Self {
-        Input { seq: 0, keys: [0; KEY_BITS / 8], buttons: 0, absolute: None, dx: 0, dy: 0, wheel: 0, hwheel: 0, repeat: 0 }
+        Input { seq: 0, stream: 0, keys: [0; KEY_BITS / 8], buttons: 0, absolute: None, dx: 0, dy: 0, wheel: 0, hwheel: 0, repeat: 0 }
     }
 }
 
@@ -262,6 +269,8 @@ impl Input {
 /// (`frag` frags..frags+parity): any `frags` of them rebuild the frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Video {
+    /// Which video stream: 0 is the main window's, others show more monitors (`ShowMonitor`).
+    pub stream: u8,
     pub frame: u32,
     pub frag: u16,
     /// Data fragments in the frame.
@@ -339,8 +348,8 @@ pub enum Msg<'a> {
     Ping { id: u32, client_ns: u64 },
     /// Server → client, for RTT and clock offset.
     Pong { id: u32, client_ns: u64, server_ns: u64 },
-    /// Client → server: the decoder lost sync, send an IDR.
-    KeyframeRequest,
+    /// Client → server: stream `stream`'s decoder lost sync, send an IDR.
+    KeyframeRequest { stream: u8 },
     Video(Video, &'a [u8]),
     Bye,
     Input(Input),
@@ -364,18 +373,22 @@ pub enum Msg<'a> {
     Light { slot: u8, r: u8, g: u8, b: u8 },
     /// Server → client (with `CAP_CURSOR`): the pointer, on every change and every second. `x`/`y` are its
     /// position, 0..=65535 across the streamed screen; `shape` names the image (`CursorShape::id`).
-    Cursor { visible: bool, x: u16, y: u16, shape: u32 },
+    /// `stream` is the one showing the monitor the pointer is on; `x`/`y` are across that monitor.
+    Cursor { stream: u8, visible: bool, x: u16, y: u16, shape: u32 },
     CursorShape(CursorShape, &'a [u8]),
     Feedback(Feedback),
     /// Client → server: frames `first..=last` never arrived. The server stops the encoder referencing
     /// them (and answers `Recovered`), or sends a keyframe if it can't.
-    FrameLost { first: u32, last: u32 },
+    FrameLost { stream: u8, first: u32, last: u32 },
     /// Server → client, just before frame `from`: from it on, no frame references any frame up to
     /// `lost_upto` that was reported lost, so decoding can carry on there instead of at a keyframe.
-    Recovered { from: u32, lost_upto: u32 },
+    Recovered { stream: u8, from: u32, lost_upto: u32 },
     Monitors(Monitors),
-    /// Client → server: stream monitor `index` of the last `Monitors`.
-    ChooseMonitor { index: u8 },
+    /// Client → server: show monitor `monitor` (its place in the last `Monitors`) in stream `stream`,
+    /// opening the stream if it isn't (0 is always open).
+    ShowMonitor { stream: u8, monitor: u8 },
+    /// Client → server: stop stream `stream` (not 0); its window closed.
+    CloseStream { stream: u8 },
 }
 
 impl<'a> Msg<'a> {
@@ -400,10 +413,14 @@ impl<'a> Msg<'a> {
                 w.u64(client_ns);
                 w.u64(server_ns);
             }
-            Msg::KeyframeRequest => w.u8(KEYFRAME_REQUEST),
+            Msg::KeyframeRequest { stream } => {
+                w.u8(KEYFRAME_REQUEST);
+                w.u8(stream);
+            }
             Msg::Video(v, payload) => {
                 w.u8(VIDEO);
                 w.u8(if v.keyframe { FLAG_KEYFRAME } else { 0 });
+                w.u8(v.stream);
                 w.u32(v.frame);
                 w.u16(v.frag);
                 w.u16(v.frags);
@@ -416,6 +433,7 @@ impl<'a> Msg<'a> {
             Msg::Input(i) => {
                 w.u8(INPUT);
                 w.u8(if i.absolute.is_some() { FLAG_ABSOLUTE } else { 0 });
+                w.u8(i.stream);
                 w.u32(i.seq);
                 w.bytes(&i.keys);
                 w.u8(i.buttons);
@@ -460,8 +478,9 @@ impl<'a> Msg<'a> {
                 w.u8(large);
                 w.u8(small);
             }
-            Msg::Cursor { visible, x, y, shape } => {
+            Msg::Cursor { stream, visible, x, y, shape } => {
                 w.u8(CURSOR);
+                w.u8(stream);
                 w.u8(visible as u8);
                 w.u16(x);
                 w.u16(y);
@@ -478,6 +497,7 @@ impl<'a> Msg<'a> {
             }
             Msg::Feedback(f) => {
                 w.u8(FEEDBACK);
+                w.u8(f.stream);
                 w.u16(f.received);
                 w.u16(f.expected);
                 w.u16(f.frames_lost);
@@ -496,17 +516,24 @@ impl<'a> Msg<'a> {
                     w.bytes(&mon.name[..mon.name_len as usize]);
                 }
             }
-            Msg::ChooseMonitor { index } => {
-                w.u8(CHOOSE_MONITOR);
-                w.u8(index);
+            Msg::ShowMonitor { stream, monitor } => {
+                w.u8(SHOW_MONITOR);
+                w.u8(stream);
+                w.u8(monitor);
             }
-            Msg::FrameLost { first, last } => {
+            Msg::CloseStream { stream } => {
+                w.u8(CLOSE_STREAM);
+                w.u8(stream);
+            }
+            Msg::FrameLost { stream, first, last } => {
                 w.u8(FRAME_LOST);
+                w.u8(stream);
                 w.u32(first);
                 w.u32(last);
             }
-            Msg::Recovered { from, lost_upto } => {
+            Msg::Recovered { stream, from, lost_upto } => {
                 w.u8(RECOVERED);
+                w.u8(stream);
                 w.u32(from);
                 w.u32(lost_upto);
             }
@@ -559,11 +586,12 @@ impl<'a> Msg<'a> {
             HELLO => Msg::Hello { version: r.u16()?, caps: r.u8()? },
             PING => Msg::Ping { id: r.u32()?, client_ns: r.u64()? },
             PONG => Msg::Pong { id: r.u32()?, client_ns: r.u64()?, server_ns: r.u64()? },
-            KEYFRAME_REQUEST => Msg::KeyframeRequest,
+            KEYFRAME_REQUEST => Msg::KeyframeRequest { stream: r.u8()? },
             VIDEO => {
                 let flags = r.u8()?;
                 let v = Video {
                     keyframe: flags & FLAG_KEYFRAME != 0,
+                    stream: r.u8()?,
                     frame: r.u32()?,
                     frag: r.u16()?,
                     frags: r.u16()?,
@@ -571,7 +599,7 @@ impl<'a> Msg<'a> {
                     last_len: r.u16()?,
                     capture_ns: r.u64()?,
                 };
-                if v.frags == 0 || v.frag as usize >= v.frags as usize + v.parity as usize || v.last_len as usize > VIDEO_PAYLOAD {
+                if v.stream as usize >= MAX_STREAMS || v.frags == 0 || v.frag as usize >= v.frags as usize + v.parity as usize || v.last_len as usize > VIDEO_PAYLOAD {
                     return None;
                 }
                 Msg::Video(v, r.rest())
@@ -579,12 +607,14 @@ impl<'a> Msg<'a> {
             BYE => Msg::Bye,
             INPUT => {
                 let flags = r.u8()?;
+                let stream = r.u8()?;
                 let seq = r.u32()?;
                 let keys = r.take()?;
                 let buttons = r.u8()?;
                 let (x, y) = (r.u16()?, r.u16()?);
                 Msg::Input(Input {
                     seq,
+                    stream,
                     keys,
                     buttons,
                     absolute: (flags & FLAG_ABSOLUTE != 0).then_some((x, y)),
@@ -628,7 +658,7 @@ impl<'a> Msg<'a> {
                 Msg::Pads(p)
             }
             RUMBLE => Msg::Rumble { slot: r.u8()?, large: r.u8()?, small: r.u8()? },
-            FEEDBACK => Msg::Feedback(Feedback { received: r.u16()?, expected: r.u16()?, frames_lost: r.u16()?, delay_us: r.u32()? as i32 }),
+            FEEDBACK => Msg::Feedback(Feedback { stream: r.u8()?, received: r.u16()?, expected: r.u16()?, frames_lost: r.u16()?, delay_us: r.u32()? as i32 }),
             MONITORS => {
                 let mut m = Monitors { count: r.u8()?, streaming: r.u8()?, ..Default::default() };
                 if m.count as usize > MAX_MONITORS {
@@ -648,11 +678,18 @@ impl<'a> Msg<'a> {
                 }
                 Msg::Monitors(m)
             }
-            CHOOSE_MONITOR => Msg::ChooseMonitor { index: r.u8()? },
-            FRAME_LOST => Msg::FrameLost { first: r.u32()?, last: r.u32()? },
-            RECOVERED => Msg::Recovered { from: r.u32()?, lost_upto: r.u32()? },
+            SHOW_MONITOR => {
+                let (stream, monitor) = (r.u8()?, r.u8()?);
+                if stream as usize >= MAX_STREAMS {
+                    return None;
+                }
+                Msg::ShowMonitor { stream, monitor }
+            }
+            CLOSE_STREAM => Msg::CloseStream { stream: r.u8()? },
+            FRAME_LOST => Msg::FrameLost { stream: r.u8()?, first: r.u32()?, last: r.u32()? },
+            RECOVERED => Msg::Recovered { stream: r.u8()?, from: r.u32()?, lost_upto: r.u32()? },
             LIGHT => Msg::Light { slot: r.u8()?, r: r.u8()?, g: r.u8()?, b: r.u8()? },
-            CURSOR => Msg::Cursor { visible: r.u8()? != 0, x: r.u16()?, y: r.u16()?, shape: r.u32()? },
+            CURSOR => Msg::Cursor { stream: r.u8()?, visible: r.u8()? != 0, x: r.u16()?, y: r.u16()?, shape: r.u32()? },
             CURSOR_SHAPE => {
                 let c = CursorShape { id: r.u32()?, width: r.u16()?, height: r.u16()?, hot_x: r.u16()?, hot_y: r.u16()?, offset: r.u32()? };
                 let payload = r.rest();
@@ -696,7 +733,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let payload = [7u8; VIDEO_PAYLOAD];
-        let v = Video { frame: 9, frag: 2, frags: 3, parity: 1, last_len: 700, keyframe: true, capture_ns: 42 };
+        let v = Video { stream: 1, frame: 9, frag: 2, frags: 3, parity: 1, last_len: 700, keyframe: true, capture_ns: 42 };
         let mut input = Input {
             seq: 7,
             buttons: BUTTON_LEFT | BUTTON_FORWARD,
@@ -715,7 +752,7 @@ mod tests {
             Msg::Hello { version: VERSION, caps: CAP_AUDIO | CAP_MIC },
             Msg::Ping { id: 1, client_ns: 2 },
             Msg::Pong { id: 1, client_ns: 2, server_ns: 3 },
-            Msg::KeyframeRequest,
+            Msg::KeyframeRequest { stream: 2 },
             Msg::Video(v, &payload),
             Msg::Video(Video { keyframe: false, ..v }, &payload[..10]),
             Msg::Bye,
@@ -767,7 +804,7 @@ mod tests {
     #[test]
     fn parity_fragment_indexes_are_accepted_up_to_the_count() {
         let mut buf = [0u8; 64];
-        let v = |frag| Video { frame: 0, frag, frags: 3, parity: 2, last_len: 5, keyframe: false, capture_ns: 0 };
+        let v = |frag| Video { stream: 0, frame: 0, frag, frags: 3, parity: 2, last_len: 5, keyframe: false, capture_ns: 0 };
         for frag in [3, 4] {
             let n = Msg::Video(v(frag), &[]).encode(&mut buf);
             assert!(Msg::decode(&buf[..n]).is_some());
@@ -779,7 +816,7 @@ mod tests {
     #[test]
     fn rejects_bad_fragment_index() {
         let mut buf = [0u8; 64];
-        let v = Video { frame: 0, frag: 3, frags: 3, parity: 0, last_len: 0, keyframe: false, capture_ns: 0 };
+        let v = Video { stream: 0, frame: 0, frag: 3, frags: 3, parity: 0, last_len: 0, keyframe: false, capture_ns: 0 };
         let n = Msg::Video(v, &[]).encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), None);
     }
@@ -812,7 +849,7 @@ mod tests {
     #[test]
     fn cursor_messages_round_trip_and_bad_shapes_are_rejected() {
         let mut buf = [0u8; crate::MAX_PLAIN];
-        let m = Msg::Cursor { visible: true, x: 65535, y: 3, shape: 9 };
+        let m = Msg::Cursor { stream: 1, visible: true, x: 65535, y: 3, shape: 9 };
         let n = m.encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), Some(m));
         let c = CursorShape { id: 9, width: 32, height: 32, hot_x: 1, hot_y: 2, offset: 4096 - CURSOR_PAYLOAD as u32 };
@@ -831,9 +868,9 @@ mod tests {
     fn feedback_round_trips_and_old_settings_mean_adaptive() {
         let mut buf = [0u8; crate::MAX_PLAIN];
         for m in [
-            Msg::Feedback(Feedback { received: 900, expected: 1000, frames_lost: 2, delay_us: -1 }),
-            Msg::FrameLost { first: 7, last: 9 },
-            Msg::Recovered { from: 12, lost_upto: 9 },
+            Msg::Feedback(Feedback { stream: 0, received: 900, expected: 1000, frames_lost: 2, delay_us: -1 }),
+            Msg::FrameLost { stream: 1, first: 7, last: 9 },
+            Msg::Recovered { stream: 1, from: 12, lost_upto: 9 },
         ] {
             let n = m.encode(&mut buf);
             assert_eq!(Msg::decode(&buf[..n]), Some(m));
@@ -853,7 +890,12 @@ mod tests {
         let mut buf = [0u8; crate::MAX_PLAIN];
         let n = Msg::Monitors(m).encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), Some(Msg::Monitors(m)));
-        let n = Msg::ChooseMonitor { index: 1 }.encode(&mut buf);
-        assert_eq!(Msg::decode(&buf[..n]), Some(Msg::ChooseMonitor { index: 1 }));
+        for m in [Msg::ShowMonitor { stream: 2, monitor: 1 }, Msg::CloseStream { stream: 2 }] {
+            let n = m.encode(&mut buf);
+            assert_eq!(Msg::decode(&buf[..n]), Some(m));
+        }
+        // No such stream.
+        let n = Msg::ShowMonitor { stream: MAX_STREAMS as u8, monitor: 0 }.encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), None);
     }
 }

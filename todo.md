@@ -14,18 +14,24 @@ The Mac side already copes: a keyframe with new parameter sets rebuilds the deco
 - [x] Client: banner on a size change after the first frame (`UserEvent::VideoSize`, `client/src/main.rs:770`).
 - [ ] Test: change resolution in Windows Settings mid-stream; an exclusive-fullscreen game at a non-desktop size; lock screen; rotate a monitor.
 
-## 2. Gamepads (agreed)
+## 2. Gamepads (phase A done 2026-11-03, tested with a PlayStation pad)
 Decided: bundle ViGEmBus (installer offers it, server detects it and says if missing); emulate an Xbox 360 pad,
 or a DualShock 4 when the Mac pad is a PlayStation one (gyro, touchpad, light bar); up to 4 pads; rumble goes back.
-- [ ] Protocol: gamepad messages (connect/disconnect with type, state snapshots on the reliable input channel,
-      rumble and light bar back); bump the protocol version and advertise the capability in Hello.
-- [ ] Mac: GameController framework: pad connect/disconnect, buttons, sticks, triggers, DualShock/DualSense motion
-      and touchpad; keep the system from eating the Home/PS button while streaming.
-- [ ] Mac: rumble via `GCDeviceHaptics`, light bar via `GCDeviceLight`.
-- [ ] PC: ViGEmClient (or its IOCTLs directly), one target per pad, X360 or DS4; DS4 extended report for motion/touchpad.
-- [ ] PC: release every pad on disconnect or focus loss, like keys.
+- [x] Protocol: `Msg::Pads` (whole state of up to 4 pads, on change and every 50 ms; motion and touchpad fields
+      already in the format), `Msg::Rumble`, `Msg::Light`. No version bump: older peers ignore unknown messages.
+- [x] Mac: GameController polling in the receiver loop, stable slots, Home/PS button kept from macOS
+      (`preferredSystemGestureState`), pads read as released while the window is in the background.
+- [x] Mac: rumble through CoreHaptics (`createEngineWithLocality:` by `msg_send!`, as objc2-game-controller only
+      binds it on iOS), light bar through `GCDeviceLight`.
+- [x] PC: `vigem-client` (features `unstable_ds4`, `unstable_xtarget_notification`), X360 or DS4 per slot, Xbox
+      rumble notifications back to the client; unplugged after 1 s of silence or on a new session.
+      ViGEmBus's `ERROR_NO_MORE_ITEMS` (no HID read pending) on DS4 reports is ignored, not a replug.
+- [ ] Phase B: DS4 extended report (gyro, accelerometer, touchpad) and DS4 notifications (rumble, light bar):
+      our own IOCTLs to ViGEmBus (`IOCTL_DS4_SUBMIT_REPORT` with `DS4_REPORT_EX`, `IOCTL_DS4_REQUEST_NOTIFICATION`);
+      Mac side reads `GCMotion` and the DualShock/DualSense touchpad.
 - [ ] Installer: offer ViGEmBus; check its licence (BSD-3) and redistribution of the signed driver.
 - [ ] README: controllers section.
+
 ## 3. Windows client (agreed)
 Decided: D3D11 video decode (any GPU, zero-copy to the swapchain); one shared cross-platform UI for the PC list,
 pairing and settings on both Mac and Windows; one `client` crate with platform modules like the server; v1 has the

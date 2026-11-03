@@ -283,8 +283,8 @@ impl Receiver {
             let streaming = last_video > 0 && now - last_video < VIDEO_STALL_NS;
             let want = if !alive {
                 Some(if ever_connected { "Connection lost: reconnecting…".to_string() } else { format!("Connecting to {}…", self.server) })
-            } else if !got_video && now - alive_since > 700 * MS {
-                Some("Waiting for video…".to_string())
+            } else if !got_video {
+                Some(if now - alive_since > 3 * SEC { "Waiting for the PC's screen…" } else { "Connected · starting the stream…" }.to_string())
             } else {
                 None
             };

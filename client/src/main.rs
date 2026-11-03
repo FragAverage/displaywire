@@ -143,6 +143,8 @@ mod app {
         telemetry: Arc<receiver::Telemetry>,
         overlay: overlay::Overlay,
         banner: overlay::Banner,
+        /// Fills the window until the first picture; the banner takes over after that.
+        placeholder: Option<overlay::Placeholder>,
         /// What the banner shows about the connection, and about transfers; the first wins.
         conn_status: Option<String>,
         notice: Option<String>,
@@ -164,6 +166,10 @@ mod app {
     impl Session {
         /// Shows the connection status if there is one, else the transfer notice.
         fn refresh_banner(&self) {
+            if let Some(p) = &self.placeholder {
+                p.set_detail(self.conn_status.as_deref().unwrap_or("Starting the stream…"));
+                return self.banner.hide();
+            }
             match self.conn_status.as_ref().or(self.notice.as_ref()) {
                 Some(text) => self.banner.show(text),
                 None => self.banner.hide(),
@@ -457,6 +463,9 @@ mod app {
             let telemetry = Arc::new(receiver::Telemetry::new(graph, prefs, transfers));
             let overlay = overlay::Overlay::attach(&window, graph);
             let banner = overlay::Banner::attach(&window);
+            let name = servers::find(server).map(|s| s.name).filter(|n| !n.is_empty()).unwrap_or_else(|| server.to_string());
+            let placeholder = overlay::Placeholder::attach(&window, &name);
+            placeholder.set_detail("Connecting…");
             let (proxy, stop2, input2, telemetry2) = (self.proxy.clone(), stop.clone(), input.clone(), telemetry.clone());
             let receiver = std::thread::Builder::new()
                 .name("receiver".into())
@@ -469,6 +478,7 @@ mod app {
                 telemetry,
                 overlay,
                 banner,
+                placeholder: Some(placeholder),
                 conn_status: None,
                 notice: None,
                 stop,
@@ -887,6 +897,10 @@ mod app {
                         });
                     }
                     s.video = Some((w, h));
+                    // The first picture is on its way to the screen.
+                    if s.placeholder.take().is_some() {
+                        s.refresh_banner();
+                    }
                 }
                 UserEvent::Graph => s.overlay.update(&s.telemetry.history.lock().unwrap()),
                 UserEvent::Title(t) => s.window.set_title(&t),

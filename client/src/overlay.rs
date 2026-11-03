@@ -6,10 +6,13 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::NSView;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSAutoresizingMaskOptions, NSProgressIndicator, NSProgressIndicatorStyle, NSView,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGMutablePath};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{
     CAAutoresizingMask, CALayer, CAShapeLayer, CATextLayer, CATransaction, kCAAlignmentCenter, kCAAlignmentLeft,
 };
@@ -97,6 +100,93 @@ impl Banner {
         CATransaction::setDisableActions(true);
         self.pill.setHidden(true);
         CATransaction::commit();
+    }
+}
+
+/// Fills the window until the first picture arrives: the PC's name, what is happening, and a
+/// spinner, instead of a black window.
+pub struct Placeholder {
+    layer: Retained<CALayer>,
+    detail: Retained<CATextLayer>,
+    spinner: Retained<NSProgressIndicator>,
+}
+
+impl Placeholder {
+    /// Main thread only.
+    pub fn attach(window: &Window, title: &str) -> Placeholder {
+        let RawWindowHandle::AppKit(handle) = window.window_handle().expect("window handle").as_raw() else {
+            panic!("not an AppKit window");
+        };
+        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+        let root = view.layer().expect("layer-backed view");
+        let flipped = root.isGeometryFlipped();
+        let bounds = root.bounds().size;
+        let scale = window.scale_factor();
+        let all = CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable;
+        let centred = CAAutoresizingMask::LayerMinXMargin
+            | CAAutoresizingMask::LayerMaxXMargin
+            | CAAutoresizingMask::LayerMinYMargin
+            | CAAutoresizingMask::LayerMaxYMargin;
+        let layer = CALayer::new();
+        layer.setFrame(rect(0.0, 0.0, bounds.width, bounds.height));
+        layer.setAutoresizingMask(all);
+        layer.setBackgroundColor(Some(&color((0.09, 0.09, 0.1, 1.0))));
+        // Offsets from the centre, upwards on screen.
+        let at = |up: f64, h: f64| {
+            let y = bounds.height / 2.0 - h / 2.0 + if flipped { -up } else { up };
+            rect(0.0, y, bounds.width, h)
+        };
+        let text = |size: f64, rgba: Rgba, up: f64| {
+            let t = CATextLayer::new();
+            t.setFrame(at(up, size + 8.0));
+            t.setAutoresizingMask(CAAutoresizingMask::LayerWidthSizable | centred);
+            t.setFontSize(size);
+            t.setContentsScale(scale);
+            t.setForegroundColor(Some(&color(rgba)));
+            t.setAlignmentMode(unsafe { kCAAlignmentCenter });
+            layer.addSublayer(&t);
+            t
+        };
+        set_text(&text(22.0, WHITE, -4.0), title);
+        let detail = text(13.0, (1.0, 1.0, 1.0, 0.55), -34.0);
+        root.addSublayer(&layer);
+
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let size = 32.0;
+        let y = view.bounds().size.height / 2.0 - size / 2.0 + if view.isFlipped() { -40.0 } else { 40.0 };
+        let spinner = NSProgressIndicator::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(view.bounds().size.width / 2.0 - size / 2.0, y), NSSize::new(size, size)),
+        );
+        spinner.setStyle(NSProgressIndicatorStyle::Spinning);
+        spinner.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin
+                | NSAutoresizingMaskOptions::ViewMaxXMargin
+                | NSAutoresizingMaskOptions::ViewMinYMargin
+                | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        );
+        // Light on the dark background whatever the system appearance.
+        if let Some(dark) = unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) } {
+            spinner.setAppearance(Some(&dark));
+        }
+        view.addSubview(&spinner);
+        unsafe { spinner.startAnimation(None) };
+        Placeholder { layer, detail, spinner }
+    }
+
+    pub fn set_detail(&self, text: &str) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        set_text(&self.detail, text);
+        CATransaction::commit();
+    }
+}
+
+impl Drop for Placeholder {
+    fn drop(&mut self) {
+        unsafe { self.spinner.stopAnimation(None) };
+        self.spinner.removeFromSuperview();
+        self.layer.removeFromSuperlayer();
     }
 }
 

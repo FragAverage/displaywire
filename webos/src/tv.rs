@@ -20,6 +20,13 @@ pub enum Backend {
     Ndl,
 }
 
+impl Backend {
+    /// What to ask the server for: both of LG's decoders here only take H.264.
+    pub fn caps(self) -> u8 {
+        proto::stream::CAP_H264
+    }
+}
+
 /// The app id LG's libraries are told: the launcher's `APPID` when started as an app, else ours.
 fn app_id() -> String {
     std::env::var("APPID").unwrap_or_else(|_| "com.displaywire.tv".into())
@@ -62,10 +69,14 @@ impl Decoder {
     }
 }
 
-/// Picture size from the HEVC SPS in an access unit, if it has one.
-fn hevc_size(au: &[u8]) -> Option<(i32, i32)> {
-    let sps = hevc::nals(au).into_iter().find(|n| hevc::nal_type(n) == hevc::SPS)?;
-    hevc::sps_size(sps).map(|(w, h)| (w as i32, h as i32))
+/// Picture size from the SPS in an access unit (HEVC or H.264), if it has one.
+fn sps_size(au: &[u8]) -> Option<(i32, i32)> {
+    let nals = hevc::nals(au);
+    let size = match nals.iter().find(|n| hevc::h264::nal_type(n) == hevc::h264::SPS) {
+        Some(sps) => hevc::h264::sps_size(sps),
+        None => hevc::sps_size(nals.into_iter().find(|n| hevc::nal_type(n) == hevc::SPS)?),
+    };
+    size.map(|(w, h)| (w as i32, h as i32))
 }
 
 /// `DW_VIDEO_SIZE=WxH`: the size to open the decoder at when the stream can't tell us (H.264).
@@ -80,7 +91,7 @@ struct TvSink(Decoder);
 impl VideoSink for TvSink {
     fn frame(&mut self, frame: &Frame) -> bool {
         if frame.keyframe
-            && let Some((w, h)) = size_override().or_else(|| hevc_size(&frame.data))
+            && let Some((w, h)) = size_override().or_else(|| sps_size(&frame.data))
             && let Err(e) = self.0.open(w, h)
         {
             eprintln!("{e}");

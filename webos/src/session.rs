@@ -59,7 +59,8 @@ fn unix_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-pub fn run(server: SocketAddr, key: Key, mut sink: Box<dyn VideoSink + Send>, stop: &AtomicBool) -> Result<(), String> {
+/// `caps`: `proto::stream::CAP_*` flags for the server (`CAP_H264` for LGNC).
+pub fn run(server: SocketAddr, key: Key, caps: u8, mut sink: Box<dyn VideoSink + Send>, stop: &AtomicBool) -> Result<(), String> {
     let sock = transport::udp_socket(transport::any_local(server)).map_err(|e| e.to_string())?;
     sock.connect(server).map_err(|e| e.to_string())?;
     sock.set_read_timeout(Some(Duration::from_millis(2))).map_err(|e| e.to_string())?;
@@ -93,7 +94,7 @@ pub fn run(server: SocketAddr, key: Key, mut sink: Box<dyn VideoSink + Send>, st
             }
             if now >= next_hs {
                 if initiator.is_none() {
-                    let hello = secure::ClientHello { version: VERSION, caps: 0 };
+                    let hello = secure::ClientHello { version: VERSION, caps };
                     initiator = Some(Initiator::start(&key, hello, unix_ms()).map_err(|e| e.to_string())?);
                 }
                 if let Some((_, hs1)) = &initiator {
@@ -104,7 +105,7 @@ pub fn run(server: SocketAddr, key: Key, mut sink: Box<dyn VideoSink + Send>, st
         }
         // Hello makes the server send a frame (a keyframe of an unchanged screen too).
         if alive && !got_video && now >= next_hello {
-            link.send(Msg::Hello { version: VERSION, caps: 0 });
+            link.send(Msg::Hello { version: VERSION, caps });
             next_hello = now + HELLO_INTERVAL_NS;
         }
         if now >= next_ping {

@@ -181,12 +181,13 @@ fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: 
         Some(path) => Box::new(session::Dump::create(&path)?),
         None => Box::new(session::Discard),
     };
-    session::run(addr, server.key, sink, &stop)
+    session::run(addr, server.key, 0, sink, &stop)
 }
 
 #[cfg(target_os = "linux")]
 fn show_stream(addr: std::net::SocketAddr, key: secure::Key, video: VideoArgs, stop: Arc<AtomicBool>) -> Result<(), String> {
-    tv::show(video.backend, video.source, stop, move |sink, stop| session::run(addr, key, sink, stop))
+    let caps = video.backend.caps();
+    tv::show(video.backend, video.source, stop, move |sink, stop| session::run(addr, key, caps, sink, stop))
 }
 
 #[cfg(not(target_os = "linux"))]

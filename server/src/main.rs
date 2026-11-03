@@ -162,8 +162,15 @@ pub struct Cli {
     service: bool,
 }
 
+/// What the video is encoded as. HEVC unless the client asks for H.264 (`CAP_H264`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Codec {
+    Hevc,
+    H264,
+}
+
 pub struct EncodedFrame {
-    /// HEVC Annex B access unit.
+    /// HEVC (or H.264) Annex B access unit.
     pub data: Vec<u8>,
     pub keyframe: bool,
     pub capture_ns: u64,
@@ -185,6 +192,10 @@ pub trait Source {
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String>;
     /// Changes the video bitrate while running. Sources that can't just ignore it.
     fn set_bitrate(&mut self, _bps: u32) {}
+    /// Switches the codec for the next frames (the first is then a keyframe).
+    fn set_codec(&mut self, codec: Codec) -> Result<(), String> {
+        if codec == Codec::Hevc { Ok(()) } else { Err(format!("this source only makes HEVC, not {codec:?}")) }
+    }
 }
 
 struct Shared {
@@ -479,6 +490,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut stats = Stats::new();
     let mut sealed = [0u8; proto::MAX_DATAGRAM];
     let mut applied_kbps = shared.bitrate_kbps.load(Relaxed);
+    let mut applied_codec = Codec::Hevc;
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
@@ -496,6 +508,17 @@ fn run(cli: Cli) -> Result<(), String> {
         if kbps != applied_kbps {
             applied_kbps = kbps;
             source.set_bitrate(kbps * 1000);
+        }
+        let codec = if shared.caps.load(Relaxed) & proto::stream::CAP_H264 != 0 { Codec::H264 } else { Codec::Hevc };
+        if codec != applied_codec {
+            applied_codec = codec;
+            match source.set_codec(codec) {
+                Ok(()) => {
+                    println!("video: now {codec:?}");
+                    shared.keyframe.store(true, Relaxed);
+                }
+                Err(e) => println!("video: can't switch to {codec:?}: {e}"),
+            }
         }
         let force = shared.keyframe.swap(false, Relaxed);
         // Frame-rate cap: wait before taking the next frame (which is then the latest

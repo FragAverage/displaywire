@@ -22,7 +22,7 @@ use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, GetCurren
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::core::{BOOL, s, w};
 
-use crate::{Cli, EncodedFrame, Source};
+use crate::{Cli, Codec, EncodedFrame, Source};
 use capture::Capture;
 use convert::Converter;
 use encoder::Encoder;
@@ -164,6 +164,11 @@ pub struct ScreenSource {
     pointer_dirty: bool,
     last_encode_ns: u64,
     interval_ns: u64,
+    codec: Codec,
+    /// Encoded size, frame rate and current bitrate, to rebuild the encoder for another codec.
+    size: (u32, u32),
+    fps: u32,
+    bitrate: u32,
 }
 
 impl ScreenSource {
@@ -189,8 +194,8 @@ impl ScreenSource {
         let bitrate = (cli.mbps * 1e6) as u32;
         let encoder = match cli.encoder.as_str() {
             "mft" => AnyEncoder::Mft(Encoder::new(&capture.device, w, h, cli.fps, bitrate)?),
-            "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(&capture.device, w, h, cli.fps, bitrate)?)),
-            "auto" => match NvEncoder::new(&capture.device, w, h, cli.fps, bitrate) {
+            "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(&capture.device, w, h, cli.fps, bitrate, Codec::Hevc)?)),
+            "auto" => match NvEncoder::new(&capture.device, w, h, cli.fps, bitrate, Codec::Hevc) {
                 Ok(e) => AnyEncoder::Nvenc(Box::new(e)),
                 Err(e) => {
                     println!("encoder: direct NVENC unavailable ({e}); using Media Foundation");
@@ -211,6 +216,10 @@ impl ScreenSource {
             pointer_dirty: false,
             last_encode_ns: 0,
             interval_ns: 1_000_000_000 / cli.fps.max(1) as u64,
+            codec: Codec::Hevc,
+            size: (w, h),
+            fps: cli.fps,
+            bitrate,
         })
     }
 
@@ -251,14 +260,33 @@ impl ScreenSource {
             p.report(now);
         }
         let capture_ns = self.in_flight.pop_front().unwrap_or(capture_ns);
-        let keyframe = hevc::is_keyframe(&data);
+        let keyframe = match self.codec {
+            Codec::Hevc => hevc::is_keyframe(&data),
+            Codec::H264 => hevc::h264::is_keyframe(&data),
+        };
         Ok(Some(EncodedFrame { data, keyframe, capture_ns }))
     }
 }
 
 impl Source for ScreenSource {
     fn set_bitrate(&mut self, bps: u32) {
+        self.bitrate = bps;
         self.encoder.set_bitrate(bps);
+    }
+
+    fn set_codec(&mut self, codec: Codec) -> Result<(), String> {
+        if codec == self.codec {
+            return Ok(());
+        }
+        if matches!(self.encoder, AnyEncoder::Mft(_)) {
+            return Err("only the direct NVENC encoder can switch codec".into());
+        }
+        let (w, h) = self.size;
+        let encoder = NvEncoder::new(&self.capture.device, w, h, self.fps, self.bitrate, codec).map_err(|e| e.to_string())?;
+        self.encoder = AnyEncoder::Nvenc(Box::new(encoder));
+        self.in_flight.clear();
+        self.codec = codec;
+        Ok(())
     }
 
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {

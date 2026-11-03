@@ -1,5 +1,5 @@
 //! HEVC Annex B helpers: NAL splitting, access units, and conversion to the
-//! length-prefixed samples VideoToolbox wants.
+//! length-prefixed samples VideoToolbox wants. `h264` has the few H.264 equivalents.
 
 pub const VPS: u8 = 32;
 pub const SPS: u8 = 33;
@@ -89,19 +89,24 @@ pub fn to_sample(au: &[u8]) -> Sample {
     Sample { param_sets, data }
 }
 
-/// Picture size from an SPS NAL (with its 2-byte header), after the conformance window crop.
-pub fn sps_size(sps: &[u8]) -> Option<(u32, u32)> {
-    // Drop emulation prevention bytes (00 00 03 → 00 00).
-    let mut rbsp = Vec::with_capacity(sps.len());
+/// A NAL's payload without emulation prevention bytes (00 00 03 → 00 00).
+fn rbsp(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len());
     let mut zeros = 0;
-    for &b in sps.get(2..)? {
+    for &b in payload {
         if zeros >= 2 && b == 3 {
             zeros = 0;
             continue;
         }
         zeros = if b == 0 { zeros + 1 } else { 0 };
-        rbsp.push(b);
+        out.push(b);
     }
+    out
+}
+
+/// Picture size from an SPS NAL (with its 2-byte header), after the conformance window crop.
+pub fn sps_size(sps: &[u8]) -> Option<(u32, u32)> {
+    let rbsp = rbsp(sps.get(2..)?);
     let mut r = Bits { data: &rbsp, pos: 0 };
     r.skip(4); // sps_video_parameter_set_id
     let max_sub_layers_minus1 = r.bits(3)?;
@@ -168,6 +173,99 @@ impl Bits<'_> {
         }
         Some((1 << zeros) - 1 + self.bits(zeros)?)
     }
+
+    fn se(&mut self) -> Option<i32> {
+        let k = self.ue()?;
+        Some(if k % 2 == 1 { k.div_ceil(2) as i32 } else { -((k / 2) as i32) })
+    }
+}
+
+/// The same for H.264 streams (one-byte NAL headers), for clients that can only decode H.264.
+pub mod h264 {
+    use super::{Bits, nals, rbsp};
+
+    pub const IDR: u8 = 5;
+    pub const SPS: u8 = 7;
+
+    pub fn nal_type(nal: &[u8]) -> u8 {
+        nal[0] & 0x1f
+    }
+
+    /// True if the access unit holds an IDR picture.
+    pub fn is_keyframe(au: &[u8]) -> bool {
+        nals(au).iter().any(|n| nal_type(n) == IDR)
+    }
+
+    /// Picture size from an SPS NAL (with its header), after frame cropping.
+    pub fn sps_size(sps: &[u8]) -> Option<(u32, u32)> {
+        let rbsp = rbsp(sps.get(1..)?);
+        let mut r = Bits { data: &rbsp, pos: 0 };
+        let profile_idc = r.bits(8)?;
+        r.skip(16); // constraint flags, level_idc
+        r.ue()?; // seq_parameter_set_id
+        let mut chroma_format_idc = 1;
+        if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(&profile_idc) {
+            chroma_format_idc = r.ue()?;
+            if chroma_format_idc == 3 {
+                r.skip(1); // separate_colour_plane_flag
+            }
+            r.ue()?; // bit_depth_luma_minus8
+            r.ue()?; // bit_depth_chroma_minus8
+            r.skip(1); // qpprime_y_zero_transform_bypass_flag
+            if r.bits(1)? == 1 {
+                // seq_scaling_matrix_present_flag: skip each list that is present.
+                for i in 0..if chroma_format_idc == 3 { 12 } else { 8 } {
+                    if r.bits(1)? == 1 {
+                        let size = if i < 6 { 16 } else { 64 };
+                        let (mut last, mut next) = (8i32, 8i32);
+                        for _ in 0..size {
+                            if next != 0 {
+                                next = (last + r.se()?).rem_euclid(256);
+                            }
+                            last = if next == 0 { last } else { next };
+                        }
+                    }
+                }
+            }
+        }
+        r.ue()?; // log2_max_frame_num_minus4
+        match r.ue()? {
+            0 => {
+                r.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+            }
+            1 => {
+                r.skip(1); // delta_pic_order_always_zero_flag
+                r.se()?; // offset_for_non_ref_pic
+                r.se()?; // offset_for_top_to_bottom_field
+                for _ in 0..r.ue()? {
+                    r.se()?; // offset_for_ref_frame
+                }
+            }
+            _ => {}
+        }
+        r.ue()?; // max_num_ref_frames
+        r.skip(1); // gaps_in_frame_num_value_allowed_flag
+        let width_mbs = r.ue()? + 1;
+        let height_units = r.ue()? + 1;
+        let frame_mbs_only = r.bits(1)?;
+        if frame_mbs_only == 0 {
+            r.skip(1); // mb_adaptive_frame_field_flag
+        }
+        r.skip(1); // direct_8x8_inference_flag
+        let mut width = width_mbs * 16;
+        let mut height = (2 - frame_mbs_only) * height_units * 16;
+        if r.bits(1)? == 1 {
+            let (sub_w, sub_h) = match chroma_format_idc {
+                1 => (2, 2),
+                2 => (2, 1),
+                _ => (1, 1),
+            };
+            let (left, right, top, bottom) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
+            width = width.checked_sub(sub_w * (left + right))?;
+            height = height.checked_sub(sub_h * (2 - frame_mbs_only) * (top + bottom))?;
+        }
+        Some((width, height))
+    }
 }
 
 #[cfg(test)]
@@ -216,5 +314,16 @@ mod tests {
         ];
         assert_eq!(sps_size(&sps), Some((2560, 1440)));
         assert_eq!(sps_size(&sps[..10]), None);
+    }
+
+    #[test]
+    fn h264_sps_size_with_cropping() {
+        // 1920x1080 High profile from x264 (coded as 1088 lines, cropped).
+        let sps = [
+            0x67, 0x64, 0x00, 0x33, 0xac, 0xb4, 0x03, 0xc0, 0x11, 0x3f, 0x2e, 0x02, 0xd4, 0x04, 0x04, 0x05, 0x00, 0x00, 0x03, 0x00,
+            0x01, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x8f, 0x18, 0x32, 0xa0,
+        ];
+        assert_eq!(h264::sps_size(&sps), Some((1920, 1080)));
+        assert_eq!(h264::sps_size(&sps[..6]), None);
     }
 }

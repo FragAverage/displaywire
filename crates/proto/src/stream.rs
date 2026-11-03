@@ -23,6 +23,8 @@ pub const AUDIO_CHANNELS: usize = 2;
 pub const CAP_AUDIO: u8 = 1;
 /// Client → server microphone.
 pub const CAP_MIC: u8 = 2;
+/// Video as H.264 instead of HEVC (the client can only decode H.264, e.g. LG's LGNC).
+pub const CAP_H264: u8 = 4;
 
 const HELLO: u8 = 1;
 const PING: u8 = 2;

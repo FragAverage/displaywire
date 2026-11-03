@@ -20,19 +20,21 @@ pub struct Prefs {
     pub quiet_wifi: bool,
     /// Capture the pointer whenever the stream window has focus, without ⌃⌥M.
     pub auto_capture: bool,
+    /// Let the server lower the bitrate when the network struggles (`bitrate_mbps` is then the ceiling).
+    pub adaptive: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         let s = Settings::default();
-        Prefs { bitrate_mbps: s.bitrate_kbps / 1000, fps_cap: s.fps_cap, fec_percent: s.fec_percent, volume: 100, muted: false, clipboard: true, quiet_wifi: true, auto_capture: false }
+        Prefs { bitrate_mbps: s.bitrate_kbps / 1000, fps_cap: s.fps_cap, fec_percent: s.fec_percent, volume: 100, muted: false, clipboard: true, quiet_wifi: true, auto_capture: false, adaptive: s.adaptive }
     }
 }
 
 impl Prefs {
     /// What the server is asked to apply.
     pub fn for_server(&self) -> Settings {
-        Settings { bitrate_kbps: self.bitrate_mbps * 1000, fps_cap: self.fps_cap, fec_percent: self.fec_percent }.clamped()
+        Settings { bitrate_kbps: self.bitrate_mbps * 1000, fps_cap: self.fps_cap, fec_percent: self.fec_percent, adaptive: self.adaptive }.clamped()
     }
 
     /// Linear gain for the audio output.
@@ -54,6 +56,7 @@ impl Prefs {
                 "clipboard" => p.clipboard = v != "false",
                 "quiet_wifi" => p.quiet_wifi = v != "false",
                 "auto_capture" => p.auto_capture = v == "true",
+                "adaptive" => p.adaptive = v != "false",
                 _ => {}
             }
         }
@@ -79,8 +82,16 @@ impl Prefs {
         if let Some(path) = state_file("settings") {
             let _ = path.parent().map(std::fs::create_dir_all);
             let text = format!(
-                "bitrate_mbps={}\nfps_cap={}\nfec_percent={}\nvolume={}\nmuted={}\nclipboard={}\nquiet_wifi={}\nauto_capture={}\n",
-                self.bitrate_mbps, self.fps_cap, self.fec_percent, self.volume, self.muted, self.clipboard, self.quiet_wifi, self.auto_capture
+                "bitrate_mbps={}\nfps_cap={}\nfec_percent={}\nvolume={}\nmuted={}\nclipboard={}\nquiet_wifi={}\nauto_capture={}\nadaptive={}\n",
+                self.bitrate_mbps,
+                self.fps_cap,
+                self.fec_percent,
+                self.volume,
+                self.muted,
+                self.clipboard,
+                self.quiet_wifi,
+                self.auto_capture,
+                self.adaptive
             );
             let _ = std::fs::write(path, text);
         }

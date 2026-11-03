@@ -44,6 +44,7 @@ const RUMBLE: u8 = 15;
 const LIGHT: u8 = 16;
 const CURSOR: u8 = 17;
 const CURSOR_SHAPE: u8 = 18;
+const FEEDBACK: u8 = 19;
 
 const FLAG_KEYFRAME: u8 = 1;
 const FLAG_ABSOLUTE: u8 = 1;
@@ -73,6 +74,19 @@ pub struct CursorShape {
     pub hot_y: u16,
     /// Where this datagram's bytes go in the `width × height × 4` image.
     pub offset: u32,
+}
+
+/// Client → server, every 50 ms while video flows: how the video got here, for the server's rate control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Feedback {
+    /// Video datagrams that arrived, and how many the frames they belong to were sent as (data + repair).
+    pub received: u16,
+    pub expected: u16,
+    /// Frames that never arrived at all, or couldn't be rebuilt.
+    pub frames_lost: u16,
+    /// Median capture → arrival time of the frames completed in this period, in µs on the server's
+    /// clock (so it includes the clock-offset estimate's error; only its changes matter); -1 if none.
+    pub delay_us: i32,
 }
 
 /// Gamepads one client can have connected at once (XInput's limit).
@@ -218,12 +232,15 @@ pub struct Settings {
     pub fps_cap: u16,
     /// Repair packets per frame, as a percentage of its data packets.
     pub fec_percent: u8,
+    /// Let the server lower the bitrate (from `bitrate_kbps`, the ceiling) and raise repair packets (from
+    /// `fec_percent`) when the network struggles. Absent from older clients, which means yes.
+    pub adaptive: bool,
 }
 
 impl Default for Settings {
     /// The server's own defaults.
     fn default() -> Self {
-        Settings { bitrate_kbps: 50_000, fps_cap: 0, fec_percent: 10 }
+        Settings { bitrate_kbps: 50_000, fps_cap: 0, fec_percent: 10, adaptive: true }
     }
 }
 
@@ -238,6 +255,7 @@ impl Settings {
             bitrate_kbps: self.bitrate_kbps.clamp(Self::MIN_BITRATE_KBPS, Self::MAX_BITRATE_KBPS),
             fps_cap: if self.fps_cap == 0 { 0 } else { self.fps_cap.clamp(1, 1000) },
             fec_percent: self.fec_percent.min(Self::MAX_FEC_PERCENT),
+            adaptive: self.adaptive,
         }
     }
 }
@@ -295,6 +313,7 @@ pub enum Msg<'a> {
     /// position, 0..=65535 across the streamed screen; `shape` names the image (`CursorShape::id`).
     Cursor { visible: bool, x: u16, y: u16, shape: u32 },
     CursorShape(CursorShape, &'a [u8]),
+    Feedback(Feedback),
 }
 
 impl<'a> Msg<'a> {
@@ -395,6 +414,13 @@ impl<'a> Msg<'a> {
                 w.u32(c.offset);
                 w.bytes(payload);
             }
+            Msg::Feedback(f) => {
+                w.u8(FEEDBACK);
+                w.u16(f.received);
+                w.u16(f.expected);
+                w.u16(f.frames_lost);
+                w.u32(f.delay_us as u32);
+            }
             Msg::Light { slot, r, g, b } => {
                 w.u8(LIGHT);
                 w.u8(slot);
@@ -424,6 +450,7 @@ impl<'a> Msg<'a> {
                 w.u32(s.bitrate_kbps);
                 w.u16(s.fps_cap);
                 w.u8(s.fec_percent);
+                w.u8(s.adaptive as u8);
             }
             Msg::Audio(a, payload) | Msg::Mic(a, payload) => {
                 w.u8(if matches!(self, Msg::Audio(..)) { AUDIO } else { MIC });
@@ -512,6 +539,7 @@ impl<'a> Msg<'a> {
                 Msg::Pads(p)
             }
             RUMBLE => Msg::Rumble { slot: r.u8()?, large: r.u8()?, small: r.u8()? },
+            FEEDBACK => Msg::Feedback(Feedback { received: r.u16()?, expected: r.u16()?, frames_lost: r.u16()?, delay_us: r.u32()? as i32 }),
             LIGHT => Msg::Light { slot: r.u8()?, r: r.u8()?, g: r.u8()?, b: r.u8()? },
             CURSOR => Msg::Cursor { visible: r.u8()? != 0, x: r.u16()?, y: r.u16()?, shape: r.u32()? },
             CURSOR_SHAPE => {
@@ -526,7 +554,12 @@ impl<'a> Msg<'a> {
             XFER => Msg::Xfer { id: r.u32()?, index: r.u32()?, payload: r.rest() },
             XFER_ACK => Msg::XferAck { id: r.u32()?, next: r.u32()?, sack: r.u64()? },
             XFER_CANCEL => Msg::XferCancel { id: r.u32()?, reason: r.u8()? },
-            SETTINGS => Msg::Settings(Settings { bitrate_kbps: r.u32()?, fps_cap: r.u16()?, fec_percent: r.u8()? }),
+            SETTINGS => Msg::Settings(Settings {
+                bitrate_kbps: r.u32()?,
+                fps_cap: r.u16()?,
+                fec_percent: r.u8()?,
+                adaptive: r.u8().is_none_or(|a| a != 0),
+            }),
             kind @ (AUDIO | MIC) => {
                 let format = match r.u8()? {
                     0 => AudioFormat::Pcm16,
@@ -579,7 +612,7 @@ mod tests {
             Msg::Input(input),
             Msg::Audio(Audio { seq: 5, format: AudioFormat::Pcm16, capture_ns: 99 }, &[1u8; 960]),
             Msg::Mic(Audio { seq: u32::MAX, format: AudioFormat::Pcm16, capture_ns: 0 }, &[]),
-            Msg::Settings(Settings { bitrate_kbps: 80_000, fps_cap: 120, fec_percent: 15 }),
+            Msg::Settings(Settings { bitrate_kbps: 80_000, fps_cap: 120, fec_percent: 15, adaptive: false }),
             Msg::Xfer { id: 7, index: 0, payload: &[1, 2, 3] },
             Msg::Xfer { id: u32::MAX, index: u32::MAX, payload: &[9; 1024] },
             Msg::XferAck { id: 7, next: 12, sack: 0xDEAD_BEEF_0000_0001 },
@@ -595,10 +628,10 @@ mod tests {
 
     #[test]
     fn settings_are_clamped_to_what_the_server_accepts() {
-        let wild = Settings { bitrate_kbps: 1, fps_cap: 60_000, fec_percent: 255 };
-        assert_eq!(wild.clamped(), Settings { bitrate_kbps: 2_000, fps_cap: 1000, fec_percent: 50 });
+        let wild = Settings { bitrate_kbps: 1, fps_cap: 60_000, fec_percent: 255, adaptive: true };
+        assert_eq!(wild.clamped(), Settings { bitrate_kbps: 2_000, fps_cap: 1000, fec_percent: 50, adaptive: true });
         assert_eq!(Settings::default().clamped(), Settings::default());
-        assert_eq!(Settings { bitrate_kbps: 9_999_999, fps_cap: 0, fec_percent: 0 }.clamped().bitrate_kbps, 500_000);
+        assert_eq!(Settings { bitrate_kbps: 9_999_999, fps_cap: 0, fec_percent: 0, adaptive: true }.clamped().bitrate_kbps, 500_000);
     }
 
     #[test]
@@ -681,5 +714,17 @@ mod tests {
         assert_eq!(Msg::decode(&buf[..n]), None);
         let n = Msg::CursorShape(CursorShape { width: MAX_CURSOR_SIZE + 1, offset: 0, ..c }, &payload[..4]).encode(&mut buf);
         assert_eq!(Msg::decode(&buf[..n]), None);
+    }
+
+    #[test]
+    fn feedback_round_trips_and_old_settings_mean_adaptive() {
+        let mut buf = [0u8; crate::MAX_PLAIN];
+        let m = Msg::Feedback(Feedback { received: 900, expected: 1000, frames_lost: 2, delay_us: -1 });
+        let n = m.encode(&mut buf);
+        assert_eq!(Msg::decode(&buf[..n]), Some(m));
+        // A settings message from before `adaptive` existed: one byte shorter.
+        let n = Msg::Settings(Settings { bitrate_kbps: 30_000, fps_cap: 0, fec_percent: 10, adaptive: false }).encode(&mut buf);
+        let Some(Msg::Settings(s)) = Msg::decode(&buf[..n - 1]) else { panic!("decodes") };
+        assert!(s.adaptive);
     }
 }

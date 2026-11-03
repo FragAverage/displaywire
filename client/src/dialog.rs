@@ -89,7 +89,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     alert.addButtonWithTitle(ns_string!("Save"));
     alert.addButtonWithTitle(ns_string!("Cancel"));
 
-    let (w, h) = (360.0, 214.0);
+    let (w, h) = (360.0, 238.0);
     let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, w, h));
     let rows = [h - 28.0, h - 62.0, h - 96.0, h - 128.0];
     let (lx, cx) = (0.0, 150.0);
@@ -133,6 +133,12 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
     capture.setFrame(rect(lx, 48.0, w, 20.0));
     capture.setState(if current.auto_capture { NSControlStateValueOn } else { NSControlStateValueOff });
     view.addSubview(&capture);
+    let adaptive = unsafe {
+        NSButton::checkboxWithTitle_target_action(ns_string!("Lower the bitrate when the network struggles"), None, None, mtm)
+    };
+    adaptive.setFrame(rect(lx, 72.0, w, 20.0));
+    adaptive.setState(if current.adaptive { NSControlStateValueOn } else { NSControlStateValueOff });
+    view.addSubview(&adaptive);
     alert.setAccessoryView(Some(&view));
 
     NSApplication::sharedApplication(mtm).activate();
@@ -151,6 +157,7 @@ pub fn ask_settings(current: Prefs) -> Option<Prefs> {
             clipboard: clipboard.state() == NSControlStateValueOn,
             quiet_wifi: wifi.state() == NSControlStateValueOn,
             auto_capture: capture.state() == NSControlStateValueOn,
+            adaptive: adaptive.state() == NSControlStateValueOn,
         }
         .clamped(),
     )

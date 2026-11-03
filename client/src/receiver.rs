@@ -118,6 +118,8 @@ struct Receiver {
     /// The PC's pointer, drawn here as the Mac cursor: images being put together, and the last state.
     cursors: cursor::Assembler,
     cursor_state: Option<(bool, u16, u16, u32)>,
+    /// What the next `Msg::Feedback` reports, for the server's rate control.
+    feedback: FeedbackCounts,
     mic_seq: u32,
     /// Chunks sent and peak level since the last report, and when that was.
     mic_stats: (u32, i16, u64),
@@ -172,6 +174,7 @@ impl Receiver {
             pads,
             cursors: cursor::Assembler::default(),
             cursor_state: None,
+            feedback: FeedbackCounts::default(),
             mic_seq: 0,
             mic_stats: (0, 0, 0),
             audio: audio::Player::new()
@@ -323,6 +326,13 @@ impl Receiver {
             }
             if self.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
                 self.need_keyframe = true;
+                self.feedback.frames_lost += 1;
+            }
+            if got_video && alive && now >= self.feedback.due_ns {
+                let f = self.feedback.take(now);
+                let mut buf = [0u8; 32];
+                let n = Msg::Feedback(f).encode(&mut buf);
+                self.link.send(&buf[..n]);
             }
             if streaming && self.need_keyframe && now - self.last_keyframe_request > KEYFRAME_RETRY_NS {
                 self.send(Msg::KeyframeRequest);
@@ -382,6 +392,7 @@ impl Receiver {
             match Msg::decode(&plain[..len]) {
                 Some(Msg::Video(..)) if self.sim_loss.as_mut().is_some_and(SimLoss::drop_this) => {}
                 Some(Msg::Video(v, payload)) => {
+                    self.feedback.datagram(v.frame, v.frags as u32 + v.parity as u32, rx);
                     last_video = rx;
                     got_video = true;
                     self.stats.bytes += n as u64;
@@ -421,7 +432,11 @@ impl Receiver {
     }
 
     fn on_frame(&mut self, frame: Frame) {
+        if let Some(o) = self.clock.offset() {
+            self.feedback.delays.push((frame.complete_ns as i64 + o - frame.capture_ns as i64) / 1000);
+        }
         if frame.skipped > 0 {
+            self.feedback.frames_lost += frame.skipped;
             self.stats.lost += frame.skipped;
             self.binner.lost(frame.skipped);
             self.need_keyframe = true;
@@ -513,6 +528,77 @@ impl Receiver {
         let _ = self.proxy.send_event(UserEvent::VideoSize(w as u32, h as u32));
         self.decoder = Some(Decoder { param_sets, session });
         Ok(())
+    }
+}
+
+const FEEDBACK_EVERY_NS: u64 = 50 * MS;
+
+/// Video arrivals since the last `Msg::Feedback`.
+#[derive(Default)]
+struct FeedbackCounts {
+    received: u32,
+    expected: u32,
+    frames_lost: u32,
+    /// Capture → complete, µs on the server's clock, per frame.
+    delays: Vec<i64>,
+    /// Frames still arriving: (id, datagrams sent, datagrams here, first seen). A frame is added to the
+    /// counts once settled, so one straddling two reports doesn't look half lost in the first.
+    open: VecDeque<(u32, u32, u32, u64)>,
+    due_ns: u64,
+}
+
+/// A frame is settled once this many newer frames have started, or after `SETTLE_NS`.
+const SETTLE_FRAMES: u32 = 4;
+const SETTLE_NS: u64 = 300 * MS;
+
+impl FeedbackCounts {
+    fn datagram(&mut self, frame: u32, sent: u32, now_ns: u64) {
+        match self.open.iter_mut().find(|f| f.0 == frame) {
+            Some(f) => f.2 += 1,
+            None => {
+                if self.open.len() == 64 {
+                    self.settle_one();
+                }
+                self.open.push_back((frame, sent, 1, now_ns));
+            }
+        }
+        self.settle(frame, now_ns);
+    }
+
+    fn settle(&mut self, newest: u32, now_ns: u64) {
+        while let Some(&(id, _, _, first)) = self.open.front() {
+            if newest.wrapping_sub(id) < SETTLE_FRAMES && now_ns - first < SETTLE_NS {
+                break;
+            }
+            self.settle_one();
+        }
+    }
+
+    fn settle_one(&mut self) {
+        if let Some((_, sent, got, _)) = self.open.pop_front() {
+            self.expected += sent;
+            self.received += got.min(sent);
+        }
+    }
+
+    /// The report, and a fresh start for the next one.
+    fn take(&mut self, now_ns: u64) -> proto::stream::Feedback {
+        if let Some(&(newest, ..)) = self.open.back() {
+            self.settle(newest, now_ns);
+        }
+        self.delays.sort_unstable();
+        let delay_us = self.delays.get(self.delays.len() / 2).map_or(-1, |&d| d.clamp(0, i32::MAX as i64) as i32);
+        let clip = |v: u32| v.min(u16::MAX as u32) as u16;
+        let f = proto::stream::Feedback {
+            received: clip(self.received),
+            expected: clip(self.expected),
+            frames_lost: clip(self.frames_lost),
+            delay_us,
+        };
+        (self.received, self.expected, self.frames_lost) = (0, 0, 0);
+        self.delays.clear();
+        self.due_ns = now_ns + FEEDBACK_EVERY_NS;
+        f
     }
 }
 
@@ -623,5 +709,35 @@ impl Stats {
         }
         *self = Stats { window_start: now, ..Stats::new() };
         Some((line, title))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_straddling_two_reports_counts_once_settled() {
+        let mut f = FeedbackCounts::default();
+        // Frame 0: 10 datagrams sent, 6 here before the report, 4 after.
+        for _ in 0..6 {
+            f.datagram(0, 10, 0);
+        }
+        let first = f.take(MS);
+        assert_eq!((first.expected, first.received), (0, 0), "not settled yet");
+        for _ in 0..4 {
+            f.datagram(0, 10, 2 * MS);
+        }
+        for id in 1..=SETTLE_FRAMES {
+            f.datagram(id, 1, 3 * MS);
+        }
+        let second = f.take(4 * MS);
+        assert_eq!((second.expected, second.received), (10, 10));
+        // A frame with a datagram lost shows it after settling by time.
+        f.datagram(100, 3, 10 * MS);
+        f.datagram(100, 3, 10 * MS);
+        let third = f.take(10 * MS + SETTLE_NS);
+        // Frames 1..=4 (one datagram each, all here) settle too.
+        assert_eq!((third.expected, third.received), (4 + 3, 4 + 2));
     }
 }

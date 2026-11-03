@@ -10,6 +10,7 @@ mod clients;
 mod file;
 mod mic;
 mod pairing;
+mod rate;
 mod transfer;
 #[cfg(any(windows, feature = "ui-dev"))]
 mod ui;
@@ -546,8 +547,9 @@ fn run(cli: Cli) -> Result<(), String> {
             continue;
         }
 
+        // Rate control moves in small steps; the encoder is told about real changes only.
         let kbps = shared.bitrate_kbps.load(Relaxed);
-        if kbps != applied_kbps {
+        if kbps.abs_diff(applied_kbps) * 50 >= applied_kbps.max(1) {
             applied_kbps = kbps;
             source.set_bitrate(kbps * 1000);
         }
@@ -583,6 +585,52 @@ fn run(cli: Cli) -> Result<(), String> {
         });
         frame_id = frame_id.wrapping_add(1);
         stats.frame(&frame, encoded_ns, now_ns(), &shared);
+    }
+}
+
+/// The rate controller (`rate`) and what it last gave the stream loop through `Shared`.
+struct Rate {
+    ctl: rate::RateControl,
+    /// The user's settings: ceiling kbit/s, base repair %, adaptive.
+    settings: (u32, u8, bool),
+    published: (u32, u8),
+    logged_ns: u64,
+}
+
+impl Rate {
+    fn new(shared: &Shared) -> Rate {
+        let (kbps, fec) = (shared.bitrate_kbps.load(Relaxed), shared.fec_percent.load(Relaxed));
+        Rate { ctl: rate::RateControl::new(kbps, fec, true), settings: (kbps, fec, true), published: (kbps, fec), logged_ns: 0 }
+    }
+
+    fn settings(&self) -> (u32, u8, bool) {
+        self.settings
+    }
+
+    fn set(&mut self, kbps: u32, fec: u8, adaptive: bool) {
+        self.settings = (kbps, fec, adaptive);
+        self.ctl.set(kbps, fec, adaptive);
+    }
+
+    fn reset(&mut self) {
+        self.ctl.reset();
+    }
+
+    fn on_feedback(&mut self, now_ns: u64, f: &proto::stream::Feedback) {
+        self.ctl.on_feedback(now_ns, f);
+    }
+
+    /// Hands the current bitrate and repair level to the stream loop, and logs real moves.
+    fn publish(&mut self, shared: &Shared) {
+        let (kbps, fec) = self.ctl.current();
+        shared.bitrate_kbps.store(kbps, Relaxed);
+        shared.fec_percent.store(fec, Relaxed);
+        let (was_kbps, was_fec) = self.published;
+        let now = now_ns();
+        if (kbps.abs_diff(was_kbps) * 20 > was_kbps || fec != was_fec) && now - self.logged_ns > SEC {
+            println!("rate: {:.1} Mbps, loss protection {fec}%", kbps as f64 / 1000.0);
+            (self.published, self.logged_ns) = ((kbps, fec), now);
+        }
     }
 }
 
@@ -771,6 +819,7 @@ fn control(
     let mut out = [0u8; proto::MAX_DATAGRAM];
     let mut injector = Injector::new();
     let mut gamepads = Gamepads::new();
+    let mut rate = Rate::new(shared);
     let mut active: Option<(Link, ReplayWindow)> = None;
     let mut pending: Vec<Pending> = Vec::new();
     // Checking a forged handshake is hashing only; this bounds what a flood of them costs.
@@ -898,6 +947,7 @@ fn control(
                     shared.keyframe.store(true, Relaxed);
                     injector.reset();
                     gamepads.reset();
+                    rate.reset();
                     active = Some((link, p.window));
                     Some(len)
                 } else {
@@ -920,12 +970,22 @@ fn control(
                     }
                     Some(Msg::Settings(s)) => {
                         let s = s.clamped();
-                        let changed = shared.bitrate_kbps.swap(s.bitrate_kbps, Relaxed) != s.bitrate_kbps
-                            || shared.fps_cap.swap(s.fps_cap, Relaxed) != s.fps_cap
-                            || shared.fec_percent.swap(s.fec_percent, Relaxed) != s.fec_percent;
+                        let changed = shared.fps_cap.swap(s.fps_cap, Relaxed) != s.fps_cap || rate.settings() != (s.bitrate_kbps, s.fec_percent, s.adaptive);
+                        rate.set(s.bitrate_kbps, s.fec_percent, s.adaptive);
+                        rate.publish(shared);
                         if changed {
-                            println!("{from}: settings {} Mbps, fps cap {}, loss protection {}%", s.bitrate_kbps / 1000, s.fps_cap, s.fec_percent);
+                            println!(
+                                "{from}: settings {} Mbps{}, fps cap {}, loss protection {}%",
+                                s.bitrate_kbps / 1000,
+                                if s.adaptive { " (most)" } else { " (fixed)" },
+                                s.fps_cap,
+                                s.fec_percent
+                            );
                         }
+                    }
+                    Some(Msg::Feedback(f)) => {
+                        rate.on_feedback(now_ns(), &f);
+                        rate.publish(shared);
                     }
                     Some(msg @ (Msg::Xfer { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. })) => {
                         if let Some((link, _)) = &active {

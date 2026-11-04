@@ -89,6 +89,10 @@ pub struct Cli {
     /// Target frame rate (the encoder's rate-control assumption; capture follows the display).
     #[arg(long, default_value_t = 120)]
     pub fps: u32,
+    /// Mac: scale the picture down to at most this many pixels high before encoding (2160, 1440,
+    /// 1080...; 0 keeps the display's own size). The menu bar changes it while running.
+    #[arg(long, default_value_t = 0)]
+    pub max_height: u32,
     /// Encoder bitrate.
     #[arg(long, default_value_t = 50.0)]
     pub mbps: f64,
@@ -594,6 +598,8 @@ fn run(cli: Cli) -> Result<(), String> {
             windows::tray::start(shared.clone());
             windows::updater::start();
         }
+        #[cfg(target_os = "macos")]
+        macos::MAX_HEIGHT.store(cli.max_height, Relaxed);
         #[cfg(target_os = "macos")]
         macos::while_connected(shared.clone(), !cli.no_wifi_tuning);
         let opener = stream_opener(&cli, &shared, &sock)?;

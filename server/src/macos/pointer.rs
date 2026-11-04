@@ -65,13 +65,14 @@ fn location() -> CGPoint {
 }
 
 impl Pointer {
-    /// The pointer as `display` shows it: 0..=65535 across, and hidden when it's on another display.
-    pub fn state(&self, display: u32) -> PointerState {
+    /// The pointer as `display` shows it, in a picture `video_width` pixels wide: 0..=65535 across,
+    /// and hidden when it's on another display.
+    pub fn state(&self, display: u32, video_width: u32) -> PointerState {
         let b = cg::bounds(display);
         let at = location();
         let (fx, fy) = ((at.x - b.origin.x) / b.size.width, (at.y - b.origin.y) / b.size.height);
         let inside = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
-        let shape = self.refresh(display);
+        let shape = self.refresh(video_width as f64 / b.size.width);
         PointerState { visible: inside && shape.is_some(), x: (fx.clamp(0.0, 1.0) * 65535.0) as u16, y: (fy.clamp(0.0, 1.0) * 65535.0) as u16, shape: shape.unwrap_or(0) }
     }
 
@@ -79,17 +80,15 @@ impl Pointer {
         self.image.borrow().as_ref().map(|(i, _)| PointerImage { id: i.id, width: i.width, height: i.height, hot: i.hot, rgba: i.rgba.clone() })
     }
 
-    /// The current shape's id, drawing it again now and then.
-    fn refresh(&self, display: u32) -> Option<u32> {
+    /// The current shape's id, drawing it again now and then at `scale` video pixels per point.
+    fn refresh(&self, scale: f64) -> Option<u32> {
         let now = now_ns();
         if let Some((i, at)) = &*self.image.borrow()
             && now - at < SHAPE_EVERY_NS
         {
             return Some(i.id);
         }
-        let (pixels, ..) = cg::pixel_size(display);
-        let scale = (pixels as f64 / cg::bounds(display).size.width).max(1.0);
-        let image = current(scale);
+        let image = current(scale.max(0.5));
         let id = image.as_ref().map(|i| i.id);
         *self.image.borrow_mut() = image.map(|i| (i, now));
         id

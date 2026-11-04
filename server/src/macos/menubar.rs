@@ -121,6 +121,14 @@ define_class!(
             open_settings("Privacy_Accessibility");
         }
 
+        #[unsafe(method(setResolution:))]
+        fn set_resolution(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) else { return };
+            let height = item.tag().max(0) as u32;
+            super::MAX_HEIGHT.store(height, Relaxed);
+            println!("resolution: {}", if height == 0 { "native".to_string() } else { format!("up to {height} pixels high") });
+        }
+
         #[unsafe(method(setUpWifi:))]
         fn set_up_wifi(&self, _sender: Option<&AnyObject>) {
             match transport::awdl::install_rule() {
@@ -307,6 +315,18 @@ impl MenuBar {
         let holder = item(mtm, "Paired Devices", None, None);
         holder.setEnabled(true);
         holder.setSubmenu(Some(&devices));
+        menu.addItem(&holder);
+        let sizes = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Resolution"));
+        let current = super::MAX_HEIGHT.load(Relaxed);
+        for (title, height) in [("Native (the display's own size)", 0), ("4K (2160p)", 2160), ("1440p", 1440), ("1080p", 1080)] {
+            let it = item(mtm, title, Some(sel!(setResolution:)), Some(t));
+            it.setTag(height as isize);
+            it.setState(if height == current { NSControlStateValueOn } else { NSControlStateValueOff });
+            sizes.addItem(&it);
+        }
+        let holder = item(mtm, "Resolution", None, None);
+        holder.setEnabled(true);
+        holder.setSubmenu(Some(&sizes));
         menu.addItem(&holder);
         menu.addItem(&item(mtm, "Open Received Files", Some(sel!(openFiles:)), Some(t)));
         menu.addItem(&NSMenuItem::separatorItem(mtm));

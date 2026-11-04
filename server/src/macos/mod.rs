@@ -15,6 +15,7 @@ pub mod shell;
 
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::time::Duration;
 
 use objc2_foundation::NSString;
@@ -107,9 +108,20 @@ pub fn open_pattern(cli: &Cli) -> Result<Box<dyn Source>, String> {
     Ok(Box::new(pattern::Pattern::open(1920, 1080, cli.fps, (cli.mbps * 1e6) as u32)?))
 }
 
+/// The tallest picture to encode (0: the display's own size), from `--max-height` and the menu bar.
+/// Streams follow a change on their next frame.
+pub static MAX_HEIGHT: AtomicU32 = AtomicU32::new(0);
+
 /// An encoded frame from VideoToolbox, as the stream loop wants it.
 fn frame(e: videotoolbox::encode::Encoded, capture_ns: u64) -> EncodedFrame {
     EncodedFrame { data: e.data, keyframe: e.keyframe, capture_ns }
+}
+
+/// Which display to open: by its place in `monitors`, or by its `CGDirectDisplayID`.
+#[derive(Clone, Copy)]
+enum Pick {
+    Index(u8),
+    Id(u32),
 }
 
 /// A display, captured and encoded.
@@ -123,6 +135,8 @@ pub struct ScreenSource {
     start_ns: u64,
     pointer_in_video: bool,
     pointer: pointer::Pointer,
+    /// The `MAX_HEIGHT` the capture was opened with.
+    max_height: u32,
     /// Encode the last picture again (a keyframe asked for on a still screen, or a repaint).
     repaint: bool,
 }
@@ -132,20 +146,24 @@ impl ScreenSource {
     pub fn open(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<ScreenSource, String> {
         let fps = cli.fps;
         let bitrate = (cli.mbps * 1e6) as u32;
-        let (capture, encoder) = Self::open_display(monitor, fps, bitrate, true)?;
+        let max_height = MAX_HEIGHT.load(Relaxed);
+        let (capture, encoder) = Self::open_display(monitor.map(Pick::Index), fps, bitrate, true, max_height)?;
         input::set_stream_display(stream, Some(capture.display));
-        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), repaint: false })
+        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false })
     }
 
-    fn open_display(monitor: Option<u8>, fps: u32, bitrate: u32, with_pointer: bool) -> Result<(capture::Capture, Encoder), String> {
+    fn open_display(pick: Option<Pick>, fps: u32, bitrate: u32, with_pointer: bool, max_height: u32) -> Result<(capture::Capture, Encoder), String> {
         let displays = capture::displays()?;
         let main = cg::main_display();
-        let pick = monitor
-            .and_then(|m| displays.iter().nth(m as usize))
+        let pick = pick
+            .and_then(|p| match p {
+                Pick::Index(m) => displays.iter().nth(m as usize),
+                Pick::Id(id) => displays.iter().find(|d| unsafe { d.displayID() } == id),
+            })
             .or_else(|| displays.iter().find(|d| unsafe { d.displayID() } == main))
             .or_else(|| displays.iter().next())
             .ok_or("no display to capture")?;
-        let capture = capture::Capture::new(&pick, fps, with_pointer)?;
+        let capture = capture::Capture::new(&pick, fps, with_pointer, max_height)?;
         let encoder = Encoder::new(capture.width, capture.height, fps, bitrate)?;
         println!(
             "encoding {}x{} HEVC with VideoToolbox{}",
@@ -154,6 +172,18 @@ impl ScreenSource {
             if encoder.low_latency { " (low-latency rate control)" } else { "" }
         );
         Ok((capture, encoder))
+    }
+
+    /// Opens the same display again at a new size, when `MAX_HEIGHT` has changed.
+    fn follow_max_height(&mut self) -> Result<(), String> {
+        let max_height = MAX_HEIGHT.load(Relaxed);
+        if max_height == self.max_height {
+            return Ok(());
+        }
+        self.max_height = max_height;
+        let (capture, encoder) = Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, max_height)?;
+        (self.capture, self.encoder) = (capture, encoder);
+        Ok(())
     }
 
     fn encode(&mut self, picture: &capture::Picture, capture_ns: u64, keyframe: bool) -> Result<Option<EncodedFrame>, String> {
@@ -165,6 +195,7 @@ impl ScreenSource {
 
 impl Source for ScreenSource {
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {
+        self.follow_max_height()?;
         let wait = if force_keyframe || self.repaint { 0 } else { timeout_ms };
         let picture = match self.capture.next(wait) {
             Some(p) => Some(p),
@@ -192,7 +223,7 @@ impl Source for ScreenSource {
     }
 
     fn pointer(&self) -> Option<PointerState> {
-        Some(self.pointer.state(self.capture.display))
+        Some(self.pointer.state(self.capture.display, self.capture.width))
     }
 
     fn pointer_image(&self) -> Option<PointerImage> {
@@ -217,7 +248,7 @@ impl Source for ScreenSource {
     }
 
     fn choose_monitor(&mut self, index: u8) -> Result<(), String> {
-        let (capture, encoder) = Self::open_display(Some(index), self.fps, self.bitrate, self.pointer_in_video)?;
+        let (capture, encoder) = Self::open_display(Some(Pick::Index(index)), self.fps, self.bitrate, self.pointer_in_video, self.max_height)?;
         (self.capture, self.encoder) = (capture, encoder);
         input::set_stream_display(self.stream, Some(self.capture.display));
         Ok(())

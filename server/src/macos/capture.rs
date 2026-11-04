@@ -143,6 +143,16 @@ pub struct Capture {
 
 unsafe impl Send for Capture {}
 
+/// The size to capture at: native, or no taller than `max_height` with the same shape (even sizes,
+/// as the encoder wants).
+pub fn scaled(width: u32, height: u32, max_height: u32) -> (u32, u32) {
+    if max_height == 0 || height <= max_height {
+        return (width, height);
+    }
+    let w = (width as u64 * max_height as u64 / height as u64) as u32;
+    (w & !1, max_height & !1)
+}
+
 fn config(width: u32, height: u32, fps: u32, with_pointer: bool) -> Retained<SCStreamConfiguration> {
     unsafe {
         let config = SCStreamConfiguration::new();
@@ -158,11 +168,12 @@ fn config(width: u32, height: u32, fps: u32, with_pointer: bool) -> Retained<SCS
 }
 
 impl Capture {
-    /// Captures `display` (a `CGDirectDisplayID` from `displays`) at its native pixel size and up to
-    /// `fps`, with or without the pointer drawn in.
-    pub fn new(display: &SCDisplay, fps: u32, with_pointer: bool) -> Result<Capture, String> {
+    /// Captures `display` (a `CGDirectDisplayID` from `displays`) at its native pixel size, or scaled
+    /// down to `max_height` (0: native), up to `fps`, with or without the pointer drawn in.
+    pub fn new(display: &SCDisplay, fps: u32, with_pointer: bool, max_height: u32) -> Result<Capture, String> {
         let id = unsafe { display.displayID() };
-        let (width, height, _) = cg::pixel_size(id);
+        let (native_w, native_h, _) = cg::pixel_size(id);
+        let (width, height) = scaled(native_w, native_h, max_height);
         unsafe {
             let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), display, &NSArray::new());
             let config = config(width, height, fps, with_pointer);
@@ -219,5 +230,18 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scaled;
+
+    #[test]
+    fn scaling_keeps_the_shape_and_never_enlarges() {
+        assert_eq!(scaled(6016, 3384, 2160), (3840, 2160));
+        assert_eq!(scaled(6016, 3384, 0), (6016, 3384));
+        assert_eq!(scaled(1920, 1080, 2160), (1920, 1080));
+        assert_eq!(scaled(3024, 1964, 1080), (1662, 1080));
     }
 }

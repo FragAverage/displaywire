@@ -17,6 +17,8 @@ mod ui;
 mod uiserver;
 #[cfg(windows)]
 mod windows;
+#[cfg(target_os = "macos")]
+mod macos;
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
@@ -91,6 +93,9 @@ pub struct Cli {
     /// Rate at which a frame's packets are paced onto the network.
     #[arg(long, default_value_t = 800.0)]
     pace_mbps: f64,
+    /// Stream a moving test picture instead of the screen (Mac; needs no permissions).
+    #[arg(long, hide = true)]
+    test_pattern: bool,
     /// Stream an HEVC Annex B file (with AUDs) in a loop instead of the screen.
     #[arg(long)]
     file: Option<std::path::PathBuf>,
@@ -520,6 +525,8 @@ fn run(cli: Cli) -> Result<(), String> {
     let source: Box<dyn Source> = match &cli.file {
         _ if cli.control_only => Box::new(NoSource),
         Some(path) => Box::new(file::FileSource::open(path, cli.fps)?),
+        #[cfg(target_os = "macos")]
+        None if cli.test_pattern => macos::open_pattern(&cli)?,
         None => open_screen(&cli, 0, None)?,
     };
 

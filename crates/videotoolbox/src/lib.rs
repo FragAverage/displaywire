@@ -1,10 +1,12 @@
-//! Minimal VideoToolbox hardware decode over raw FFI (macOS only).
+//! Minimal VideoToolbox hardware decode (and, in `encode`, encode) over raw FFI (macOS only).
 
 #![cfg(target_os = "macos")]
 #![allow(non_upper_case_globals)]
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
+
+pub mod encode;
 
 type CFTypeRef = *const c_void;
 type OSStatus = i32;
@@ -152,6 +154,19 @@ impl Cf {
     pub fn as_ptr(&self) -> *const c_void {
         self.0
     }
+
+    /// Takes ownership of an object from a Create/Copy call (already retained once).
+    fn from_create(cf: CFTypeRef) -> Cf {
+        Cf(cf)
+    }
+}
+
+fn release(cf: CFTypeRef) {
+    unsafe { CFRelease(cf) };
+}
+
+fn number(v: i32) -> Cf {
+    Cf(unsafe { CFNumberCreate(ptr::null(), CF_NUMBER_SINT32, &v as *const i32 as *const c_void) })
 }
 
 impl Clone for Cf {

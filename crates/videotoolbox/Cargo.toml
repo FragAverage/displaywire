@@ -8,3 +8,6 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+hevc.workspace = true

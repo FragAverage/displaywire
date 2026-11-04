@@ -24,6 +24,16 @@ rtrb = "0.4"
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+videotoolbox.workspace = true
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-media = "0.3"
+objc2-screen-capture-kit = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
+
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
 windows-core = "0.62"

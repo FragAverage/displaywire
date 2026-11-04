@@ -6,6 +6,8 @@
 //! setup (`install_rule`, from the Connection menu) adds a sudoers rule for exactly
 //! two commands, `ifconfig awdl0 down` and `ifconfig awdl0 up`, and from then on this
 //! runs them without a password. Remove it with `sudo rm /etc/sudoers.d/displaywire-awdl`.
+//!
+//! The client and the Mac server share it (and the rule), each holding AWDL down while connected.
 
 use std::process::{Command, Stdio};
 use std::sync::Arc;

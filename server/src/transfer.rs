@@ -259,17 +259,23 @@ mod platform {
 }
 
 #[cfg(not(windows))]
-mod platform {
-    //! Off Windows (the `--file` test mode): files go to `~/Downloads/DisplayWire`, no clipboard.
+pub(crate) mod platform {
+    //! Off Windows: files go to `~/Downloads/DisplayWire`; the clipboard on a Mac, none elsewhere.
     use std::io;
     use std::path::PathBuf;
 
+    #[cfg(target_os = "macos")]
+    pub use crate::macos::shell::{clipboard_sequence, clipboard_text, set_clipboard_text};
+
+    #[cfg(not(target_os = "macos"))]
     pub fn clipboard_sequence() -> u32 {
         0
     }
+    #[cfg(not(target_os = "macos"))]
     pub fn clipboard_text() -> Option<String> {
         None
     }
+    #[cfg(not(target_os = "macos"))]
     pub fn set_clipboard_text(_: &str) -> bool {
         false
     }

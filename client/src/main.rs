@@ -44,7 +44,7 @@ mod transfer;
 #[cfg(target_os = "macos")]
 mod updater;
 #[cfg(target_os = "macos")]
-mod wifi;
+use transport::awdl as wifi;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

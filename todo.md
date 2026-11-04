@@ -51,22 +51,26 @@ winit window (also replaces the AppKit launcher, pairing sheet and settings on t
 - [ ] Clipboard (text, skip `ExcludeClipboardContentFromMonitorProcessing`) and drag-and-drop files.
 - [ ] Wi-Fi: the Windows equivalent of AWDL tuning (`WlanSetInterface` background scan off, streaming mode).
 - [ ] Packaging: signed zip + update channel for the client; winget later.
-## 4. Mac server (agreed)
+## 4. Mac server (v1 built 2026-11-04 on `mac-server`, not yet tested on a real screen)
 Decided: macOS 13+ (ScreenCaptureKit captures system audio, no loopback driver); menu-bar app started by a
 LaunchAgent at login, mirroring the Windows tray (no login-window streaming); virtual display comes with item 7.
 - [ ] Split `server/src` like the client: shared session/auth/pairing/transfer code, `windows/` and `macos/` sources.
-- [ ] Capture: `SCStream` of one display at native size and refresh rate, IOSurface-backed, cursor composited by SCK
+- [x] Capture: `SCStream` of one display at native size and refresh rate, IOSurface-backed, cursor composited by SCK
       (until item 6), frames only on change.
-- [ ] Encode: VideoToolbox HEVC, `RealTime`, `PrioritizeEncodingSpeedOverQuality`, low-latency rate control
+- [x] Encode: VideoToolbox HEVC, `RealTime`, `PrioritizeEncodingSpeedOverQuality`, low-latency rate control
       (`EnableLowLatencyRateControl`), no B-frames, infinite GOP; reuse `crates/videotoolbox`.
-- [ ] Audio: SCK audio (exclude our own process) → the existing PCM16 path.
+- [x] Audio: SCK audio (exclude our own process) → the existing PCM16 path.
 - [ ] Mic: play into a virtual input device; decide on BlackHole vs our own Audio Server plug-in.
-- [ ] Input: `CGEventPost` for keys, mouse, wheel; Windows-key ↔ ⌘ mapping the other way round; Accessibility
+- [x] Input: `CGEventPost` for keys, mouse, wheel; Windows-key ↔ ⌘ mapping the other way round; Accessibility
       permission prompt and a clear message when it's missing.
-- [ ] Clipboard (NSPasteboard, skip `org.nspasteboard.ConcealedType`) and received files into `~/Downloads/DisplayWire`.
-- [ ] Permissions UX: Screen Recording + Accessibility first-run walkthrough; pairing and device list in the menu bar.
-- [ ] Keep the Mac awake while streaming (`IOPMAssertion`); Bonjour/our discovery answer.
+- [x] Clipboard (NSPasteboard, skip `org.nspasteboard.ConcealedType`) and received files into `~/Downloads/DisplayWire`.
+- [x] Permissions UX: Screen Recording + Accessibility first-run walkthrough; pairing and device list in the menu bar.
+- [x] Keep the Mac awake while streaming (`IOPMAssertion`); Bonjour/our discovery answer.
 - [ ] Packaging: same `.app` with a server mode, or a second app; Homebrew cask; signed updates.
+- [x] Menu bar (v1): status, this Mac's addresses, Pair New Device… (Allow and PIN dialogs), paired devices with
+      Remove, received files, permissions, Start at Login (LaunchAgent), log, Quit. The pointer goes to clients that
+      draw it (`CAP_CURSOR`), from `NSCursor.currentSystemCursor`.
+- [ ] Test on real hardware: Screen Recording and Accessibility granted, a second Mac connecting, multi-display.
 ## 5. Adaptive bitrate + reference-frame invalidation (done 2026-11-03, tested)
 Decided: the Settings bitrate becomes a ceiling and the server adapts below it ("fixed" checkbox keeps today's
 behaviour); controller on one-way delay plus loss; reference-frame invalidation for lost frames with a keyframe as

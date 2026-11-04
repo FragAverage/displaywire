@@ -200,6 +200,8 @@ Code, docs, app bundle, icon, service and protocol magic (`"DW"`, keys `dw1-…`
 
 ### Legal and packaging
 - [x] Add a `LICENSE` file: dual MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`), noted in the README.
+- [x] Licence reviewed 2026-11-04: stay MIT OR Apache-2.0 (permissive on purpose: easy to adopt and contribute to; the
+      owner can still use it in a hosted service or paid product). All third-party crates are permissive and compatible.
 - [x] Add `license`, `description`, `repository` and `rust-version` to `[workspace.package]`. Set `publish = false` so `proto`, `timing` and the other generic names never go to crates.io. MSRV 1.88, checked with `cargo +1.88 check`.
 - [ ] Check that NVIDIA's NVENC header licence (via `moq-nvenc`) fits the chosen licence.
 

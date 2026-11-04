@@ -41,12 +41,14 @@ const CLIENT_TIMEOUT_NS: u64 = 3 * SEC;
 use windows::gamepad::Gamepads;
 #[cfg(windows)]
 use windows::input::Injector;
+#[cfg(target_os = "macos")]
+use macos::input::Injector;
 
-/// Input is only injected on Windows.
-#[cfg(not(windows))]
+/// Input is only injected on Windows and macOS.
+#[cfg(not(any(windows, target_os = "macos")))]
 struct Injector;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Injector {
     fn new() -> Injector {
         Injector
@@ -900,7 +902,12 @@ fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn open_screen(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<Box<dyn Source>, String> {
+    Ok(Box::new(macos::ScreenSource::open(cli, stream, monitor)?))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_screen(_cli: &Cli, _stream: u8, _monitor: Option<u8>) -> Result<Box<dyn Source>, String> {
     Err("screen capture is only implemented on Windows; use --file".into())
 }

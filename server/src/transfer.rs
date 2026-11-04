@@ -259,7 +259,7 @@ mod platform {
 }
 
 #[cfg(not(windows))]
-mod platform {
+pub(crate) mod platform {
     //! Off Windows: files go to `~/Downloads/DisplayWire`; the clipboard on a Mac, none elsewhere.
     use std::io;
     use std::path::PathBuf;

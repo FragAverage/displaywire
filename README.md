@@ -110,6 +110,25 @@ Set Up Wi-Fi Tuning…** (one password prompt) lets DisplayWire pause that while
 when you disconnect or quit. It adds one rule that allows exactly `ifconfig awdl0 down` and `ifconfig awdl0 up`.
 To remove it: `sudo rm /etc/sudoers.d/displaywire-awdl`.
 
+## Streaming from a Mac (preview)
+
+A Mac can be the server too: another Mac connects to it the same way it connects to a PC. There's no download for
+it yet, so build it from source (`cargo build --release -p displaywire-server`) and run
+`target/release/displaywire-server`. A display icon appears in the menu bar. It has **Pair New Device…**, the paired
+devices, the permissions it needs and **Start at Login**.
+
+The first time, macOS asks for two permissions in *System Settings › Privacy & Security*:
+
+- **Screen Recording**, to see the screen and hear its sound. Turn it on, then quit and start the server again.
+- **Accessibility**, so the other computer's keyboard and mouse work. The server asks the first time it gets input.
+
+macOS gives these permissions to whatever started the server. Started from Terminal, that's Terminal. Run
+`displaywire-server --install-service` once to start it at login (as a LaunchAgent, with its log in
+`~/Library/Logs/DisplayWire/server.log`). It then asks for the permissions itself. A rebuilt binary is new to macOS
+and has to be allowed again. `--uninstall-service` stops it.
+
+Not yet on a Mac: the microphone, streaming the login window, and a virtual display.
+
 ## Updates
 
 DisplayWire checks for new versions and asks before installing one. On the Mac, choose **DisplayWire > Check for

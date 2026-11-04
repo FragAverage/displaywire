@@ -1,19 +1,96 @@
 //! The server on a Mac: the screen through ScreenCaptureKit (`capture`), encoded by VideoToolbox,
 //! input through CoreGraphics events (`input`), system sound through ScreenCaptureKit (`audio`),
-//! and the clipboard through AppKit (`shell`).
+//! the clipboard through AppKit (`shell`), the menu-bar icon (`menubar`) and starting at login
+//! (`agent`).
 
+pub mod agent;
 pub mod audio;
 mod capture;
 pub mod cg;
 pub mod input;
+pub mod menubar;
 pub mod pattern;
+mod pointer;
 pub mod shell;
 
+use std::ffi::c_void;
+use std::sync::Arc;
+use std::time::Duration;
+
+use objc2_foundation::NSString;
 use proto::stream::{MAX_MONITORS, Monitor, Monitors};
 use timing::now_ns;
 use videotoolbox::encode::Encoder;
 
-use crate::{Cli, EncodedFrame, Source};
+use crate::{Cli, EncodedFrame, PointerImage, PointerState, Shared, Source};
+
+/// This Mac's name as Sharing shows it ("Jamie's MacBook Pro"), for discovery and pairing.
+pub fn computer_name() -> Option<String> {
+    let out = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output().ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !name.is_empty()).then_some(name)
+}
+
+/// `open` until it works: the screen and its sound need the Screen Recording permission, which the
+/// user may grant after the server has started. Says why once.
+pub fn when_allowed<T>(what: &str, mut open: impl FnMut() -> Result<T, String>) -> T {
+    let mut said = false;
+    loop {
+        match open() {
+            Ok(t) => return t,
+            Err(e) if !said => {
+                println!("{what}: {e} (trying again every few seconds)");
+                said = true;
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+}
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionCreateWithName(kind: *const c_void, level: u32, name: *const c_void, id: *mut u32) -> i32;
+    fn IOPMAssertionDeclareUserActivity(name: *const c_void, kind: u32, id: *mut u32) -> i32;
+    fn IOPMAssertionRelease(id: u32) -> i32;
+}
+
+/// While a device is connected the display doesn't sleep (it's what the device is looking at), and
+/// a connection wakes it.
+pub fn keep_awake(shared: Arc<Shared>) {
+    let spawned = std::thread::Builder::new().name("keep-awake".into()).spawn(move || {
+        let kind = NSString::from_str("PreventUserIdleDisplaySleep");
+        let name = NSString::from_str("DisplayWire: a device is connected");
+        let (kind, name) = (&*kind as *const NSString as *const c_void, &*name as *const NSString as *const c_void);
+        let mut held: Option<u32> = None;
+        loop {
+            let connected = shared.link.lock().unwrap().is_some();
+            unsafe {
+                match (connected, held) {
+                    (true, None) => {
+                        let mut wake = 0;
+                        if IOPMAssertionDeclareUserActivity(name, 0, &mut wake) == 0 {
+                            IOPMAssertionRelease(wake);
+                        }
+                        let mut id = 0;
+                        if IOPMAssertionCreateWithName(kind, 255, name, &mut id) == 0 {
+                            held = Some(id);
+                        }
+                    }
+                    (false, Some(id)) => {
+                        IOPMAssertionRelease(id);
+                        held = None;
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    if let Err(e) = spawned {
+        println!("keep-awake: {e}");
+    }
+}
 
 /// `--test-pattern`: a moving picture instead of the screen, through the real encoder (no
 /// permissions needed), for trying the Mac server without Screen Recording.
@@ -36,6 +113,7 @@ pub struct ScreenSource {
     bitrate: u32,
     start_ns: u64,
     pointer_in_video: bool,
+    pointer: pointer::Pointer,
     /// Encode the last picture again (a keyframe asked for on a still screen, or a repaint).
     repaint: bool,
 }
@@ -47,7 +125,7 @@ impl ScreenSource {
         let bitrate = (cli.mbps * 1e6) as u32;
         let (capture, encoder) = Self::open_display(monitor, fps, bitrate, true)?;
         input::set_stream_display(stream, Some(capture.display));
-        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, repaint: false })
+        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), repaint: false })
     }
 
     fn open_display(monitor: Option<u8>, fps: u32, bitrate: u32, with_pointer: bool) -> Result<(capture::Capture, Encoder), String> {
@@ -101,6 +179,15 @@ impl Source for ScreenSource {
 
     fn set_pointer_in_video(&mut self, on: bool) {
         self.pointer_in_video = on;
+        self.capture.set_pointer(on);
+    }
+
+    fn pointer(&self) -> Option<PointerState> {
+        Some(self.pointer.state(self.capture.display))
+    }
+
+    fn pointer_image(&self) -> Option<PointerImage> {
+        self.pointer.image()
     }
 
     fn monitors(&self) -> Option<Monitors> {

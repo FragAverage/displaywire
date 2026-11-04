@@ -482,7 +482,22 @@ fn service_command(cli: &Cli, data_dir: &std::path::Path) -> Option<Result<(), S
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn service_command(cli: &Cli, data_dir: &std::path::Path) -> Option<Result<(), String>> {
+    if cli.install_service {
+        if let Err(e) = clients::Store::open(data_dir) {
+            return Some(Err(e));
+        }
+        let args: Vec<_> = std::env::args().skip(1).filter(|a| a != "--install-service").collect();
+        Some(macos::agent::install_and_start(&args))
+    } else if cli.uninstall_service {
+        Some(macos::agent::stop_and_uninstall())
+    } else {
+        (cli.service || cli.check_update || cli.update).then(|| Err("updates are Windows only for now".into()))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn service_command(cli: &Cli, _data_dir: &std::path::Path) -> Option<Result<(), String>> {
     (cli.install_service || cli.uninstall_service || cli.service || cli.check_update || cli.update).then(|| Err("the service and updates are Windows only".into()))
 }
@@ -522,15 +537,31 @@ fn run(cli: Cli) -> Result<(), String> {
         0 => println!("no devices are paired yet: choose Pair new device in the tray menu"),
         n => println!("{n} paired device{}", if n == 1 { "" } else { "s" }),
     }
-    let server_name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "displaywire-server".into());
+    #[cfg(target_os = "macos")]
+    let server_name = macos::computer_name();
+    #[cfg(not(target_os = "macos"))]
+    let server_name: Option<String> = None;
+    let server_name = server_name.map_or_else(|| std::env::var("COMPUTERNAME"), Ok).or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "displaywire-server".into());
     let _tuning = (!cli.no_wifi_tuning).then(wlan::tune).flatten();
-    let source: Box<dyn Source> = match &cli.file {
-        _ if cli.control_only => Box::new(NoSource),
-        Some(path) => Box::new(file::FileSource::open(path, cli.fps)?),
-        #[cfg(target_os = "macos")]
-        None if cli.test_pattern => macos::open_pattern(&cli)?,
-        None => open_screen(&cli, 0, None)?,
+    // The main stream's picture. On a Mac it's opened by the stream's own thread (AppKit has the
+    // main one), once Screen Recording is allowed.
+    let open_source = {
+        let cli = cli.clone();
+        move || -> Result<Box<dyn Source>, String> {
+            Ok(match &cli.file {
+                _ if cli.control_only => Box::new(NoSource),
+                Some(path) => Box::new(file::FileSource::open(path, cli.fps)?),
+                #[cfg(target_os = "macos")]
+                None if cli.test_pattern => macos::open_pattern(&cli)?,
+                #[cfg(target_os = "macos")]
+                None => macos::when_allowed("screen", || open_screen(&cli, 0, None)),
+                #[cfg(not(target_os = "macos"))]
+                None => open_screen(&cli, 0, None)?,
+            })
+        }
     };
+    #[cfg(not(target_os = "macos"))]
+    let source = open_source()?;
 
     let sock = udp_socket(SocketAddr::from(([0, 0, 0, 0], cli.port))).map_err(|e| format!("bind udp/{}: {e}", cli.port))?;
     let shared = Arc::new(Shared::new(store, pairing::Pairing::new(&server_name)));
@@ -563,6 +594,8 @@ fn run(cli: Cli) -> Result<(), String> {
             windows::tray::start(shared.clone());
             windows::updater::start();
         }
+        #[cfg(target_os = "macos")]
+        macos::keep_awake(shared.clone());
         let opener = stream_opener(&cli, &shared, &sock)?;
         std::thread::spawn(move || control(&sock, &shared, announcement.as_ref(), &transfers, mic, &opener));
     }
@@ -576,18 +609,47 @@ fn run(cli: Cli) -> Result<(), String> {
         }
     }
     if !cli.no_audio {
-        let source: Option<Box<dyn audio::AudioSource>> = if cli.tone || cli.file.is_some() {
-            Some(Box::new(audio::Tone::new()))
-        } else {
-            open_audio()
-        };
+        let tone = cli.tone || cli.file.is_some() || cli.test_pattern;
+        #[cfg(target_os = "macos")]
+        if !tone {
+            // The Mac's sound needs the same permission as its screen: wait for it in a thread.
+            let (sock, shared) = (sock.try_clone().map_err(|e| e.to_string())?, shared.clone());
+            std::thread::spawn(move || {
+                let source = macos::when_allowed("audio", macos::audio::Audio::open);
+                audio::spawn(sock, shared, Box::new(source));
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        let source: Option<Box<dyn audio::AudioSource>> = if tone { Some(Box::new(audio::Tone::new())) } else { open_audio() };
+        #[cfg(target_os = "macos")]
+        let source: Option<Box<dyn audio::AudioSource>> = tone.then(|| Box::new(audio::Tone::new()) as _);
         if let Some(source) = source {
             audio::spawn(sock.try_clone().map_err(|e| e.to_string())?, shared.clone(), source);
         }
     }
     println!("displaywire-server on udp/{}, waiting for a client", cli.port);
     let main = shared.stream(0).ok_or("no main stream")?;
-    stream_loop(0, source, main, &shared, &sock, 8e3 / cli.pace_mbps, None)
+    let pace = 8e3 / cli.pace_mbps;
+    #[cfg(target_os = "macos")]
+    {
+        // AppKit owns the main thread (the menu bar); the main stream runs in its own.
+        let (shared2, sock) = (shared.clone(), sock.try_clone().map_err(|e| e.to_string())?);
+        let spawned = std::thread::Builder::new().name("stream-0".into()).spawn(move || {
+            if let Err(e) = open_source().and_then(|source| stream_loop(0, source, main, &shared2, &sock, pace, None)) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        });
+        spawned.map_err(|e| e.to_string())?;
+        if cli.no_tray {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+        macos::menubar::run(shared)
+    }
+    #[cfg(not(target_os = "macos"))]
+    stream_loop(0, source, main, &shared, &sock, pace, None)
 }
 
 /// Starts stream `id` showing `monitor` for the session at the given address, in a thread of its own
@@ -890,17 +952,6 @@ fn open_mic(_cli: &Cli) -> Option<mic::Sink> {
 fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     match windows::loopback::Loopback::open() {
         Ok(l) => Some(Box::new(l)),
-        Err(e) => {
-            eprintln!("audio capture unavailable, streaming video only: {e}");
-            None
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
-    match macos::audio::Audio::open() {
-        Ok(a) => Some(Box::new(a)),
         Err(e) => {
             eprintln!("audio capture unavailable, streaming video only: {e}");
             None

@@ -64,6 +64,20 @@ unsafe extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+}
+
+/// Whether this process may send keyboard and mouse events (System Settings › Privacy & Security ›
+/// Accessibility).
+pub fn accessibility_allowed() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Puts this app in the Accessibility list and shows the system's prompt to allow it.
+pub fn request_accessibility() {
+    use objc2_foundation::{NSDictionary, NSNumber, NSString};
+    let options = NSDictionary::from_slices(&[&*NSString::from_str("AXTrustedCheckOptionPrompt")], &[&*NSNumber::new_bool(true)]);
+    unsafe { AXIsProcessTrustedWithOptions(&*options as *const NSDictionary<NSString, NSNumber> as *const c_void) };
 }
 
 /// Which display each stream shows (`CGDirectDisplayID`), so a click lands on the right one.

@@ -108,7 +108,8 @@ impl Output {
 /// The displays ScreenCaptureKit offers, in its order. Fails without the Screen Recording permission.
 pub fn displays() -> Result<Retained<NSArray<SCDisplay>>, String> {
     if !cg::screen_capture_allowed() {
-        cg::request_screen_capture();
+        static ASKED: std::sync::Once = std::sync::Once::new();
+        ASKED.call_once(cg::request_screen_capture);
         return Err("needs the Screen Recording permission: allow displaywire-server in System Settings › Privacy & \
                     Security › Screen Recording, then start it again"
             .into());
@@ -136,9 +137,25 @@ pub struct Capture {
     pub display: u32,
     pub width: u32,
     pub height: u32,
+    fps: u32,
+    with_pointer: bool,
 }
 
 unsafe impl Send for Capture {}
+
+fn config(width: u32, height: u32, fps: u32, with_pointer: bool) -> Retained<SCStreamConfiguration> {
+    unsafe {
+        let config = SCStreamConfiguration::new();
+        config.setWidth(width as usize);
+        config.setHeight(height as usize);
+        config.setPixelFormat(u32::from_be_bytes(*b"420v"));
+        config.setMinimumFrameInterval(CMTime { value: 1, timescale: fps.max(1) as i32, flags: CMTimeFlags::Valid, epoch: 0 });
+        config.setShowsCursor(with_pointer);
+        // Few buffers: the newest frame is what matters.
+        config.setQueueDepth(3);
+        config
+    }
+}
 
 impl Capture {
     /// Captures `display` (a `CGDirectDisplayID` from `displays`) at its native pixel size and up to
@@ -148,14 +165,7 @@ impl Capture {
         let (width, height, _) = cg::pixel_size(id);
         unsafe {
             let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), display, &NSArray::new());
-            let config = SCStreamConfiguration::new();
-            config.setWidth(width as usize);
-            config.setHeight(height as usize);
-            config.setPixelFormat(u32::from_be_bytes(*b"420v"));
-            config.setMinimumFrameInterval(CMTime { value: 1, timescale: fps.max(1) as i32, flags: CMTimeFlags::Valid, epoch: 0 });
-            config.setShowsCursor(with_pointer);
-            // Few buffers: the newest frame is what matters.
-            config.setQueueDepth(3);
+            let config = config(width, height, fps, with_pointer);
             let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None);
             let latest: Shared = Arc::default();
             let output = Output::new(latest.clone());
@@ -174,7 +184,7 @@ impl Capture {
             stream.startCaptureWithCompletionHandler(Some(&started));
             rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "capture didn't start".to_string())??;
             println!("capturing display {id} ({width}x{height})");
-            Ok(Capture { stream, _output: output, _queue: queue, latest, display: id, width, height })
+            Ok(Capture { stream, _output: output, _queue: queue, latest, display: id, width, height, fps, with_pointer })
         }
     }
 
@@ -188,6 +198,16 @@ impl Capture {
         }
         latest.new = false;
         latest.frame.clone()
+    }
+
+    /// Draws the pointer into the picture, or leaves it out (for a client that draws it itself).
+    pub fn set_pointer(&mut self, on: bool) {
+        if on == self.with_pointer {
+            return;
+        }
+        self.with_pointer = on;
+        let config = config(self.width, self.height, self.fps, on);
+        unsafe { self.stream.updateConfiguration_completionHandler(&config, None) };
     }
 
     /// The last frame, new or not (to encode again for a keyframe on a still screen).

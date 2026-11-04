@@ -101,7 +101,7 @@ pub struct Cli {
     /// Stream an HEVC Annex B file (with AUDs) in a loop instead of the screen.
     #[arg(long)]
     file: Option<std::path::PathBuf>,
-    /// Leave Windows Wi-Fi background scanning and power settings alone.
+    /// Leave Wi-Fi alone: Windows background scanning and streaming mode, or a Mac's AWDL (AirDrop, AirPlay).
     #[arg(long)]
     no_wifi_tuning: bool,
     /// Repair packets per frame, as a percentage of its data packets (0 turns FEC off).
@@ -595,7 +595,7 @@ fn run(cli: Cli) -> Result<(), String> {
             windows::updater::start();
         }
         #[cfg(target_os = "macos")]
-        macos::keep_awake(shared.clone());
+        macos::while_connected(shared.clone(), !cli.no_wifi_tuning);
         let opener = stream_opener(&cli, &shared, &sock)?;
         std::thread::spawn(move || control(&sock, &shared, announcement.as_ref(), &transfers, mic, &opener));
     }

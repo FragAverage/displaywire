@@ -127,6 +127,9 @@ macOS gives these permissions to whatever started the server. Started from Termi
 `~/Library/Logs/DisplayWire/server.log`). It then asks for the permissions itself. A rebuilt binary is new to macOS
 and has to be allowed again. `--uninstall-service` stops it.
 
+On Wi-Fi, choose **Smoother Wi-Fi…** in the menu bar once (it asks for your password). The Mac then pauses
+AirDrop and AirPlay's Wi-Fi link while a device is connected, as the client does (see below).
+
 Not yet on a Mac: the microphone, streaming the login window, and a virtual display.
 
 ## Updates

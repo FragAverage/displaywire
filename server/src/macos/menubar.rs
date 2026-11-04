@@ -121,6 +121,24 @@ define_class!(
             open_settings("Privacy_Accessibility");
         }
 
+        #[unsafe(method(setUpWifi:))]
+        fn set_up_wifi(&self, _sender: Option<&AnyObject>) {
+            match transport::awdl::install_rule() {
+                Ok(()) => {
+                    self.alert(
+                        "Wi-Fi tuning is on",
+                        "From the next connection, this Mac pauses AirDrop and AirPlay's Wi-Fi link while a device is connected, \
+                         and brings it back when it disconnects.",
+                        &["OK"],
+                    );
+                }
+                Err(e) if e == "cancelled" => {}
+                Err(e) => {
+                    self.alert("Couldn't set up Wi-Fi tuning", &e, &["OK"]);
+                }
+            }
+        }
+
         #[unsafe(method(toggleLogin:))]
         fn toggle_login(&self, _sender: Option<&AnyObject>) {
             let result = if agent::installed() { agent::uninstall() } else { agent::install() };
@@ -301,6 +319,11 @@ impl MenuBar {
             menu.addItem(&item(mtm, "Keyboard and mouse control: allowed", None, None));
         } else {
             menu.addItem(&item(mtm, "Allow Keyboard and Mouse Control…", Some(sel!(allowInput:)), Some(t)));
+        }
+        if transport::awdl::ready() {
+            menu.addItem(&item(mtm, "Wi-Fi tuning: on while connected", None, None));
+        } else {
+            menu.addItem(&item(mtm, "Smoother Wi-Fi…", Some(sel!(setUpWifi:)), Some(t)));
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let login = item(mtm, "Start at Login", Some(sel!(toggleLogin:)), Some(t));

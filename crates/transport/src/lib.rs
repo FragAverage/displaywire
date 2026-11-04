@@ -2,6 +2,8 @@
 
 pub mod transfer;
 pub mod video;
+#[cfg(target_os = "macos")]
+pub mod awdl;
 pub mod wlan;
 
 use std::io::{self, ErrorKind};

@@ -55,14 +55,16 @@ unsafe extern "C" {
     fn IOPMAssertionRelease(id: u32) -> i32;
 }
 
-/// While a device is connected the display doesn't sleep (it's what the device is looking at), and
-/// a connection wakes it.
-pub fn keep_awake(shared: Arc<Shared>) {
-    let spawned = std::thread::Builder::new().name("keep-awake".into()).spawn(move || {
+/// While a device is connected the display doesn't sleep (it's what the device is looking at), a
+/// connection wakes it, and (with `quiet_wifi`, once its one-time setup is done) AWDL is held down
+/// so AirDrop and AirPlay's channel hops don't burst the stream's delay (see `transport::awdl`).
+pub fn while_connected(shared: Arc<Shared>, quiet_wifi: bool) {
+    let spawned = std::thread::Builder::new().name("while-connected".into()).spawn(move || {
         let kind = NSString::from_str("PreventUserIdleDisplaySleep");
         let name = NSString::from_str("DisplayWire: a device is connected");
         let (kind, name) = (&*kind as *const NSString as *const c_void, &*name as *const NSString as *const c_void);
         let mut held: Option<u32> = None;
+        let mut wifi: Option<transport::awdl::Quiet> = None;
         loop {
             let connected = shared.link.lock().unwrap().is_some();
             unsafe {
@@ -76,10 +78,17 @@ pub fn keep_awake(shared: Arc<Shared>) {
                         if IOPMAssertionCreateWithName(kind, 255, name, &mut id) == 0 {
                             held = Some(id);
                         }
+                        if quiet_wifi && transport::awdl::ready() {
+                            println!("wifi tuning: AWDL (AirDrop, AirPlay) paused while connected");
+                            wifi = Some(transport::awdl::Quiet::start());
+                        }
                     }
                     (false, Some(id)) => {
                         IOPMAssertionRelease(id);
                         held = None;
+                        if wifi.take().is_some() {
+                            println!("wifi tuning: AWDL back on");
+                        }
                     }
                     _ => {}
                 }
@@ -88,7 +97,7 @@ pub fn keep_awake(shared: Arc<Shared>) {
         }
     });
     if let Err(e) = spawned {
-        println!("keep-awake: {e}");
+        println!("while-connected: {e}");
     }
 }
 

@@ -86,7 +86,7 @@ impl Injector {
         let mut events = Vec::new();
         // Move first, so a click lands where the pointer now is.
         if let Some((x, y)) = input.absolute {
-            let (x, y) = self.to_virtual_desk(input.stream, x, y);
+            let (x, y) = self.virtual_desk_point(input.stream, x, y);
             events.push(mouse(x, y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK));
         }
         if input.dx != 0 || input.dy != 0 {
@@ -144,7 +144,7 @@ impl Injector {
     }
 
     /// 0..=65535 across the streamed monitor → 0..=65535 across the virtual desktop.
-    fn to_virtual_desk(&mut self, stream: u8, x: u16, y: u16) -> (i32, i32) {
+    fn virtual_desk_point(&mut self, stream: u8, x: u16, y: u16) -> (i32, i32) {
         let generation = SCREEN_GENERATION.load(Relaxed);
         if generation != self.generation {
             self.screens.clear();

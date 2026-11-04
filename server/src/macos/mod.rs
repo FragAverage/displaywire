@@ -2,10 +2,12 @@
 //! input through CoreGraphics events (`input`), system sound through ScreenCaptureKit (`audio`),
 //! and the clipboard through AppKit (`shell`).
 
+pub mod audio;
 mod capture;
 pub mod cg;
 pub mod input;
 pub mod pattern;
+pub mod shell;
 
 use proto::stream::{MAX_MONITORS, Monitor, Monitors};
 use timing::now_ns;

@@ -28,6 +28,7 @@ getrandom = "0.3"
 videotoolbox.workspace = true
 objc2 = "0.6"
 objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
 objc2-core-media = "0.3"
 objc2-screen-capture-kit = "0.3"
 block2 = "0.6"

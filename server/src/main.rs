@@ -897,7 +897,18 @@ fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
+    match macos::audio::Audio::open() {
+        Ok(a) => Some(Box::new(a)),
+        Err(e) => {
+            eprintln!("audio capture unavailable, streaming video only: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     None
 }

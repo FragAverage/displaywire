@@ -2,7 +2,7 @@
 
 Thanks for helping. This is the developer side of the project; how to *use* DisplayWire is in the [README](README.md).
 
-Contributions are accepted under the project's licence (MIT or Apache-2.0, at your option), with no extra terms.
+Contributions are accepted under the project's licence (MIT), with no extra terms.
 
 ## How the project fits together
 

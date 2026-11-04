@@ -157,6 +157,4 @@ Building from source, the project layout, tests and how releases are made are in
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
-Unless you explicitly state otherwise, any contribution you submit for inclusion in this project, as defined in the
-Apache-2.0 license, is dual licensed as above, without any additional terms or conditions.
+Licensed under the [MIT license](LICENSE). Contributions are accepted under the same licence.

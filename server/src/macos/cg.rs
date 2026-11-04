@@ -36,6 +36,15 @@ unsafe extern "C" {
     fn CGDisplayModeGetPixelHeight(mode: *const c_void) -> usize;
     fn CGDisplayModeGetRefreshRate(mode: *const c_void) -> f64;
     fn CGDisplayModeRelease(mode: *const c_void);
+    fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayMirrorsDisplay(display: u32) -> u32;
+    fn CGEventCreate(source: *const c_void) -> *const c_void;
+    fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const c_void);
 }
 
 pub fn screen_capture_allowed() -> bool {
@@ -45,6 +54,30 @@ pub fn screen_capture_allowed() -> bool {
 /// Shows the system's request (once; after that only System Settings changes it).
 pub fn request_screen_capture() {
     unsafe { CGRequestScreenCaptureAccess() };
+}
+
+/// The displays in use, as `monitors` lists them (a display mirroring another isn't one of its
+/// own). Cheap: no ScreenCaptureKit round trip.
+pub fn displays() -> Vec<u32> {
+    let mut ids = [0u32; 16];
+    let mut count = 0;
+    if unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) } != 0 {
+        return Vec::new();
+    }
+    ids[..count as usize].iter().copied().filter(|&d| unsafe { CGDisplayMirrorsDisplay(d) } == 0).collect()
+}
+
+/// Where the pointer is on the desktop, in points.
+pub fn pointer_location() -> CGPoint {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return CGPoint::default();
+        }
+        let at = CGEventGetLocation(event);
+        CFRelease(event);
+        at
+    }
 }
 
 pub fn main_display() -> u32 {

@@ -105,13 +105,27 @@ impl Output {
     }
 }
 
+/// Starts `stream` and waits for ScreenCaptureKit to say it has (`what` names it in errors).
+pub fn start(stream: &SCStream, what: &str) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    let tx = Mutex::new(Some(tx));
+    let started = RcBlock::new(move |error: *mut NSError| {
+        let r = unsafe { Retained::retain(error) }.map_or(Ok(()), |e| Err(e.localizedDescription().to_string()));
+        if let Some(tx) = tx.lock().unwrap().take() {
+            let _ = tx.send(r);
+        }
+    });
+    unsafe { stream.startCaptureWithCompletionHandler(Some(&started)) };
+    rx.recv_timeout(Duration::from_secs(10)).map_err(|_| format!("{what} didn't start"))?
+}
+
 /// The displays ScreenCaptureKit offers, in its order. Fails without the Screen Recording permission.
 pub fn displays() -> Result<Retained<NSArray<SCDisplay>>, String> {
     if !cg::screen_capture_allowed() {
         static ASKED: std::sync::Once = std::sync::Once::new();
         ASKED.call_once(cg::request_screen_capture);
         return Err("needs the Screen Recording permission: allow displaywire-server in System Settings › Privacy & \
-                    Security › Screen Recording, then start it again"
+                    Security › Screen Recording, then choose Restart in the menu bar (macOS applies it to a new process)"
             .into());
     }
     let (tx, rx) = mpsc::channel();
@@ -184,16 +198,7 @@ impl Capture {
             stream
                 .addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), SCStreamOutputType::Screen, Some(&queue))
                 .map_err(|e| format!("add stream output: {}", e.localizedDescription()))?;
-            let (tx, rx) = mpsc::channel();
-            let tx = Mutex::new(Some(tx));
-            let started = RcBlock::new(move |error: *mut NSError| {
-                let r = Retained::retain(error).map_or(Ok(()), |e| Err(e.localizedDescription().to_string()));
-                if let Some(tx) = tx.lock().unwrap().take() {
-                    let _ = tx.send(r);
-                }
-            });
-            stream.startCaptureWithCompletionHandler(Some(&started));
-            rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "capture didn't start".to_string())??;
+            start(&stream, "capture")?;
             println!("capturing display {id} ({width}x{height})");
             Ok(Capture { stream, _output: output, _queue: queue, latest, display: id, width, height, fps, with_pointer })
         }

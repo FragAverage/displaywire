@@ -18,18 +18,11 @@ use crate::{PointerImage, PointerState};
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGEventCreate(source: *const c_void) -> *const c_void;
-    fn CGEventGetLocation(event: *const c_void) -> CGPoint;
     fn CGColorSpaceCreateDeviceRGB() -> *const c_void;
     fn CGColorSpaceRelease(space: *const c_void);
     fn CGBitmapContextCreate(data: *mut c_void, w: usize, h: usize, bits: usize, row: usize, space: *const c_void, info: u32) -> *const c_void;
     fn CGContextDrawImage(ctx: *const c_void, rect: CGRect, image: *const c_void);
     fn CGContextRelease(ctx: *const c_void);
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRelease(cf: *const c_void);
 }
 
 /// `CGImageRef`, as Objective-C describes it.
@@ -51,25 +44,12 @@ pub struct Pointer {
     image: RefCell<Option<(PointerImage, u64)>>,
 }
 
-/// Where the pointer is on the desktop, in points.
-fn location() -> CGPoint {
-    unsafe {
-        let event = CGEventCreate(std::ptr::null());
-        if event.is_null() {
-            return CGPoint::default();
-        }
-        let at = CGEventGetLocation(event);
-        CFRelease(event);
-        at
-    }
-}
-
 impl Pointer {
     /// The pointer as `display` shows it, in a picture `video_width` pixels wide: 0..=65535 across,
     /// and hidden when it's on another display.
     pub fn state(&self, display: u32, video_width: u32) -> PointerState {
         let b = cg::bounds(display);
-        let at = location();
+        let at = cg::pointer_location();
         let (fx, fy) = ((at.x - b.origin.x) / b.size.width, (at.y - b.origin.y) / b.size.height);
         let inside = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
         let shape = self.refresh(video_width as f64 / b.size.width);

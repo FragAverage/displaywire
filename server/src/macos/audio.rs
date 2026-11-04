@@ -3,16 +3,15 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_foundation::{NSArray, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{SCContentFilter, SCStream, SCStreamConfiguration, SCStreamOutput, SCStreamOutputType};
 use proto::stream::AUDIO_RATE;
 use timing::now_ns;
@@ -201,16 +200,7 @@ impl Audio {
             stream
                 .addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), SCStreamOutputType::Audio, Some(&queue))
                 .map_err(|e| format!("add audio output: {}", e.localizedDescription()))?;
-            let (tx, rx) = mpsc::channel();
-            let tx = Mutex::new(Some(tx));
-            let started = RcBlock::new(move |error: *mut NSError| {
-                let r = Retained::retain(error).map_or(Ok(()), |e| Err(e.localizedDescription().to_string()));
-                if let Some(tx) = tx.lock().unwrap().take() {
-                    let _ = tx.send(r);
-                }
-            });
-            stream.startCaptureWithCompletionHandler(Some(&started));
-            rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "audio capture didn't start".to_string())??;
+            capture::start(&stream, "audio capture")?;
             println!("audio: capturing every app's sound (ScreenCaptureKit)");
             Ok(Audio { _stream: stream, _output: output, _queue: queue, pending })
         }

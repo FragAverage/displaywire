@@ -49,8 +49,6 @@ unsafe extern "C" {
     fn CGEventCreateKeyboardEvent(source: *const c_void, key: u16, down: bool) -> *const c_void;
     fn CGEventCreateMouseEvent(source: *const c_void, kind: u32, at: cg::CGPoint, button: u32) -> *const c_void;
     fn CGEventCreateScrollWheelEvent(source: *const c_void, units: u32, wheels: u32, wheel1: i32, ...) -> *const c_void;
-    fn CGEventCreate(source: *const c_void) -> *const c_void;
-    fn CGEventGetLocation(event: *const c_void) -> cg::CGPoint;
     fn CGEventSetFlags(event: *const c_void, flags: u64);
     fn CGEventSetIntegerValueField(event: *const c_void, field: u32, value: i64);
     fn CGEventPost(tap: u32, event: *const c_void);
@@ -286,7 +284,7 @@ impl Injector {
             self.move_to(at, 0, 0);
         }
         if input.dx != 0 || input.dy != 0 {
-            let from = self.at.unwrap_or_else(current_location);
+            let from = self.at.unwrap_or_else(cg::pointer_location);
             let at = cg::CGPoint { x: from.x + input.dx as f64, y: from.y + input.dy as f64 };
             self.move_to(at, input.dx as i64, input.dy as i64);
         }
@@ -364,7 +362,7 @@ impl Injector {
         ];
         let changed = buttons ^ self.held.buttons;
         self.held.buttons = buttons;
-        let at = self.at.unwrap_or_else(current_location);
+        let at = self.at.unwrap_or_else(cg::pointer_location);
         for (bit, down_kind, up_kind, number) in MAP {
             if changed & bit == 0 {
                 continue;
@@ -410,18 +408,6 @@ impl Injector {
                 self.key(code, false, false);
             }
         }
-    }
-}
-
-fn current_location() -> cg::CGPoint {
-    unsafe {
-        let e = CGEventCreate(std::ptr::null());
-        if e.is_null() {
-            return cg::CGPoint::default();
-        }
-        let at = CGEventGetLocation(e);
-        CFRelease(e);
-        at
     }
 }
 

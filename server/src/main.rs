@@ -643,7 +643,7 @@ fn run(cli: Cli) -> Result<(), String> {
         let spawned = std::thread::Builder::new().name("stream-0".into()).spawn(move || {
             if let Err(e) = open_source().and_then(|source| stream_loop(0, source, main, &shared2, &sock, pace, None)) {
                 eprintln!("error: {e}");
-                std::process::exit(1);
+                macos::exit(1);
             }
         });
         spawned.map_err(|e| e.to_string())?;

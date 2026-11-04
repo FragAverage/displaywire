@@ -14,8 +14,8 @@ mod pointer;
 pub mod shell;
 
 use std::ffi::c_void;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use objc2_foundation::NSString;
@@ -40,7 +40,7 @@ pub fn when_allowed<T>(what: &str, mut open: impl FnMut() -> Result<T, String>) 
         match open() {
             Ok(t) => return t,
             Err(e) if !said => {
-                println!("{what}: {e} (trying again every few seconds)");
+                println!("{what}: {e}");
                 said = true;
             }
             Err(_) => {}
@@ -56,21 +56,69 @@ unsafe extern "C" {
     fn IOPMAssertionRelease(id: u32) -> i32;
 }
 
+/// AWDL held down while a device is connected (see `while_connected`), here so that leaving the
+/// process can bring it back.
+static WIFI: Mutex<Option<transport::awdl::Quiet>> = Mutex::new(None);
+/// Ctrl-C, or launchd's SIGTERM: leave through `exit` instead of on the spot.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" {
+    fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+extern "C" fn on_signal(_: i32) {
+    STOP.store(true, Relaxed);
+}
+
+/// Puts back what the server changed (AWDL), then leaves. Everything that ends the process goes
+/// through here: `std::process::exit` runs no destructors.
+pub fn exit(code: i32) -> ! {
+    if WIFI.lock().map(|mut w| w.take()).ok().flatten().is_some() {
+        println!("wifi tuning: AWDL back on");
+    }
+    std::process::exit(code)
+}
+
+/// Starts this program again in place (same arguments, same process for launchd), for permissions
+/// macOS only applies to a new process.
+pub fn restart() -> ! {
+    use std::os::unix::process::CommandExt;
+    if WIFI.lock().map(|mut w| w.take()).ok().flatten().is_some() {
+        println!("wifi tuning: AWDL back on");
+    }
+    println!("restarting");
+    let error = match std::env::current_exe() {
+        Ok(exe) => std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec(),
+        Err(e) => e,
+    };
+    println!("can't restart: {error}");
+    std::process::exit(1)
+}
+
 /// While a device is connected the display doesn't sleep (it's what the device is looking at), a
 /// connection wakes it, and (with `quiet_wifi`, once its one-time setup is done) AWDL is held down
 /// so AirDrop and AirPlay's channel hops don't burst the stream's delay (see `transport::awdl`).
+/// Also where Ctrl-C and SIGTERM end the process, through `exit`.
 pub fn while_connected(shared: Arc<Shared>, quiet_wifi: bool) {
+    unsafe {
+        signal(2, on_signal);
+        signal(15, on_signal);
+    }
     let spawned = std::thread::Builder::new().name("while-connected".into()).spawn(move || {
         let kind = NSString::from_str("PreventUserIdleDisplaySleep");
         let name = NSString::from_str("DisplayWire: a device is connected");
         let (kind, name) = (&*kind as *const NSString as *const c_void, &*name as *const NSString as *const c_void);
+        let mut was_connected = false;
         let mut held: Option<u32> = None;
-        let mut wifi: Option<transport::awdl::Quiet> = None;
         loop {
+            if STOP.load(Relaxed) {
+                exit(0);
+            }
             let connected = shared.link.lock().unwrap().is_some();
-            unsafe {
-                match (connected, held) {
-                    (true, None) => {
+            if connected != was_connected {
+                was_connected = connected;
+                unsafe {
+                    if connected {
                         let mut wake = 0;
                         if IOPMAssertionDeclareUserActivity(name, 0, &mut wake) == 0 {
                             IOPMAssertionRelease(wake);
@@ -78,23 +126,22 @@ pub fn while_connected(shared: Arc<Shared>, quiet_wifi: bool) {
                         let mut id = 0;
                         if IOPMAssertionCreateWithName(kind, 255, name, &mut id) == 0 {
                             held = Some(id);
+                        } else {
+                            println!("keep awake: the display may sleep while connected");
                         }
-                        if quiet_wifi && transport::awdl::ready() {
-                            println!("wifi tuning: AWDL (AirDrop, AirPlay) paused while connected");
-                            wifi = Some(transport::awdl::Quiet::start());
-                        }
-                    }
-                    (false, Some(id)) => {
+                    } else if let Some(id) = held.take() {
                         IOPMAssertionRelease(id);
-                        held = None;
-                        if wifi.take().is_some() {
-                            println!("wifi tuning: AWDL back on");
-                        }
                     }
-                    _ => {}
+                }
+                let mut wifi = WIFI.lock().unwrap();
+                if connected && quiet_wifi && transport::awdl::ready() {
+                    println!("wifi tuning: AWDL (AirDrop, AirPlay) paused while connected");
+                    *wifi = Some(transport::awdl::Quiet::start());
+                } else if !connected && wifi.take().is_some() {
+                    println!("wifi tuning: AWDL back on");
                 }
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(200));
         }
     });
     if let Err(e) = spawned {
@@ -157,7 +204,7 @@ impl ScreenSource {
         let main = cg::main_display();
         let pick = pick
             .and_then(|p| match p {
-                Pick::Index(m) => displays.iter().nth(m as usize),
+                Pick::Index(m) => cg::displays().get(m as usize).and_then(|&id| displays.iter().find(|d| unsafe { d.displayID() } == id)),
                 Pick::Id(id) => displays.iter().find(|d| unsafe { d.displayID() } == id),
             })
             .or_else(|| displays.iter().find(|d| unsafe { d.displayID() } == main))
@@ -175,15 +222,17 @@ impl ScreenSource {
     }
 
     /// Opens the same display again at a new size, when `MAX_HEIGHT` has changed.
-    fn follow_max_height(&mut self) -> Result<(), String> {
+    fn follow_max_height(&mut self) {
         let max_height = MAX_HEIGHT.load(Relaxed);
         if max_height == self.max_height {
-            return Ok(());
+            return;
         }
         self.max_height = max_height;
-        let (capture, encoder) = Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, max_height)?;
-        (self.capture, self.encoder) = (capture, encoder);
-        Ok(())
+        // If the new size can't be opened, carry on at the old one.
+        match Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, max_height) {
+            Ok((capture, encoder)) => (self.capture, self.encoder) = (capture, encoder),
+            Err(e) => println!("stream {}: can't change the resolution, staying at {}x{}: {e}", self.stream, self.capture.width, self.capture.height),
+        }
     }
 
     fn encode(&mut self, picture: &capture::Picture, capture_ns: u64, keyframe: bool) -> Result<Option<EncodedFrame>, String> {
@@ -195,7 +244,7 @@ impl ScreenSource {
 
 impl Source for ScreenSource {
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {
-        self.follow_max_height()?;
+        self.follow_max_height();
         let wait = if force_keyframe || self.repaint { 0 } else { timeout_ms };
         let picture = match self.capture.next(wait) {
             Some(p) => Some(p),
@@ -231,11 +280,9 @@ impl Source for ScreenSource {
     }
 
     fn monitors(&self) -> Option<Monitors> {
-        let displays = capture::displays().ok()?;
         let main = cg::main_display();
         let mut m = Monitors::default();
-        for (i, d) in displays.iter().take(MAX_MONITORS).enumerate() {
-            let id = unsafe { d.displayID() };
+        for (i, id) in cg::displays().into_iter().take(MAX_MONITORS).enumerate() {
             let (w, h, hz) = cg::pixel_size(id);
             let name = if cg::is_builtin(id) { "Built-in display".to_string() } else { format!("Display {}", i + 1) };
             m.list[i] = Monitor::new(w as u16, h as u16, hz as u16, id == main, &name);

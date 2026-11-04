@@ -11,10 +11,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn, NSImage,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSModalResponseAbort, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn, NSImage,
     NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSString, NSTimer};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
 use timing::now_ns;
 
 use super::{agent, cg, input};
@@ -35,8 +35,8 @@ pub struct Ivars {
     item: RefCell<Option<Retained<NSStatusItem>>>,
     shown: RefCell<Shown>,
     last_outcome: RefCell<Option<Outcome>>,
-    /// A dialog is up (the timer keeps firing inside its modal loop).
-    in_dialog: RefCell<bool>,
+    /// The dialog that's up, if any (the timer keeps firing inside its modal loop).
+    modal: RefCell<Option<Shown>>,
 }
 
 define_class!(
@@ -61,8 +61,11 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: Option<&AnyObject>) {
             self.update_icon();
-            if !*self.ivars().in_dialog.borrow() {
+            if self.ivars().modal.borrow().is_none() {
                 self.pairing_dialogs();
+            } else if self.dialog_is_stale() {
+                // Pairing moved on: close the dialog in the way, and the next tick shows what's next.
+                NSApplication::sharedApplication(self.mtm()).abortModal();
             }
         }
 
@@ -157,7 +160,12 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            std::process::exit(0);
+            super::exit(0);
+        }
+
+        #[unsafe(method(restart:))]
+        fn restart(&self, _sender: Option<&AnyObject>) {
+            super::restart();
         }
     }
 );
@@ -201,13 +209,32 @@ impl MenuBar {
             item: RefCell::new(None),
             shown: RefCell::default(),
             last_outcome: RefCell::new(None),
-            in_dialog: RefCell::new(false),
+            modal: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
 
     /// A dialog in front of everything; true for the first button.
     fn alert(&self, title: &str, text: &str, buttons: &[&str]) -> bool {
+        self.dialog(Shown::Nothing, title, text, buttons) == Some(true)
+    }
+
+    /// Whether the dialog that's up no longer fits where pairing is: a device asking to pair
+    /// replaces any other dialog, and the Allow and PIN dialogs go once their step is over.
+    fn dialog_is_stale(&self) -> bool {
+        let view = self.ivars().shared.pairing.snapshot(now_ns()).view;
+        match (&*self.ivars().modal.borrow(), &view) {
+            (Some(Shown::Nothing), View::Asking { .. }) => true,
+            (Some(Shown::Asked(n)), View::Asking { name, .. }) => n != name,
+            (Some(Shown::Pin(p)), View::Pin { pin, .. }) => p != pin,
+            (Some(Shown::Asked(_) | Shown::Pin(_)), _) => true,
+            _ => false,
+        }
+    }
+
+    /// A dialog about `kind`: Some(true) for the first button, None if it was closed because
+    /// pairing moved on (see `dialog_is_stale`).
+    fn dialog(&self, kind: Shown, title: &str, text: &str, buttons: &[&str]) -> Option<bool> {
         let mtm = self.mtm();
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(title));
@@ -216,10 +243,10 @@ impl MenuBar {
             alert.addButtonWithTitle(&NSString::from_str(b));
         }
         NSApplication::sharedApplication(mtm).activate();
-        *self.ivars().in_dialog.borrow_mut() = true;
-        let first = alert.runModal() == NSAlertFirstButtonReturn;
-        *self.ivars().in_dialog.borrow_mut() = false;
-        first
+        let outer = self.ivars().modal.replace(Some(kind));
+        let response = alert.runModal();
+        *self.ivars().modal.borrow_mut() = outer;
+        (response != NSModalResponseAbort).then_some(response == NSAlertFirstButtonReturn)
     }
 
     /// The icon, different while a device is connected; its tooltip says who.
@@ -259,17 +286,17 @@ impl MenuBar {
             View::Asking { name, addr, .. } if *self.ivars().shown.borrow() != Shown::Asked(name.clone()) => {
                 *self.ivars().shown.borrow_mut() = Shown::Asked(name.clone());
                 let text = format!("{name} ({addr}) wants to pair with this Mac. Allow it only if it's yours.");
-                if self.alert(&format!("Allow “{name}” to connect?"), &text, &["Allow", "Don't Allow"]) {
-                    shared.pairing.allow(now_ns());
-                } else {
-                    shared.pairing.deny(now_ns());
+                match self.dialog(Shown::Asked(name.clone()), &format!("Allow “{name}” to connect?"), &text, &["Allow", "Don't Allow"]) {
+                    Some(true) => shared.pairing.allow(now_ns()),
+                    Some(false) => shared.pairing.deny(now_ns()),
+                    None => {}
                 }
             }
             View::Pin { name, pin, .. } if *self.ivars().shown.borrow() != Shown::Pin(pin.clone()) => {
                 *self.ivars().shown.borrow_mut() = Shown::Pin(pin.clone());
                 let (a, b) = pin.split_at(pin.len() / 2);
-                // The dialog stays up until it's dismissed; pairing finishes behind it.
-                if !self.alert(&format!("Type this PIN on {name}"), &format!("{a} {b}"), &["Done", "Cancel"]) {
+                // It closes by itself once the PIN has been typed (or pairing ends).
+                if self.dialog(Shown::Pin(pin.clone()), &format!("Type this PIN on {name}"), &format!("{a} {b}"), &["Cancel"]) == Some(true) {
                     shared.pairing.stop(now_ns());
                 }
             }
@@ -334,6 +361,8 @@ impl MenuBar {
             menu.addItem(&item(mtm, "Screen Recording: allowed", None, None));
         } else {
             menu.addItem(&item(mtm, "Allow Screen Recording…", Some(sel!(allowScreen:)), Some(t)));
+            // macOS applies the permission to a new process only.
+            menu.addItem(&item(mtm, "Restart After Allowing It", Some(sel!(restart:)), Some(t)));
         }
         if input::accessibility_allowed() {
             menu.addItem(&item(mtm, "Keyboard and mouse control: allowed", None, None));
@@ -368,7 +397,9 @@ pub fn run(shared: Arc<Shared>) -> ! {
     status_item.setMenu(Some(&menu));
     *bar.ivars().item.borrow_mut() = Some(status_item);
     bar.update_icon();
-    let _timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, &bar, sel!(tick:), None, true) };
+    // In the common modes, so it keeps firing while a dialog or the menu is open.
+    let timer = unsafe { NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(0.5, &bar, sel!(tick:), None, true) };
+    unsafe { NSRunLoop::currentRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
     println!("menu bar: icon ready");
     app.run();
     std::process::exit(0)

@@ -219,8 +219,15 @@ pub struct PointerImage {
     pub rgba: Vec<u8>,
 }
 
+/// What the video is encoded as. HEVC unless the client asks for H.264 (`CAP_H264`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Codec {
+    Hevc,
+    H264,
+}
+
 pub struct EncodedFrame {
-    /// HEVC Annex B access unit.
+    /// HEVC (or H.264) Annex B access unit.
     pub data: Vec<u8>,
     pub keyframe: bool,
     pub capture_ns: u64,
@@ -264,6 +271,11 @@ pub trait Source {
     }
     fn pointer_image(&self) -> Option<PointerImage> {
         None
+    }
+    /// Switches the codec, and the largest size to encode (scaling down to fit), for the next
+    /// frames; the first is then a keyframe.
+    fn set_format(&mut self, codec: Codec, max_size: Option<(u32, u32)>) -> Result<(), String> {
+        if codec == Codec::Hevc && max_size.is_none() { Ok(()) } else { Err("this source only makes HEVC at its own size".into()) }
     }
 }
 
@@ -713,6 +725,7 @@ fn stream_loop(
     // frame invalidated, to announce with the next one (`Msg::Recovered`).
     let mut recent: VecDeque<(u32, u64)> = VecDeque::new();
     let mut recovered_upto: Option<u32> = None;
+    let mut applied_format = (Codec::Hevc, None);
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
@@ -778,6 +791,18 @@ fn stream_loop(
             } else {
                 ctl.keyframe.store(true, Relaxed);
                 stats.fell_back += 1;
+            }
+        }
+        let caps = shared.caps.load(Relaxed);
+        let format = (
+            if caps & proto::stream::CAP_H264 != 0 { Codec::H264 } else { Codec::Hevc },
+            (caps & proto::stream::CAP_MAX_1080P != 0).then_some((1920, 1080)),
+        );
+        if format != applied_format {
+            applied_format = format;
+            match source.set_format(format.0, format.1) {
+                Ok(()) => ctl.keyframe.store(true, Relaxed),
+                Err(e) => println!("video: can't switch to {format:?}: {e}"),
             }
         }
         let force = ctl.keyframe.swap(false, Relaxed);

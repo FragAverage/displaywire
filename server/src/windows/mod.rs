@@ -24,7 +24,7 @@ use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, GetCurren
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::core::{BOOL, s, w};
 
-use crate::{Cli, EncodedFrame, Source};
+use crate::{Cli, Codec, EncodedFrame, Source};
 use capture::Capture;
 use convert::Converter;
 use encoder::Encoder;
@@ -95,12 +95,17 @@ pub fn system_tool(name: &str) -> std::path::PathBuf {
 }
 
 /// The encoder `kind` (`--encoder`) asks for, at `w`×`h`.
-fn make_encoder(kind: &str, device: &ID3D11Device, w: u32, h: u32, fps: u32, bitrate: u32) -> Res<AnyEncoder> {
+fn make_encoder(kind: &str, device: &ID3D11Device, w: u32, h: u32, fps: u32, bitrate: u32, codec: Codec) -> Res<AnyEncoder> {
+    // Media Foundation makes HEVC only.
+    if codec != Codec::Hevc && kind != "nvenc" && kind != "auto" {
+        return Err(format!("--encoder {kind} can't make {codec:?}; use nvenc or auto").into());
+    }
     Ok(match kind {
         "mft" => AnyEncoder::Mft(Encoder::new(device, w, h, fps, bitrate)?),
-        "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(device, w, h, fps, bitrate)?)),
-        "auto" => match NvEncoder::new(device, w, h, fps, bitrate) {
+        "nvenc" => AnyEncoder::Nvenc(Box::new(NvEncoder::new(device, w, h, fps, bitrate, codec)?)),
+        "auto" => match NvEncoder::new(device, w, h, fps, bitrate, codec) {
             Ok(e) => AnyEncoder::Nvenc(Box::new(e)),
+            Err(e) if codec != Codec::Hevc => return Err(e),
             Err(e) => {
                 println!("encoder: direct NVENC unavailable ({e}); using Media Foundation");
                 AnyEncoder::Mft(Encoder::new(device, w, h, fps, bitrate)?)
@@ -209,6 +214,21 @@ pub struct ScreenSource {
     encoder_kind: String,
     fps: u32,
     bitrate: u32,
+    codec: Codec,
+    /// The largest size to encode (`Source::set_format`).
+    max_size: Option<(u32, u32)>,
+}
+
+/// The capture size scaled down to fit `max` (keeping the aspect ratio), and even for NV12.
+fn fit((w, h): (u32, u32), max: Option<(u32, u32)>) -> (u32, u32) {
+    let (w, h) = match max {
+        Some((mw, mh)) if w > mw || h > mh => {
+            let scale = (mw as f64 / w as f64).min(mh as f64 / h as f64);
+            ((w as f64 * scale).round() as u32, (h as f64 * scale).round() as u32)
+        }
+        _ => (w, h),
+    };
+    (w & !1, h & !1)
 }
 
 impl ScreenSource {
@@ -230,12 +250,11 @@ impl ScreenSource {
         let device = monitor.and_then(|m| capture::outputs().ok()?.into_iter().nth(m as usize)).map(|o| o.device);
         let capture = Capture::new(device.as_deref())?;
         capture::set_stream(stream, Some(capture.monitor.clone()));
-        // NV12 needs even dimensions.
-        let (w, h) = (capture.width & !1, capture.height & !1);
+        let (w, h) = fit((capture.width, capture.height), None);
         let converter =
             Converter::new(&capture.device, &capture.context, &capture.composed, (capture.width, capture.height), (w, h), cli.fps)?;
         let bitrate = (cli.mbps * 1e6) as u32;
-        let encoder = make_encoder(&cli.encoder, &capture.device, w, h, cli.fps, bitrate)?;
+        let encoder = make_encoder(&cli.encoder, &capture.device, w, h, cli.fps, bitrate, Codec::Hevc)?;
         let profile = cli.profile.then(|| Profile::new(&capture.device)).transpose()?;
         println!("encoding {w}x{h} HEVC at {:.0} Mbps with {}", cli.mbps, encoder.name());
         Ok(ScreenSource {
@@ -252,6 +271,8 @@ impl ScreenSource {
             pointer_in_video: true,
             repaint: false,
             encoder_kind: cli.encoder.clone(),
+            codec: Codec::Hevc,
+            max_size: None,
             fps: cli.fps,
             bitrate,
         })
@@ -262,11 +283,13 @@ impl ScreenSource {
     /// which is all a client needs to follow.
     fn rebuild(&mut self) -> Res<()> {
         let c = &self.capture;
-        let (w, h) = (c.width & !1, c.height & !1);
-        self.converter = Converter::new(&c.device, &c.context, &c.composed, (c.width, c.height), (w, h), self.fps)?;
-        self.encoder = make_encoder(&self.encoder_kind, &c.device, w, h, self.fps, self.bitrate)?;
+        let (w, h) = fit((c.width, c.height), self.max_size);
+        // Both made before either replaces the old, so a failure leaves a working pair.
+        let converter = Converter::new(&c.device, &c.context, &c.composed, (c.width, c.height), (w, h), self.fps)?;
+        let encoder = make_encoder(&self.encoder_kind, &c.device, w, h, self.fps, self.bitrate, self.codec)?;
+        (self.converter, self.encoder) = (converter, encoder);
         self.in_flight.clear();
-        println!("encoding {w}x{h} HEVC with {}", self.encoder.name());
+        println!("encoding {w}x{h} {:?} with {}", self.codec, self.encoder.name());
         Ok(())
     }
 
@@ -312,7 +335,10 @@ impl ScreenSource {
             p.report(now);
         }
         let capture_ns = self.in_flight.pop_front().unwrap_or(capture_ns);
-        let keyframe = hevc::is_keyframe(&data);
+        let keyframe = match self.codec {
+            Codec::Hevc => hevc::is_keyframe(&data),
+            Codec::H264 => hevc::h264::is_keyframe(&data),
+        };
         Ok(Some(EncodedFrame { data, keyframe, capture_ns }))
     }
 }
@@ -372,6 +398,18 @@ impl Source for ScreenSource {
 
     fn pointer_image(&self) -> Option<crate::PointerImage> {
         self.capture.pointer_image()
+    }
+
+    fn set_format(&mut self, codec: Codec, max_size: Option<(u32, u32)>) -> Result<(), String> {
+        if (codec, max_size) == (self.codec, self.max_size) {
+            return Ok(());
+        }
+        let old = (self.codec, self.max_size);
+        (self.codec, self.max_size) = (codec, max_size);
+        self.rebuild().map_err(|e| {
+            (self.codec, self.max_size) = old;
+            e.to_string()
+        })
     }
 
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {

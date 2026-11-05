@@ -12,6 +12,7 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_
 use windows::core::{Interface, s, w};
 
 use super::Res;
+use crate::Codec;
 
 // `std::mem::zeroed` is invalid for structs holding an enum with no zero variant
 // (`frameFieldMode`, `pictureStruct`): set those fields before the struct counts as initialised.
@@ -74,7 +75,7 @@ macro_rules! call {
 pub const REF_FRAMES: u32 = 8;
 
 impl NvEncoder {
-    pub fn new(device: &ID3D11Device, width: u32, height: u32, fps: u32, bitrate: u32) -> Res<NvEncoder> {
+    pub fn new(device: &ID3D11Device, width: u32, height: u32, fps: u32, bitrate: u32, codec: Codec) -> Res<NvEncoder> {
         unsafe {
             // From System32 only, where the driver puts it: never a planted copy elsewhere on the search path.
             let lib = LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
@@ -99,7 +100,7 @@ impl NvEncoder {
                 fps,
                 init: None,
                 cfg: None,
-                name: "NVENC (direct)".into(),
+                name: format!("NVENC (direct, {codec:?})"),
             };
 
             let mut open: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS = std::mem::zeroed();
@@ -114,7 +115,10 @@ impl NvEncoder {
             enc.check(status, "open encode session")?;
 
             // Start from the driver's own ultra-low-latency P1 configuration.
-            let codec = NV_ENC_CODEC_HEVC_GUID;
+            let (codec, profile) = match codec {
+                Codec::Hevc => (NV_ENC_CODEC_HEVC_GUID, NV_ENC_HEVC_PROFILE_MAIN_GUID),
+                Codec::H264 => (NV_ENC_CODEC_H264_GUID, NV_ENC_H264_PROFILE_HIGH_GUID),
+            };
             let preset = NV_ENC_PRESET_P1_GUID;
             let tuning = NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
             let mut preset_cfg = preset_config();
@@ -124,7 +128,7 @@ impl NvEncoder {
 
             let mut cfg = Box::new(preset_cfg.presetCfg);
             cfg.version = NV_ENC_CONFIG_VER;
-            cfg.profileGUID = NV_ENC_HEVC_PROFILE_MAIN_GUID;
+            cfg.profileGUID = profile;
             cfg.gopLength = NVENC_INFINITE_GOPLENGTH;
             cfg.frameIntervalP = 1;
             let rc = &mut cfg.rcParams;
@@ -139,16 +143,25 @@ impl NvEncoder {
             rc.set_enableLookahead(0);
             rc.set_zeroReorderDelay(1);
             rc.set_enableAQ(0);
-            let hevc = &mut cfg.encodeCodecConfig.hevcConfig;
-            hevc.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-            hevc.set_repeatSPSPPS(1);
-            hevc.set_chromaFormatIDC(1);
-            hevc.set_outputAUD(0);
-            // Room for older frames to stay references, so a lost one can be invalidated (`invalidate`)
-            // and later frames predicted from one before it.
-            hevc.maxNumRefFramesInDPB = REF_FRAMES;
+            let vui = if codec == NV_ENC_CODEC_H264_GUID {
+                let h264 = &mut cfg.encodeCodecConfig.h264Config;
+                h264.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+                h264.set_repeatSPSPPS(1);
+                h264.chromaFormatIDC = 1;
+                h264.set_outputAUD(0);
+                &mut h264.h264VUIParameters
+            } else {
+                let hevc = &mut cfg.encodeCodecConfig.hevcConfig;
+                hevc.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+                hevc.set_repeatSPSPPS(1);
+                hevc.set_chromaFormatIDC(1);
+                hevc.set_outputAUD(0);
+                // Room for older frames to stay references, so a lost one can be invalidated (`invalidate`)
+                // and later frames predicted from one before it.
+                hevc.maxNumRefFramesInDPB = REF_FRAMES;
+                &mut hevc.hevcVUIParameters
+            };
             // Same colour description the Media Foundation path declares (BT.709, limited range).
-            let vui = &mut hevc.hevcVUIParameters;
             vui.videoSignalTypePresentFlag = 1;
             vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
             vui.videoFullRangeFlag = 0;

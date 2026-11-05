@@ -182,6 +182,39 @@ avoids that but needs a rootable TV), so this is for enthusiasts until LG offers
 - [ ] UI: the shared egui UI from item 3, sized for a TV (10-foot layout, remote navigation).
 - [ ] Decide after a prototype: is latency good enough to keep going, and is a store app ever possible?
 
+Prototype (branch `lg-proto`), in milestones:
+- [x] M1a: headless `webos/` crate (`displaywire-tv pair|connect|list`, `--dump` writes the HEVC stream); builds on the Mac.
+- [x] Toolchain: `scripts/build-webos.sh` (Docker + openlgtv/buildroot-nc4 `2026.08-webos`, Rust `armv7-unknown-linux-gnueabi`).
+      The toolchain's glibc is 2.12, so `webos/src/compat.rs` supplies `getauxval`. Runs under qemu.
+- [x] M1c: on the TV over Developer Mode SSH (binary in `/media/developer/temp/dw`): paired with FRAG-PC, streams
+      2560×1440 HEVC Main, rtt ~5 ms, PC capture → received on the TV ~7–18 ms, no loss; the dump decodes on the Mac.
+      Test TV: LG 50UM7450PLA (2019), webOS TV Lite 4.10.2, firmware 05.40.97, kernel 4.4.84 armv7l, glibc 2.24,
+      4K60 panel. Dev Mode jail has `/dev/urandom` but no `/dev/random`, and glibc has no `getrandom()`, so the
+      Docker build sets `getrandom_backend="linux_raw"`.
+- [ ] M1b: pair and connect from the Mac terminal (skipped: went straight to the TV).
+- [ ] Watch for: two session drops right after pairing in the first run, not seen since.
+- [x] M2a: video on the TV screen through **LGNC** (`liblgncopenapi.so.2`, moonlight-tv's "NetCast Legacy"):
+      `play` of an H.264 1080p clip shows correctly and smoothly from the installed app (2026-11-03).
+      What it took:
+      - NDL v1 (H.264-only on this TV) can't work here: the k5lp Developer Mode app jail has no `/dev/rtkmem`
+        (moonlight-tv's `SS4S_webOS_IsJailConfigBroken`). LGNC doesn't need it.
+      - LGNC must be initialised **before** SDL's video subsystem; otherwise it crashes in `wl_proxy_marshal`
+        (crash reports in `/tmp/faultmanager/crash/`; the TV uploads them to LG).
+      - The app's `main` must be the binary itself (LG's services identify the app by its executable; via a shell
+        script `LGNC_PLUGIN_Initialize` returns -1). Launched as an app, the binary reads `args`/`env` beside it and
+        logs to `/media/developer/temp/dw/app.log`.
+      - LG libraries are `dlopen`ed `RTLD_GLOBAL`.
+      - LGNC is H.264 only, so this TV needs H.264 from the PC; no HEVC route exists here (no SMP library either).
+- [x] M2b: live stream on the TV (2026-11-03): `connect --show` from the installed app shows the PC desktop live.
+      - The client sets `CAP_H264 | CAP_MAX_1080P`; the server rebuilds converter + NVENC as 1920×1080 H.264 for that
+        session (HEVC at native size for everyone else). Above 1080p this TV's H.264 decoder shows only green.
+      - PC capture → received on the TV ~17–23 ms, rtt ~5 ms; decode/display time on the TV not measured yet.
+      - Server encode for H.264 looked slow (~17 ms capture → encoded at 1440p): profile at 1080p.
+      - Dev setup: the server on FRAG-PC is a build of this branch (`C:\Program Files\DisplayWire\displaywire-server.exe`,
+        previous one kept as `.exe.bak`); built in `~\dw-build` with `cargo +1.99.1` (the PC's default Rust is 1.79).
+- [ ] M3: a real app: pairing and PC choice on the TV (no `args` file), audio (LGNC audio is off on broken-jail TVs:
+      try SDL/PulseAudio), gamepad/keyboard/mouse/Magic Remote input, measure glass-to-glass latency.
+
 ## Not planned
 - Internet access without Tailscale (STUN hole punching, a relay, accounts). Tailscale stays the answer; we run no
   servers. README explains a manual port-forward + firewall rule for people who insist.

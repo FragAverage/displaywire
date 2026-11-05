@@ -212,7 +212,13 @@ Prototype (branch `lg-proto`), in milestones:
       - Server encode for H.264 looked slow (~17 ms capture → encoded at 1440p): profile at 1080p.
       - Dev setup: the server on FRAG-PC is a build of this branch (`C:\Program Files\DisplayWire\displaywire-server.exe`,
         previous one kept as `.exe.bak`); built in `~\dw-build` with `cargo +1.99.1` (the PC's default Rust is 1.79).
-- [ ] M3: a real app: pairing and PC choice on the TV (no `args` file), audio (LGNC audio is off on broken-jail TVs:
+- [x] M3a: the app (`displaywire-tv app`, what the home screen launches with no `args` file): list of paired and
+      discovered computers, pairing with the remote's number keys (PIN, or an address typed with 0-9, `>` for a dot),
+      the stream, Back to leave. Bitmap font, no SDL_ttf. `DW_WINDOWED=1 displaywire-tv app` tries it on a desktop.
+      Not yet tried on the TV: which scancode the remote's Back sends (logged as `key N`; 41, 42, 270 and 461 are Back).
+- [x] Mac server serves H.264 (`CAP_H264`, VideoToolbox High) and fits the capture to 1080p (`CAP_MAX_1080P`); checked
+      end to end on a Mac with `--test-pattern` and `displaywire-tv connect --h264 --dump` (ffmpeg decodes it).
+- [ ] M3b: audio (LGNC audio is off on broken-jail TVs:
       try SDL/PulseAudio), gamepad/keyboard/mouse/Magic Remote input, measure glass-to-glass latency.
 
 ## Not planned

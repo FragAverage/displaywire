@@ -1,6 +1,6 @@
 {
     "id": "com.displaywire.tv",
-    "version": "0.6.3",
+    "version": "0.7.0",
     "vendor": "DisplayWire",
     "type": "native",
     "main": "displaywire-tv",

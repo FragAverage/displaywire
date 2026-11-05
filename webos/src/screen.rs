@@ -132,8 +132,20 @@ impl Screen {
             let kind = u32::from_ne_bytes(e.0[..4].try_into().unwrap());
             match kind {
                 SDL_QUIT => return Some(Input::Quit),
-                // SDL_KeyboardEvent: type, timestamp, windowID, state/repeat/padding, then keysym.scancode.
-                SDL_KEYDOWN => return Some(Input::Key(i32::from_ne_bytes(e.0[16..20].try_into().unwrap()))),
+                // SDL_KeyboardEvent as the TV's SDL lays it out (observed): type, timestamp, windowID,
+                // one more 32-bit field, state/repeat/padding, then the keysym, starting with its
+                // scancode. Standard SDL 2 has no extra field and the scancode at 16.
+                SDL_KEYDOWN => {
+                    if std::env::var_os("DW_KEYS_DEBUG").is_some() {
+                        let hex: Vec<String> = e.0[..32].iter().map(|b| format!("{b:02x}")).collect();
+                        println!("key event bytes: {}", hex.join(" "));
+                    }
+                    return Some(Input::Key(scancode(&e.0)));
+                }
+                other if std::env::var_os("DW_KEYS_DEBUG").is_some() && other != 0x400 => {
+                    let hex: Vec<String> = e.0[..24].iter().map(|b| format!("{b:02x}")).collect();
+                    println!("event {other:#x}: {}", hex.join(" "));
+                }
                 _ => {}
             }
         }
@@ -153,9 +165,44 @@ impl Canvas for Screen {
     }
 }
 
+/// The scancode of a key event. The keysym's `sym` follows it (`scancode | 0x4000_0000` for keys
+/// without a character), which tells the TV's layout from the standard one.
+fn scancode(event: &[u8; 56]) -> i32 {
+    let at = |o: usize| i32::from_ne_bytes(event[o..o + 4].try_into().unwrap());
+    let consistent = |scan: i32, sym: i32| scan > 0 && scan < 512 && (sym == scan | 0x4000_0000 || (1..127).contains(&sym));
+    if consistent(at(20), at(24)) || !consistent(at(16), at(20)) { at(20) } else { at(16) }
+}
+
 impl Drop for Screen {
     fn drop(&mut self) {
         (self.destroy_window)(self.window);
         (self.quit)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(bytes: &[u8]) -> [u8; 56] {
+        let mut e = [0u8; 56];
+        e[..bytes.len()].copy_from_slice(bytes);
+        e
+    }
+
+    #[test]
+    fn reads_the_tvs_key_events() {
+        // Down, and "1", as dumped on the 50UM7450PLA.
+        let down = event(&[0, 3, 0, 0, 0x44, 0xf0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0x84, 0x9e, 0x51, 0, 0, 0, 0x51, 0, 0, 0x40]);
+        let one = event(&[0, 3, 0, 0, 0x5c, 8, 1, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0x84, 0x9e, 0x1e, 0, 0, 0, 0x31, 0, 0, 0]);
+        assert_eq!(scancode(&down), 0x51);
+        assert_eq!(scancode(&one), 0x1e);
+    }
+
+    #[test]
+    fn reads_standard_sdl_key_events_too() {
+        // Standard layout: Return pressed, scancode at 16.
+        let enter = event(&[0, 3, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0x28, 0, 0, 0, 0x0d, 0, 0, 0]);
+        assert_eq!(scancode(&enter), 0x28);
     }
 }

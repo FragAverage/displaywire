@@ -1,4 +1,4 @@
-//! Hardware HEVC encoding with a VideoToolbox compression session, for the Mac server: real time,
+//! Hardware HEVC (or H.264, for clients that can't decode HEVC) encoding with a VideoToolbox compression session, for the Mac server: real time,
 //! no frame reordering, low-latency rate control where the encoder has it, keyframes only when
 //! asked for. Output is Annex B (start codes), with VPS/SPS/PPS in front of every keyframe, the
 //! way the NVENC path sends it.
@@ -44,6 +44,14 @@ unsafe extern "C" {
         count_out: *mut usize,
         nal_header_len_out: *mut i32,
     ) -> OSStatus;
+    fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+        format: CFTypeRef,
+        index: usize,
+        ptr_out: *mut *const u8,
+        size_out: *mut usize,
+        count_out: *mut usize,
+        nal_header_len_out: *mut i32,
+    ) -> OSStatus;
     fn CMTimeMake(value: i64, timescale: i32) -> CMTime;
 }
 
@@ -65,6 +73,7 @@ unsafe extern "C" {
     static kVTCompressionPropertyKey_AllowFrameReordering: CFTypeRef;
     static kVTCompressionPropertyKey_ProfileLevel: CFTypeRef;
     static kVTProfileLevel_HEVC_Main_AutoLevel: CFTypeRef;
+    static kVTProfileLevel_H264_High_AutoLevel: CFTypeRef;
     static kVTCompressionPropertyKey_AverageBitRate: CFTypeRef;
     static kVTCompressionPropertyKey_DataRateLimits: CFTypeRef;
     static kVTCompressionPropertyKey_ExpectedFrameRate: CFTypeRef;
@@ -99,33 +108,47 @@ unsafe extern "C" {
 }
 
 const CODEC_HEVC_ENCODE: u32 = u32::from_be_bytes(*b"hvc1");
+const CODEC_H264_ENCODE: u32 = u32::from_be_bytes(*b"avc1");
+
+/// What to encode as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Codec {
+    Hevc,
+    H264,
+}
 /// Timestamps are in microseconds.
 const TIMESCALE: i32 = 1_000_000;
 
 /// One encoded access unit.
 pub struct Encoded {
-    /// Annex B; a keyframe starts with its VPS, SPS and PPS.
+    /// Annex B; a keyframe starts with its parameter sets (VPS, SPS, PPS; H.264 has SPS and PPS).
     pub data: Vec<u8>,
     pub keyframe: bool,
 }
 
-type Outputs = Arc<Mutex<Vec<Result<Encoded, String>>>>;
+/// What the encoder's callback writes to.
+struct Sink {
+    codec: Codec,
+    frames: Mutex<Vec<Result<Encoded, String>>>,
+}
+
+type Outputs = Arc<Sink>;
 
 extern "C" fn on_encoded(refcon: *mut c_void, _frame: *mut c_void, status: OSStatus, _flags: u32, sample: CFTypeRef) {
-    let out = unsafe { &*(refcon as *const Mutex<Vec<Result<Encoded, String>>>) };
+    let out = unsafe { &*(refcon as *const Sink) };
     let result = if status != 0 {
         Err(format!("encode failed: OSStatus {status}"))
     } else if sample.is_null() {
         // Dropped by the encoder (it may skip frames to keep the rate): nothing to send.
         return;
     } else {
-        unsafe { annex_b(sample) }
+        unsafe { annex_b(sample, out.codec) }
     };
-    out.lock().unwrap().push(result);
+    out.frames.lock().unwrap().push(result);
 }
 
 /// The sample's length-prefixed NAL units as Annex B, with the parameter sets in front of keyframes.
-unsafe fn annex_b(sample: CFTypeRef) -> Result<Encoded, String> {
+unsafe fn annex_b(sample: CFTypeRef, codec: Codec) -> Result<Encoded, String> {
     unsafe {
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, 0);
         let not_sync = !attachments.is_null()
@@ -135,12 +158,16 @@ unsafe fn annex_b(sample: CFTypeRef) -> Result<Encoded, String> {
         let mut data = Vec::new();
         if keyframe {
             let format = CMSampleBufferGetFormatDescription(sample);
-            for i in 0..3 {
+            for i in 0..match codec {
+                Codec::Hevc => 3,
+                Codec::H264 => 2,
+            } {
                 let (mut p, mut size, mut count, mut header) = (ptr::null(), 0usize, 0usize, 0i32);
-                check(
-                    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, i, &mut p, &mut size, &mut count, &mut header),
-                    "parameter set",
-                )?;
+                let get = match codec {
+                    Codec::Hevc => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+                    Codec::H264 => CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+                };
+                check(get(format, i, &mut p, &mut size, &mut count, &mut header), "parameter set")?;
                 data.extend_from_slice(&[0, 0, 0, 1]);
                 data.extend_from_slice(std::slice::from_raw_parts(p, size));
             }
@@ -173,13 +200,13 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-    pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Encoder, String> {
-        // Low-latency rate control first; some encoders (or OS versions) refuse it for HEVC.
-        Self::create(width, height, fps, bitrate_bps, true).or_else(|_| Self::create(width, height, fps, bitrate_bps, false))
+    pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32, codec: Codec) -> Result<Encoder, String> {
+        // Low-latency rate control first; some encoders (or OS versions) refuse it.
+        Self::create(width, height, fps, bitrate_bps, codec, true).or_else(|_| Self::create(width, height, fps, bitrate_bps, codec, false))
     }
 
-    fn create(width: u32, height: u32, fps: u32, bitrate_bps: u32, low_latency: bool) -> Result<Encoder, String> {
-        let outputs: Outputs = Arc::default();
+    fn create(width: u32, height: u32, fps: u32, bitrate_bps: u32, codec: Codec, low_latency: bool) -> Result<Encoder, String> {
+        let outputs: Outputs = Arc::new(Sink { codec, frames: Mutex::default() });
         unsafe {
             let spec = dict();
             CFDictionarySetValue(spec.as_ptr(), kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder, kCFBooleanTrue);
@@ -192,7 +219,10 @@ impl Encoder {
                     ptr::null(),
                     width as i32,
                     height as i32,
-                    CODEC_HEVC_ENCODE,
+                    match codec {
+                        Codec::Hevc => CODEC_HEVC_ENCODE,
+                        Codec::H264 => CODEC_H264_ENCODE,
+                    },
                     spec.as_ptr(),
                     ptr::null(),
                     ptr::null(),
@@ -206,7 +236,13 @@ impl Encoder {
             let set = |key, value, what| check(VTSessionSetProperty(e.session, key, value), what);
             set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, "RealTime")?;
             set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering")?;
-            set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel, "ProfileLevel")?;
+            match codec {
+                Codec::Hevc => set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel, "ProfileLevel")?,
+                // Low-latency rate control may pick its own profile; High is a wish, not a need.
+                Codec::H264 => {
+                    let _ = VTSessionSetProperty(e.session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel);
+                }
+            }
             // Keyframes only on request (a lost frame is repaired by asking for one).
             set(kVTCompressionPropertyKey_MaxKeyFrameInterval, number(i32::MAX).as_ptr(), "MaxKeyFrameInterval")?;
             set(kVTCompressionPropertyKey_ExpectedFrameRate, number(fps as i32).as_ptr(), "ExpectedFrameRate")?;
@@ -258,7 +294,7 @@ impl Encoder {
             // Everything up to this frame: with no reordering that is this frame, now.
             check(VTCompressionSessionCompleteFrames(self.session, pts), "CompleteFrames")?;
         }
-        self.outputs.lock().unwrap().pop().transpose()
+        self.outputs.frames.lock().unwrap().pop().transpose()
     }
 }
 
@@ -323,9 +359,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn h264_has_parameter_sets_on_the_keyframe_and_the_right_size() {
+        let (w, h) = (1920, 1080);
+        let enc = Encoder::new(w, h, 60, 10_000_000, Codec::H264).expect("hardware H.264 encoder");
+        let pb = PixelBuffer::nv12(w, h).unwrap();
+        let mut frames = Vec::new();
+        for i in 0..10u32 {
+            pb.fill(w, h, |x, y| ((x + y + i * 8) % 256) as u8, |x, _| ((x * 2 % 256) as u8, 128));
+            if let Some(f) = unsafe { enc.encode(pb.as_ptr(), i as i64 * 16_667, i == 0) }.unwrap() {
+                frames.push(f);
+            }
+        }
+        assert!(frames.len() >= 8, "{} of 10 frames came out", frames.len());
+        assert!(frames[0].keyframe && hevc::h264::is_keyframe(&frames[0].data));
+        let nals = hevc::nals(&frames[0].data);
+        let sps = nals.iter().find(|n| hevc::h264::nal_type(n) == hevc::h264::SPS).expect("SPS before the IDR");
+        assert_eq!(hevc::h264::sps_size(sps), Some((w, h)));
+        assert!(frames[1..].iter().all(|f| !f.keyframe && !hevc::h264::is_keyframe(&f.data)));
+    }
+
+    #[test]
     fn encodes_a_moving_picture_that_decodes() {
         let (w, h) = (1280, 720);
-        let enc = Encoder::new(w, h, 60, 20_000_000).expect("hardware HEVC encoder");
+        let enc = Encoder::new(w, h, 60, 20_000_000, Codec::Hevc).expect("hardware HEVC encoder");
         let pb = PixelBuffer::nv12(w, h).unwrap();
         let mut frames = Vec::new();
         for i in 0..30u32 {

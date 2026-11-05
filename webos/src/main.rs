@@ -13,13 +13,19 @@
 
 #[cfg(all(target_arch = "arm", target_env = "gnu"))]
 mod compat;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
+mod app;
+#[cfg(unix)]
+mod discovery;
+#[cfg(unix)]
 mod dl;
+#[cfg(unix)]
+mod font;
 #[cfg(target_os = "linux")]
 mod lgnc;
 #[cfg(target_os = "linux")]
 mod ndl;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod screen;
 mod session;
 mod store;
@@ -68,6 +74,9 @@ enum Cmd {
         /// Show the stream on the TV's screen.
         #[arg(long)]
         show: bool,
+        /// Ask the PC for H.264 at up to 1080p, as the TV does (headless runs get HEVC otherwise).
+        #[arg(long)]
+        h264: bool,
         #[command(flatten)]
         video: VideoArgs,
     },
@@ -79,6 +88,8 @@ enum Cmd {
         #[arg(long, default_value_t = 60)]
         fps: u32,
     },
+    /// The app: choose a computer, pair with it, and stream (what the TV's home screen launches).
+    App,
     /// List paired PCs.
     List,
     /// Only open the app's (transparent) window, for decoding from another process.
@@ -105,9 +116,10 @@ fn main() {
     let store = store::Store::new(cli.state_dir);
     let result = match cli.cmd {
         Cmd::Pair { address, name } => pair(&store, &address, &name),
-        Cmd::Connect { address, dump, seconds, show, video } => connect(&store, &address, dump, seconds, show.then_some(video)),
+        Cmd::Connect { address, dump, seconds, show, h264, video } => connect(&store, &address, dump, seconds, show.then_some(video), h264),
         Cmd::Play { file, video, fps } => play(&file, video, fps),
         Cmd::Window => window(),
+        Cmd::App => run_app(store),
         Cmd::List => store.load().map(|servers| {
             for s in servers {
                 println!("{}  {}", s.address, s.name);
@@ -161,7 +173,7 @@ fn pair(store: &store::Store, address: &str, name: &str) -> Result<(), String> {
 }
 
 /// `show`: how to show the stream on screen.
-fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: Option<u64>, show: Option<VideoArgs>) -> Result<(), String> {
+fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: Option<u64>, show: Option<VideoArgs>, h264: bool) -> Result<(), String> {
     let server = store
         .find(address)?
         .ok_or_else(|| format!("{address} isn't paired: run `displaywire-tv pair {address}` first"))?;
@@ -181,7 +193,8 @@ fn connect(store: &store::Store, address: &str, dump: Option<PathBuf>, seconds: 
         Some(path) => Box::new(session::Dump::create(&path)?),
         None => Box::new(session::Discard),
     };
-    session::run(addr, server.key, 0, sink, &stop)
+    let caps = if h264 { proto::stream::CAP_H264 | proto::stream::CAP_MAX_1080P } else { 0 };
+    session::run(addr, server.key, caps, sink, &stop)
 }
 
 #[cfg(target_os = "linux")]
@@ -205,6 +218,24 @@ fn window() -> Result<(), String> {
     tv::window()
 }
 
+#[cfg(target_os = "linux")]
+fn run_app(store: store::Store) -> Result<(), String> {
+    tv::app(store)
+}
+
+/// Off the TV there is no decoder: the screens and the connection, to try the app on a desktop
+/// (`DW_WINDOWED=1`).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn run_app(store: store::Store) -> Result<(), String> {
+    let screen = screen::Screen::open()?;
+    app::App::new(store, Arc::new(app::NoVideo)).run(screen)
+}
+
+#[cfg(not(unix))]
+fn run_app(_: store::Store) -> Result<(), String> {
+    Err("the app only runs on the TV".into())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn window() -> Result<(), String> {
     Err("window only works on the TV".into())
@@ -215,9 +246,10 @@ fn play(_: &std::path::Path, _: VideoArgs, _: u32) -> Result<(), String> {
     Err("play only works on the TV".into())
 }
 
-/// When the TV launches us as an app, the only argument is the launch parameters (JSON). The
-/// prototype then takes its command line from `args` (one per line) and environment from `env`
-/// (`KEY=value` lines) beside the binary, and logs to `DW_LOG` or the developer temp folder.
+/// When the TV launches us as an app, the only argument is the launch parameters (JSON). With an
+/// `args` file beside the binary (one argument per line) that is the command line, for trying
+/// things on the TV; otherwise it is `app`. An `env` file (`KEY=value` lines) sets the environment.
+/// Output goes to `DW_LOG` or the developer temp folder.
 /// The binary has to be the app's `main` itself: LG's services identify the app by its executable.
 fn launched_as_app() -> Option<Vec<String>> {
     let first = std::env::args().nth(1)?;
@@ -237,6 +269,10 @@ fn launched_as_app() -> Option<Vec<String>> {
     println!("=== launched as an app: {first}");
     let mut args = vec!["displaywire-tv".to_string()];
     args.extend(std::fs::read_to_string("args").unwrap_or_default().lines().map(str::to_string).filter(|l| !l.is_empty()));
+    // Launched from the home screen with nothing asked for: the app.
+    if args.len() == 1 {
+        args.push("app".into());
+    }
     Some(args)
 }
 

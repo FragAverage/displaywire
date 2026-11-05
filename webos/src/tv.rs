@@ -2,13 +2,14 @@
 //! LGNC (H.264; works in the Developer Mode jail everywhere) or NDL (needs a sane jail on k3lp/k5lp).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Duration;
 
 use clap::ValueEnum;
 use transport::video::Frame;
 
+use crate::app::{App, Video};
 use crate::lgnc::Lgnc;
 use crate::ndl::Ndl;
 use crate::screen::{Input, Screen};
@@ -61,6 +62,13 @@ impl Decoder {
         }
     }
 
+    /// Takes the picture down.
+    fn close(&mut self) {
+        if let Decoder::Lgnc(l) = self {
+            l.close_video();
+        }
+    }
+
     fn set_foreground(&self) {
         if let Decoder::Ndl(n, _) = self
             && let Err(e) = n.set_foreground(true)
@@ -91,15 +99,91 @@ struct TvSink(Decoder);
 
 impl VideoSink for TvSink {
     fn frame(&mut self, frame: &Frame) -> bool {
-        if frame.keyframe
-            && let Some((w, h)) = size_override().or_else(|| sps_size(&frame.data))
-            && let Err(e) = self.0.open(w, h)
-        {
-            eprintln!("{e}");
-            return false;
-        }
-        self.0.play(&frame.data).map_err(|e| eprintln!("{e}")).is_ok()
+        show_frame(&mut self.0, frame)
     }
+}
+
+fn show_frame(decoder: &mut Decoder, frame: &Frame) -> bool {
+    if frame.keyframe
+        && let Some((w, h)) = size_override().or_else(|| sps_size(&frame.data))
+        && let Err(e) = decoder.open(w, h)
+    {
+        eprintln!("{e}");
+        return false;
+    }
+    decoder.play(&frame.data).map_err(|e| eprintln!("{e}")).is_ok()
+}
+
+/// The decoder, shared between the app (which takes the picture down) and each session's sink.
+struct TvVideo(Arc<Mutex<Decoder>>);
+
+struct SharedSink(Arc<Mutex<Decoder>>);
+
+impl VideoSink for SharedSink {
+    fn frame(&mut self, frame: &Frame) -> bool {
+        show_frame(&mut self.0.lock().unwrap(), frame)
+    }
+}
+
+impl Video for TvVideo {
+    fn sink(&self) -> Box<dyn VideoSink + Send> {
+        Box::new(SharedSink(self.0.clone()))
+    }
+
+    fn close(&self) {
+        self.0.lock().unwrap().close();
+    }
+
+    fn caps(&self) -> u8 {
+        Backend::Lgnc.caps()
+    }
+}
+
+/// No decoder could be started: the app still comes up, to say why.
+struct Broken(String);
+
+impl Video for Broken {
+    fn sink(&self) -> Box<dyn VideoSink + Send> {
+        Box::new(crate::session::Discard)
+    }
+
+    fn close(&self) {}
+
+    fn caps(&self) -> u8 {
+        0
+    }
+
+    fn unavailable(&self) -> Option<String> {
+        Some(format!("this TV's video decoder wouldn't start: {}", self.0))
+    }
+}
+
+/// The app: the launcher's screens on the window, LG's decoder behind it.
+pub fn app(store: crate::store::Store) -> Result<(), String> {
+    // LG's libraries first (see `show`).
+    let decoder = Decoder::new(Backend::Lgnc, 1);
+    let screen = Screen::open()?;
+    // Let the window come up and the app become the foreground one.
+    for _ in 0..100 {
+        let _ = screen.poll();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let video: Arc<dyn Video> = match decoder {
+        Ok(d) => {
+            d.set_foreground();
+            Arc::new(TvVideo(Arc::new(Mutex::new(d))))
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            Arc::new(Broken(e))
+        }
+    };
+    let broken = video.unavailable();
+    let mut app = App::new(store, video);
+    if let Some(why) = broken {
+        app.say(why, true);
+    }
+    app.run(screen)
 }
 
 /// Runs `stream` on another thread with a sink that shows video, while this thread keeps the

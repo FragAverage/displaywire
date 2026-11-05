@@ -87,6 +87,13 @@ impl Lgnc {
         Ok(())
     }
 
+    /// Takes the picture down (the next `open_video` opens it again).
+    pub fn close_video(&mut self) {
+        if self.open.take().is_some() {
+            (self.video_close)();
+        }
+    }
+
     /// One access unit, Annex B.
     pub fn play(&self, au: &[u8]) -> Result<(), String> {
         let rc = (self.video_play)(au.as_ptr().cast(), au.len() as c_uint);

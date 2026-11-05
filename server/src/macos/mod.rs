@@ -21,9 +21,9 @@ use std::time::Duration;
 use objc2_foundation::NSString;
 use proto::stream::{MAX_MONITORS, Monitor, Monitors};
 use timing::now_ns;
-use videotoolbox::encode::Encoder;
+use videotoolbox::encode::{Codec as VtCodec, Encoder};
 
-use crate::{Cli, EncodedFrame, PointerImage, PointerState, Shared, Source};
+use crate::{Cli, Codec, EncodedFrame, PointerImage, PointerState, Shared, Source};
 
 /// This Mac's name as Sharing shows it ("Jamie's MacBook Pro"), for discovery and pairing.
 pub fn computer_name() -> Option<String> {
@@ -186,6 +186,24 @@ pub struct ScreenSource {
     max_height: u32,
     /// Encode the last picture again (a keyframe asked for on a still screen, or a repaint).
     repaint: bool,
+    /// What the client asked for (`Source::set_format`): the codec, and the largest size.
+    codec: Codec,
+    max_size: Option<(u32, u32)>,
+}
+
+/// The tallest picture to capture so that it fits `max_size` (and `max_height`, 0 for none), keeping its
+/// shape: 0 if neither limits it.
+fn fit_height(native: (u32, u32), max_height: u32, max_size: Option<(u32, u32)>) -> u32 {
+    let mut limit = max_height;
+    if let Some((mw, mh)) = max_size {
+        let (w, h) = (native.0 as u64, native.1 as u64);
+        // The tallest height whose width still fits mw, and no taller than mh.
+        let fit = (mh as u64).min(h * mw as u64 / w.max(1)) as u32;
+        if fit < native.1 && (limit == 0 || fit < limit) {
+            limit = fit;
+        }
+    }
+    limit
 }
 
 impl ScreenSource {
@@ -194,12 +212,20 @@ impl ScreenSource {
         let fps = cli.fps;
         let bitrate = (cli.mbps * 1e6) as u32;
         let max_height = MAX_HEIGHT.load(Relaxed);
-        let (capture, encoder) = Self::open_display(monitor.map(Pick::Index), fps, bitrate, true, max_height)?;
+        let (capture, encoder) = Self::open_display(monitor.map(Pick::Index), fps, bitrate, true, max_height, Codec::Hevc, None)?;
         input::set_stream_display(stream, Some(capture.display));
-        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false })
+        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false, codec: Codec::Hevc, max_size: None })
     }
 
-    fn open_display(pick: Option<Pick>, fps: u32, bitrate: u32, with_pointer: bool, max_height: u32) -> Result<(capture::Capture, Encoder), String> {
+    fn open_display(
+        pick: Option<Pick>,
+        fps: u32,
+        bitrate: u32,
+        with_pointer: bool,
+        max_height: u32,
+        codec: Codec,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<(capture::Capture, Encoder), String> {
         let displays = capture::displays()?;
         let main = cg::main_display();
         let pick = pick
@@ -210,10 +236,21 @@ impl ScreenSource {
             .or_else(|| displays.iter().find(|d| unsafe { d.displayID() } == main))
             .or_else(|| displays.iter().next())
             .ok_or("no display to capture")?;
+        let (native_w, native_h, _) = cg::pixel_size(unsafe { pick.displayID() });
+        let max_height = fit_height((native_w, native_h), max_height, max_size);
         let capture = capture::Capture::new(&pick, fps, with_pointer, max_height)?;
-        let encoder = Encoder::new(capture.width, capture.height, fps, bitrate)?;
+        let encoder = Encoder::new(
+            capture.width,
+            capture.height,
+            fps,
+            bitrate,
+            match codec {
+                Codec::Hevc => VtCodec::Hevc,
+                Codec::H264 => VtCodec::H264,
+            },
+        )?;
         println!(
-            "encoding {}x{} HEVC with VideoToolbox{}",
+            "encoding {}x{} {codec:?} with VideoToolbox{}",
             capture.width,
             capture.height,
             if encoder.low_latency { " (low-latency rate control)" } else { "" }
@@ -229,7 +266,7 @@ impl ScreenSource {
         }
         self.max_height = max_height;
         // If the new size can't be opened, carry on at the old one.
-        match Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, max_height) {
+        match Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, max_height, self.codec, self.max_size) {
             Ok((capture, encoder)) => (self.capture, self.encoder) = (capture, encoder),
             Err(e) => println!("stream {}: can't change the resolution, staying at {}x{}: {e}", self.stream, self.capture.width, self.capture.height),
         }
@@ -266,6 +303,18 @@ impl Source for ScreenSource {
         self.repaint = true;
     }
 
+    fn set_format(&mut self, codec: Codec, max_size: Option<(u32, u32)>) -> Result<(), String> {
+        if (codec, max_size) == (self.codec, self.max_size) {
+            return Ok(());
+        }
+        // The same display again, captured at the size that fits and encoded as asked.
+        let (capture, encoder) =
+            Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, self.max_height, codec, max_size)?;
+        (self.capture, self.encoder) = (capture, encoder);
+        (self.codec, self.max_size) = (codec, max_size);
+        Ok(())
+    }
+
     fn set_pointer_in_video(&mut self, on: bool) {
         self.pointer_in_video = on;
         self.capture.set_pointer(on);
@@ -295,7 +344,8 @@ impl Source for ScreenSource {
     }
 
     fn choose_monitor(&mut self, index: u8) -> Result<(), String> {
-        let (capture, encoder) = Self::open_display(Some(Pick::Index(index)), self.fps, self.bitrate, self.pointer_in_video, self.max_height)?;
+        let (capture, encoder) =
+            Self::open_display(Some(Pick::Index(index)), self.fps, self.bitrate, self.pointer_in_video, self.max_height, self.codec, self.max_size)?;
         (self.capture, self.encoder) = (capture, encoder);
         input::set_stream_display(self.stream, Some(self.capture.display));
         Ok(())

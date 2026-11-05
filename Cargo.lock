@@ -791,6 +791,7 @@ version = "0.7.0"
 dependencies = [
  "clap",
  "hevc",
+ "if-addrs",
  "pairing",
  "proto",
  "secure",

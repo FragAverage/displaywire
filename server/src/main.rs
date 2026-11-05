@@ -1019,8 +1019,8 @@ impl HandshakeLimiter {
     }
 
     fn allow(&mut self, now: u64) -> bool {
-        self.tokens = (self.tokens + (now - self.last_ns) as f64 / SEC as f64 * self.per_sec).min(self.burst);
-        self.last_ns = now;
+        self.tokens = (self.tokens + now.saturating_sub(self.last_ns) as f64 / SEC as f64 * self.per_sec).min(self.burst);
+        self.last_ns = self.last_ns.max(now);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
             true

@@ -1,5 +1,8 @@
-//! The app's window, through the TV's SDL2 build: full screen and fully transparent, so the
-//! video plane NDL draws on shows through. It also gives us the remote's key presses.
+//! The app's window, through the TV's SDL2 build: full screen, and either fully transparent (so
+//! the video plane the decoder draws on shows through) or drawn on with rectangles for the
+//! launcher's screens. It also gives us the remote's key presses.
+//!
+//! `DW_WINDOWED=1` opens an ordinary window instead, to try the screens on a desktop.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 
@@ -13,17 +16,58 @@ const SDL_RENDERER_ACCELERATED: u32 = 0x2;
 const SDL_QUIT: u32 = 0x100;
 const SDL_KEYDOWN: u32 = 0x300;
 
+/// The size of the picture the screens are laid out in, whatever the panel.
+pub const WIDTH: i32 = 1920;
+pub const HEIGHT: i32 = 1080;
+
+#[cfg(target_os = "macos")]
+const SDL_LIBRARY: &CStr = c"/opt/homebrew/lib/libSDL2.dylib";
+#[cfg(not(target_os = "macos"))]
+const SDL_LIBRARY: &CStr = c"libSDL2-2.0.so.0";
+
 /// `SDL_Event` is a 56-byte union; we read its type and, for key events, the scancode.
 #[repr(C, align(8))]
 struct Event([u8; 56]);
+
+/// `SDL_Rect`.
+#[repr(C)]
+struct Rect {
+    x: c_int,
+    y: c_int,
+    w: c_int,
+    h: c_int,
+}
+
+/// Red, green, blue, alpha.
+pub type Color = [u8; 4];
+
+/// Where the screens draw: rectangles on a `WIDTH`×`HEIGHT` picture.
+pub trait Canvas {
+    fn clear(&mut self, color: Color);
+    fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: Color);
+
+    /// `text` in the bitmap font, `scale` screen pixels per font pixel, top left at `(x, y)`.
+    fn text(&mut self, text: &str, x: i32, y: i32, scale: i32, color: Color) {
+        crate::font::draw(text, x, y, scale, |x, y, w, h| self.rect(x, y, w, h, color));
+    }
+}
 
 pub struct Screen {
     poll_event: extern "C" fn(*mut Event) -> c_int,
     destroy_window: extern "C" fn(*mut c_void),
     quit: extern "C" fn(),
+    set_color: extern "C" fn(*mut c_void, u8, u8, u8, u8) -> c_int,
+    clear: extern "C" fn(*mut c_void) -> c_int,
+    fill_rect: extern "C" fn(*mut c_void, *const Rect) -> c_int,
+    present: extern "C" fn(*mut c_void),
+    renderer: *mut c_void,
     window: *mut c_void,
     _lib: Lib,
 }
+
+// The window is only used from the thread that made it; this lets the app hold it beside the
+// stream's thread.
+unsafe impl Send for Screen {}
 
 pub enum Input {
     Quit,
@@ -32,7 +76,8 @@ pub enum Input {
 
 impl Screen {
     pub fn open() -> Result<Screen, String> {
-        let lib = Lib::open(c"libSDL2-2.0.so.0")?;
+        let lib = Lib::open(SDL_LIBRARY)?;
+        let windowed = std::env::var_os("DW_WINDOWED").is_some();
         // SAFETY: types as in SDL 2.0's headers.
         unsafe {
             let get_error: extern "C" fn() -> *const c_char = lib.get(c"SDL_GetError")?;
@@ -40,14 +85,11 @@ impl Screen {
             let init: extern "C" fn(u32) -> c_int = lib.get(c"SDL_Init")?;
             let create_window: extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void = lib.get(c"SDL_CreateWindow")?;
             let create_renderer: extern "C" fn(*mut c_void, c_int, u32) -> *mut c_void = lib.get(c"SDL_CreateRenderer")?;
-            let set_color: extern "C" fn(*mut c_void, u8, u8, u8, u8) -> c_int = lib.get(c"SDL_SetRenderDrawColor")?;
-            let clear: extern "C" fn(*mut c_void) -> c_int = lib.get(c"SDL_RenderClear")?;
-            let present: extern "C" fn(*mut c_void) = lib.get(c"SDL_RenderPresent")?;
             if init(SDL_INIT_VIDEO) != 0 {
                 return Err(format!("SDL_Init: {}", error()));
             }
-            let flags = SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN;
-            let window = create_window(c"DisplayWire".as_ptr(), SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1920, 1080, flags);
+            let (flags, w, h) = if windowed { (SDL_WINDOW_SHOWN, 1280, 720) } else { (SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN, WIDTH, HEIGHT) };
+            let window = create_window(c"DisplayWire".as_ptr(), SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, w, h, flags);
             if window.is_null() {
                 return Err(format!("SDL_CreateWindow: {}", error()));
             }
@@ -55,17 +97,32 @@ impl Screen {
             if renderer.is_null() {
                 return Err(format!("SDL_CreateRenderer: {}", error()));
             }
-            set_color(renderer, 0, 0, 0, 0);
-            clear(renderer);
-            present(renderer);
-            Ok(Screen {
+            if windowed {
+                // The screens are laid out for 1920×1080 whatever the window.
+                let logical: extern "C" fn(*mut c_void, c_int, c_int) -> c_int = lib.get(c"SDL_RenderSetLogicalSize")?;
+                logical(renderer, WIDTH, HEIGHT);
+            }
+            let mut screen = Screen {
                 poll_event: lib.get(c"SDL_PollEvent")?,
                 destroy_window: lib.get(c"SDL_DestroyWindow")?,
                 quit: lib.get(c"SDL_Quit")?,
+                set_color: lib.get(c"SDL_SetRenderDrawColor")?,
+                clear: lib.get(c"SDL_RenderClear")?,
+                fill_rect: lib.get(c"SDL_RenderFillRect")?,
+                present: lib.get(c"SDL_RenderPresent")?,
+                renderer,
                 window,
                 _lib: lib,
-            })
+            };
+            screen.clear([0, 0, 0, 0]);
+            screen.present();
+            Ok(screen)
         }
+    }
+
+    /// Shows what has been drawn since the last time.
+    pub fn present(&mut self) {
+        (self.present)(self.renderer);
     }
 
     /// The next pending input, if any.
@@ -81,6 +138,18 @@ impl Screen {
             }
         }
         None
+    }
+}
+
+impl Canvas for Screen {
+    fn clear(&mut self, [r, g, b, a]: Color) {
+        (self.set_color)(self.renderer, r, g, b, a);
+        (self.clear)(self.renderer);
+    }
+
+    fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, [r, g, b, a]: Color) {
+        (self.set_color)(self.renderer, r, g, b, a);
+        (self.fill_rect)(self.renderer, &Rect { x, y, w, h });
     }
 }
 

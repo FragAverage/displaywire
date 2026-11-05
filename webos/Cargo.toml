@@ -15,4 +15,5 @@ transport.workspace = true
 secure.workspace = true
 pairing.workspace = true
 hevc.workspace = true
+if-addrs = "0.13"
 clap = { version = "4.6.7", features = ["derive"] }

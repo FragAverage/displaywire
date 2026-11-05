@@ -16,8 +16,7 @@ pub struct Store {
 
 impl Store {
     pub fn new(dir: Option<PathBuf>) -> Store {
-        let dir = dir.unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".displaywire-tv"));
-        Store { dir }
+        Store { dir: dir.unwrap_or_else(default_dir) }
     }
 
     fn file(&self) -> PathBuf {
@@ -53,6 +52,28 @@ impl Store {
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
         write_private(&self.file(), &text).map_err(|e| format!("{}: {e}", self.file().display()))
     }
+}
+
+/// Where the pairings go when nobody says: `DW_STATE`, else the home folder, else the Developer
+/// Mode storage (an app's home is not always writable on the TV). The first that can be written to.
+fn default_dir() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("DW_STATE") {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".displaywire-tv"));
+    }
+    candidates.push(PathBuf::from("/media/developer/temp/dw/state"));
+    let writable = |dir: &PathBuf| {
+        std::fs::create_dir_all(dir).is_ok() && {
+            let probe = dir.join(".write-test");
+            let ok = std::fs::write(&probe, b"").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            ok
+        }
+    };
+    candidates.iter().find(|d| writable(d)).cloned().unwrap_or_else(|| PathBuf::from(".displaywire-tv"))
 }
 
 #[cfg(unix)]

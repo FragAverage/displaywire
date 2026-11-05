@@ -117,7 +117,7 @@ pub fn run(server: SocketAddr, key: Key, caps: u8, mut sink: Box<dyn VideoSink +
             need_keyframe = true;
         }
         if got_video && need_keyframe && now - last_keyframe_request > KEYFRAME_RETRY_NS {
-            link.send(Msg::KeyframeRequest);
+            link.send(Msg::KeyframeRequest { stream: 0 });
             last_keyframe_request = now;
         }
         if let Some(line) = stats.tick(now, &clock) {

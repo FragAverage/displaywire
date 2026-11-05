@@ -168,8 +168,11 @@ unsafe fn annex_b(sample: CFTypeRef, codec: Codec) -> Result<Encoded, String> {
                     Codec::H264 => CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
                 };
                 check(get(format, i, &mut p, &mut size, &mut count, &mut header), "parameter set")?;
+                let set = std::slice::from_raw_parts(p, size);
+                // Tell decoders there is nothing to wait for (see `hevc::h264::limit_dpb`).
+                let limited = (codec == Codec::H264 && i == 0).then(|| hevc::h264::limit_dpb(set)).flatten();
                 data.extend_from_slice(&[0, 0, 0, 1]);
-                data.extend_from_slice(std::slice::from_raw_parts(p, size));
+                data.extend_from_slice(limited.as_deref().unwrap_or(set));
             }
         }
         let block = CMSampleBufferGetDataBuffer(sample);
@@ -201,7 +204,12 @@ unsafe impl Send for Encoder {}
 
 impl Encoder {
     pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32, codec: Codec) -> Result<Encoder, String> {
-        // Low-latency rate control first; some encoders (or OS versions) refuse it.
+        // H.264 without the low-latency rate control: that one keeps up to 15 reference frames, for loss
+        // resilience, and a decoder (LG's) that sizes its buffer from them shows the picture late. Plain
+        // real-time encoding uses one. HEVC: low-latency first; some encoders (or OS versions) refuse it.
+        if codec == Codec::H264 {
+            return Self::create(width, height, fps, bitrate_bps, codec, false);
+        }
         Self::create(width, height, fps, bitrate_bps, codec, true).or_else(|_| Self::create(width, height, fps, bitrate_bps, codec, false))
     }
 

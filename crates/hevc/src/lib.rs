@@ -196,6 +196,199 @@ pub mod h264 {
         nals(au).iter().any(|n| nal_type(n) == IDR)
     }
 
+    /// An SPS NAL (with its header) rewritten to say, in its VUI, that nothing is reordered and the
+    /// decoder never needs more frames than the `max_num_ref_frames` it already declares. Some hardware
+    /// decoders (LG's) size their frame buffer from the VUI, or from the level when there is none, and
+    /// hold frames back until it fills: a mostly still screen then shows an old picture. VideoToolbox
+    /// sends no VUI without low-latency rate control. None if the SPS can't be parsed.
+    pub fn limit_dpb(sps: &[u8]) -> Option<Vec<u8>> {
+        let rbsp = rbsp(sps.get(1..)?);
+        let mut r = Bits { data: &rbsp, pos: 0 };
+        let profile_idc = r.bits(8)?;
+        r.skip(16); // constraint flags, level_idc
+        r.ue()?; // seq_parameter_set_id
+        if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(&profile_idc) {
+            let chroma_format_idc = r.ue()?;
+            if chroma_format_idc == 3 {
+                r.skip(1);
+            }
+            r.ue()?; // bit_depth_luma_minus8
+            r.ue()?; // bit_depth_chroma_minus8
+            r.skip(1); // qpprime_y_zero_transform_bypass_flag
+            if r.bits(1)? == 1 {
+                for i in 0..if chroma_format_idc == 3 { 12 } else { 8 } {
+                    if r.bits(1)? == 1 {
+                        let size = if i < 6 { 16 } else { 64 };
+                        let (mut last, mut next) = (8i32, 8i32);
+                        for _ in 0..size {
+                            if next != 0 {
+                                next = (last + r.se()?).rem_euclid(256);
+                            }
+                            last = if next == 0 { last } else { next };
+                        }
+                    }
+                }
+            }
+        }
+        r.ue()?; // log2_max_frame_num_minus4
+        match r.ue()? {
+            0 => {
+                r.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+            }
+            1 => {
+                r.skip(1);
+                r.se()?;
+                r.se()?;
+                for _ in 0..r.ue()? {
+                    r.se()?;
+                }
+            }
+            _ => {}
+        }
+        let refs_start = r.pos;
+        let refs = r.ue()?.max(1); // max_num_ref_frames
+        let refs_end = r.pos;
+        r.skip(1); // gaps_in_frame_num_value_allowed_flag
+        r.ue()?; // pic_width_in_mbs_minus1
+        r.ue()?; // pic_height_in_map_units_minus1
+        if r.bits(1)? == 0 {
+            r.skip(1); // mb_adaptive_frame_field_flag
+        }
+        r.skip(1); // direct_8x8_inference_flag
+        if r.bits(1)? == 1 {
+            for _ in 0..4 {
+                r.ue()?; // frame_crop_*_offset
+            }
+        }
+        let vui_flag = r.pos;
+        // Where the VUI's bitstream_restriction_flag is, or None if there is no VUI.
+        let restriction_flag = if r.bits(1)? == 1 {
+            if r.bits(1)? == 1 {
+                // aspect_ratio_info_present_flag
+                if r.bits(8)? == 255 {
+                    r.skip(32);
+                }
+            }
+            if r.bits(1)? == 1 {
+                r.skip(1); // overscan_appropriate_flag
+            }
+            if r.bits(1)? == 1 {
+                r.skip(4); // video_format, video_full_range_flag
+                if r.bits(1)? == 1 {
+                    r.skip(24); // colour description
+                }
+            }
+            if r.bits(1)? == 1 {
+                r.ue()?;
+                r.ue()?; // chroma_sample_loc_type_*_field
+            }
+            if r.bits(1)? == 1 {
+                r.skip(65); // num_units_in_tick, time_scale, fixed_frame_rate_flag
+            }
+            let mut hrd = false;
+            for _ in 0..2 {
+                if r.bits(1)? == 1 {
+                    hrd = true;
+                    let cpb_cnt = r.ue()? + 1;
+                    r.skip(8); // bit_rate_scale, cpb_size_scale
+                    for _ in 0..cpb_cnt {
+                        r.ue()?;
+                        r.ue()?;
+                        r.skip(1);
+                    }
+                    r.skip(20); // the four delay and offset lengths
+                }
+            }
+            if hrd {
+                r.skip(1); // low_delay_hrd_flag
+            }
+            r.skip(1); // pic_struct_present_flag
+            Some(r.pos)
+        } else {
+            None
+        };
+        let _ = r.bits(1)?; // there has to be at least this much left, or it isn't an SPS we understand
+
+        let mut w = BitWriter::default();
+        w.copy(&rbsp, 0, refs_start);
+        w.ue(refs); // as it was
+        match restriction_flag {
+            Some(flag) => {
+                w.copy(&rbsp, refs_end, flag);
+                w.bit(1);
+            }
+            None => {
+                w.copy(&rbsp, refs_end, vui_flag);
+                // A VUI with only the restriction in it.
+                w.bit(1);
+                for _ in 0..8 {
+                    w.bit(0); // aspect, overscan, video signal, chroma loc, timing, nal hrd, vcl hrd, pic_struct
+                }
+                w.bit(1);
+            }
+        }
+        w.bit(1); // motion_vectors_over_pic_boundaries_flag
+        w.ue(2); // max_bytes_per_pic_denom
+        w.ue(1); // max_bits_per_mb_denom
+        w.ue(15); // log2_max_mv_length_horizontal
+        w.ue(15); // log2_max_mv_length_vertical
+        w.ue(0); // max_num_reorder_frames
+        w.ue(refs); // max_dec_frame_buffering
+        w.bit(1); // rbsp_stop_one_bit
+        let mut out = vec![sps[0]];
+        let mut zeros = 0;
+        for b in w.finish() {
+            if zeros >= 2 && b <= 3 {
+                out.push(3);
+                zeros = 0;
+            }
+            zeros = if b == 0 { zeros + 1 } else { 0 };
+            out.push(b);
+        }
+        Some(out)
+    }
+
+    #[derive(Default)]
+    struct BitWriter {
+        bytes: Vec<u8>,
+        used: usize,
+    }
+
+    impl BitWriter {
+        fn bit(&mut self, b: u32) {
+            if self.used % 8 == 0 {
+                self.bytes.push(0);
+            }
+            if b != 0 {
+                *self.bytes.last_mut().unwrap() |= 0x80 >> (self.used % 8);
+            }
+            self.used += 1;
+        }
+
+        fn ue(&mut self, v: u32) {
+            let v = v as u64 + 1;
+            let len = 64 - v.leading_zeros() as usize;
+            for _ in 0..len - 1 {
+                self.bit(0);
+            }
+            for i in (0..len).rev() {
+                self.bit((v >> i & 1) as u32);
+            }
+        }
+
+        /// Bits `from..to` of `data`.
+        fn copy(&mut self, data: &[u8], from: usize, to: usize) {
+            for i in from..to {
+                self.bit((data[i / 8] >> (7 - i % 8) & 1) as u32);
+            }
+        }
+
+        /// The bytes, the last padded with zeros.
+        fn finish(self) -> Vec<u8> {
+            self.bytes
+        }
+    }
+
     /// Picture size from an SPS NAL (with its header), after frame cropping.
     pub fn sps_size(sps: &[u8]) -> Option<(u32, u32)> {
         let rbsp = rbsp(sps.get(1..)?);
@@ -314,6 +507,23 @@ mod tests {
         ];
         assert_eq!(sps_size(&sps), Some((2560, 1440)));
         assert_eq!(sps_size(&sps[..10]), None);
+    }
+
+    #[test]
+    fn h264_limit_dpb_rewrites_videotoolbox_sps() {
+        // 1660x1080 High, level 5.1, as VideoToolbox's low-latency encoder sends it: 15 reference frames.
+        let sps = [
+            0x27, 0x64, 0x00, 0x33, 0xac, 0x13, 0x14, 0x10, 0x01, 0xa0, 0x08, 0x9e, 0xe5, 0x9a, 0x81, 0x01, 0x01, 0x03, 0xc2, 0x01,
+            0x08, 0x42,
+        ];
+        assert_eq!(h264::sps_size(&sps), Some((1660, 1080)));
+        let limited = h264::limit_dpb(&sps).expect("parses");
+        assert_eq!(limited[0], 0x27);
+        // Same picture, and parsing it again finds nothing wrong.
+        assert_eq!(h264::sps_size(&limited), Some((1660, 1080)));
+        // Rewriting again changes nothing: the first pass said all there is to say.
+        assert_eq!(h264::limit_dpb(&limited), Some(limited.clone()));
+        assert_eq!(h264::limit_dpb(&sps[..8]), None);
     }
 
     #[test]

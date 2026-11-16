@@ -189,7 +189,12 @@ pub struct ScreenSource {
     /// What the client asked for (`Source::set_format`): the codec, and the largest size.
     codec: Codec,
     max_size: Option<(u32, u32)>,
+    /// When the capture was last found dead and opened again (`revive`), and whether that worked.
+    revived: Option<(u64, bool)>,
 }
+
+/// A dead capture is opened again no more often than this.
+const REVIVE_INTERVAL_NS: u64 = 2_000_000_000;
 
 /// The tallest picture to capture so that it fits `max_size` (and `max_height`, 0 for none), keeping its
 /// shape: 0 if neither limits it.
@@ -214,7 +219,7 @@ impl ScreenSource {
         let max_height = MAX_HEIGHT.load(Relaxed);
         let (capture, encoder) = Self::open_display(monitor.map(Pick::Index), fps, bitrate, true, max_height, Codec::Hevc, None)?;
         input::set_stream_display(stream, Some(capture.display));
-        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false, codec: Codec::Hevc, max_size: None })
+        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false, codec: Codec::Hevc, max_size: None, revived: None })
     }
 
     fn open_display(
@@ -272,6 +277,31 @@ impl ScreenSource {
         }
     }
 
+    /// Opens the display again if its capture has ended (the display slept, the screen was locked, the
+    /// system stopped it): otherwise the last picture it gave, however old, is all a client would see.
+    /// False while there is no live capture.
+    fn revive(&mut self) -> bool {
+        let Some(why) = self.capture.stalled() else { return true };
+        let now = now_ns();
+        if self.revived.is_some_and(|(at, _)| now - at < REVIVE_INTERVAL_NS) {
+            return false;
+        }
+        // Said once, until it works again.
+        if self.revived.is_none_or(|(_, ok)| ok) {
+            println!("stream {}: the screen capture stopped ({why}); opening it again", self.stream);
+        }
+        let opened = Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, self.max_height, self.codec, self.max_size);
+        self.revived = Some((now, opened.is_ok()));
+        match opened {
+            Ok((capture, encoder)) => {
+                (self.capture, self.encoder) = (capture, encoder);
+                input::set_stream_display(self.stream, Some(self.capture.display));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     fn encode(&mut self, picture: &capture::Picture, capture_ns: u64, keyframe: bool) -> Result<Option<EncodedFrame>, String> {
         let pts_us = (capture_ns.saturating_sub(self.start_ns) / 1000) as i64;
         let encoded = unsafe { self.encoder.encode(picture.as_ptr(), pts_us, keyframe) }?;
@@ -282,6 +312,11 @@ impl ScreenSource {
 impl Source for ScreenSource {
     fn next_frame(&mut self, force_keyframe: bool, timeout_ms: u32) -> Result<Option<EncodedFrame>, String> {
         self.follow_max_height();
+        if !self.revive() {
+            // No live capture: nothing to send (not its last picture, which is old).
+            std::thread::sleep(Duration::from_millis(timeout_ms.min(100) as u64));
+            return Ok(None);
+        }
         let wait = if force_keyframe || self.repaint { 0 } else { timeout_ms };
         let picture = match self.capture.next(wait) {
             Some(p) => Some(p),

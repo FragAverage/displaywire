@@ -17,7 +17,7 @@ use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput, SCStreamOutputType,
+    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
 use timing::now_ns;
 
@@ -57,11 +57,20 @@ impl Drop for Picture {
     }
 }
 
+/// ScreenCaptureKit calls at least this often while a stream lives (an idle frame when nothing changed).
+const SILENT_NS: u64 = 3_000_000_000;
+
 /// The newest frame and when it arrived; `new` until taken.
 #[derive(Default)]
 struct Latest {
     frame: Option<(Picture, u64)>,
     new: bool,
+    /// When ScreenCaptureKit last called, with a picture or without.
+    heard_ns: u64,
+    /// An idle frame has come: this system sends them, so silence means the stream has died.
+    idles: bool,
+    /// ScreenCaptureKit said the stream stopped, and why.
+    stopped: Option<String>,
 }
 
 type Shared = Arc<(Mutex<Latest>, Condvar)>;
@@ -85,14 +94,29 @@ define_class!(
             if kind != SCStreamOutputType::Screen {
                 return;
             }
+            let now = now_ns();
+            let (lock, cv) = &*self.ivars().latest;
             // Idle frames (nothing changed) carry no picture.
             let image = unsafe { CMSampleBufferGetImageBuffer(sample as *const CMSampleBuffer as *const c_void) };
+            let mut latest = lock.lock().unwrap();
+            latest.heard_ns = now;
             if image.is_null() {
+                latest.idles = true;
                 return;
             }
-            let picture = Picture(unsafe { CFRetain(image) });
+            latest.frame = Some((Picture(unsafe { CFRetain(image) }), now));
+            latest.new = true;
+            cv.notify_one();
+        }
+    }
+
+    unsafe impl SCStreamDelegate for Output {
+        // The system ends a stream when the display sleeps or changes, the screen locks, or the user
+        // stops it from the menu bar. Nothing more comes from it: the owner opens another (`stalled`).
+        #[unsafe(method(stream:didStopWithError:))]
+        fn stream_did_stop(&self, _stream: &SCStream, error: &NSError) {
             let (lock, cv) = &*self.ivars().latest;
-            *lock.lock().unwrap() = Latest { frame: Some((picture, now_ns())), new: true };
+            lock.lock().unwrap().stopped = Some(error.localizedDescription().to_string());
             cv.notify_one();
         }
     }
@@ -191,14 +215,16 @@ impl Capture {
         unsafe {
             let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), display, &NSArray::new());
             let config = config(width, height, fps, with_pointer);
-            let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None);
             let latest: Shared = Arc::default();
             let output = Output::new(latest.clone());
+            // The stream doesn't retain its delegate; `_output` keeps it.
+            let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, Some(ProtocolObject::from_ref(&*output)));
             let queue = DispatchQueue::new("displaywire.capture", None);
             stream
                 .addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), SCStreamOutputType::Screen, Some(&queue))
                 .map_err(|e| format!("add stream output: {}", e.localizedDescription()))?;
             start(&stream, "capture")?;
+            latest.0.lock().unwrap().heard_ns = now_ns();
             println!("capturing display {id} ({width}x{height})");
             Ok(Capture { stream, _output: output, _queue: queue, latest, display: id, width, height, fps, with_pointer })
         }
@@ -208,7 +234,7 @@ impl Capture {
     pub fn next(&self, timeout_ms: u32) -> Option<(Picture, u64)> {
         let (lock, cv) = &*self.latest;
         let guard = lock.lock().unwrap();
-        let (mut latest, _) = cv.wait_timeout_while(guard, Duration::from_millis(timeout_ms as u64), |l| !l.new).unwrap();
+        let (mut latest, _) = cv.wait_timeout_while(guard, Duration::from_millis(timeout_ms as u64), |l| !l.new && l.stopped.is_none()).unwrap();
         if !latest.new {
             return None;
         }
@@ -224,6 +250,16 @@ impl Capture {
         self.with_pointer = on;
         let config = config(self.width, self.height, self.fps, on);
         unsafe { self.stream.updateConfiguration_completionHandler(&config, None) };
+    }
+
+    /// Why no more frames will come, if the stream has ended: ScreenCaptureKit said so, or has gone
+    /// silent where it used to send idle frames. Its last picture is then an old one.
+    pub fn stalled(&self) -> Option<String> {
+        let latest = self.latest.0.lock().unwrap();
+        if let Some(why) = &latest.stopped {
+            return Some(why.clone());
+        }
+        (latest.idles && now_ns().saturating_sub(latest.heard_ns) > SILENT_NS).then(|| "nothing from ScreenCaptureKit for a while".into())
     }
 
     /// The last frame, new or not (to encode again for a keyframe on a still screen).

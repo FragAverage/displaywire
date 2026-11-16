@@ -29,6 +29,9 @@ pub const CAP_CURSOR: u8 = 16;
 pub const CAP_H264: u8 = 4;
 /// Video no larger than 1920×1080 (scaled down to fit, keeping the aspect ratio).
 pub const CAP_MAX_1080P: u8 = 8;
+/// The client wants a display of its own (a virtual one, beside the computer's screens) rather than
+/// a picture of one that is there. A server that can't make one shows its screen as usual.
+pub const CAP_VIRTUAL_DISPLAY: u8 = 32;
 
 const HELLO: u8 = 1;
 const PING: u8 = 2;

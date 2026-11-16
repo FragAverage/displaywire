@@ -277,6 +277,11 @@ pub trait Source {
     fn set_format(&mut self, codec: Codec, max_size: Option<(u32, u32)>) -> Result<(), String> {
         if codec == Codec::Hevc && max_size.is_none() { Ok(()) } else { Err("this source only makes HEVC at its own size".into()) }
     }
+    /// Makes a display just for the client and shows that (`CAP_VIRTUAL_DISPLAY`), or takes it away
+    /// and goes back to the screen shown before.
+    fn set_virtual_display(&mut self, on: bool) -> Result<(), String> {
+        if on { Err("this computer can't make a virtual display".into()) } else { Ok(()) }
+    }
 }
 
 struct Shared {
@@ -729,6 +734,7 @@ fn stream_loop(
     let mut recent: VecDeque<(u32, u64)> = VecDeque::new();
     let mut recovered_upto: Option<u32> = None;
     let mut applied_format = (Codec::Hevc, None);
+    let mut applied_virtual = false;
     let mut last_frame_ns = 0u64;
     loop {
         let link = shared.link.lock().unwrap().clone();
@@ -737,6 +743,12 @@ fn stream_loop(
             return Ok(());
         }
         let Some(link) = link else {
+            // Nobody to look at a display made for the client.
+            if std::mem::take(&mut applied_virtual)
+                && let Err(e) = source.set_virtual_display(false)
+            {
+                println!("video: {e}");
+            }
             std::thread::sleep(Duration::from_millis(20));
             continue;
         };
@@ -797,6 +809,17 @@ fn stream_loop(
             }
         }
         let caps = shared.caps.load(Relaxed);
+        let virtual_display = id == 0 && caps & proto::stream::CAP_VIRTUAL_DISPLAY != 0;
+        if virtual_display != applied_virtual {
+            applied_virtual = virtual_display;
+            match source.set_virtual_display(virtual_display) {
+                Ok(()) => {
+                    ctl.keyframe.store(true, Relaxed);
+                    monitors_checked = 0;
+                }
+                Err(e) => println!("video: no virtual display, showing the screen: {e}"),
+            }
+        }
         let format = (
             if caps & proto::stream::CAP_H264 != 0 { Codec::H264 } else { Codec::Hevc },
             (caps & proto::stream::CAP_MAX_1080P != 0).then_some((1920, 1080)),

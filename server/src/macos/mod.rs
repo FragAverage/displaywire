@@ -12,6 +12,7 @@ pub mod menubar;
 pub mod pattern;
 mod pointer;
 pub mod shell;
+mod virtual_display;
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
@@ -189,6 +190,8 @@ pub struct ScreenSource {
     /// What the client asked for (`Source::set_format`): the codec, and the largest size.
     codec: Codec,
     max_size: Option<(u32, u32)>,
+    /// The display made for the client (`set_virtual_display`), and the one shown before it.
+    virtual_display: Option<(virtual_display::VirtualDisplay, u32)>,
     /// When the capture was last found dead and opened again (`revive`), and whether that worked.
     revived: Option<(u64, bool)>,
 }
@@ -219,7 +222,7 @@ impl ScreenSource {
         let max_height = MAX_HEIGHT.load(Relaxed);
         let (capture, encoder) = Self::open_display(monitor.map(Pick::Index), fps, bitrate, true, max_height, Codec::Hevc, None)?;
         input::set_stream_display(stream, Some(capture.display));
-        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false, codec: Codec::Hevc, max_size: None, revived: None })
+        Ok(ScreenSource { stream, capture, encoder, fps, bitrate, start_ns: now_ns(), pointer_in_video: true, pointer: Default::default(), max_height, repaint: false, codec: Codec::Hevc, max_size: None, virtual_display: None, revived: None })
     }
 
     fn open_display(
@@ -347,6 +350,35 @@ impl Source for ScreenSource {
             Self::open_display(Some(Pick::Id(self.capture.display)), self.fps, self.bitrate, self.pointer_in_video, self.max_height, codec, max_size)?;
         (self.capture, self.encoder) = (capture, encoder);
         (self.codec, self.max_size) = (codec, max_size);
+        Ok(())
+    }
+
+    fn set_virtual_display(&mut self, on: bool) -> Result<(), String> {
+        if on == self.virtual_display.is_some() {
+            return Ok(());
+        }
+        let (made, show) = if on {
+            // 1080p: what every device that asks so far can show.
+            let display = virtual_display::VirtualDisplay::new("DisplayWire", 1920, 1080, self.fps.clamp(30, 60))?;
+            // ScreenCaptureKit hears of a new display a little after the desktop does.
+            let begin = std::time::Instant::now();
+            while !capture::displays()?.iter().any(|d| unsafe { d.displayID() } == display.id) {
+                if begin.elapsed() > Duration::from_secs(3) {
+                    return Err("the virtual display can't be captured".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let id = display.id;
+            (Some((display, self.capture.display)), id)
+        } else {
+            (None, self.virtual_display.as_ref().map_or(self.capture.display, |v| v.1))
+        };
+        // The capture moves first: the old display is only let go once nothing looks at it.
+        let (capture, encoder) = Self::open_display(Some(Pick::Id(show)), self.fps, self.bitrate, self.pointer_in_video, self.max_height, self.codec, self.max_size)?;
+        (self.capture, self.encoder) = (capture, encoder);
+        input::set_stream_display(self.stream, Some(self.capture.display));
+        println!("stream {}: {}", self.stream, if on { "a virtual display for the device" } else { "the virtual display is gone" });
+        self.virtual_display = made;
         Ok(())
     }
 

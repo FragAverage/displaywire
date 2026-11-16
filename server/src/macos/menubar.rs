@@ -80,6 +80,11 @@ define_class!(
             );
         }
 
+        #[unsafe(method(disconnect:))]
+        fn disconnect(&self, _sender: Option<&AnyObject>) {
+            self.ivars().shared.disconnect.store(true, Relaxed);
+        }
+
         #[unsafe(method(removeDevice:))]
         fn remove_device(&self, sender: Option<&AnyObject>) {
             let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) else { return };
@@ -324,6 +329,9 @@ impl MenuBar {
         menu.removeAllItems();
         menu.addItem(&item(mtm, "DisplayWire Server", None, None));
         menu.addItem(&item(mtm, &self.status(), None, None));
+        if self.ivars().shared.link.lock().unwrap().is_some() {
+            menu.addItem(&item(mtm, "Disconnect", Some(sel!(disconnect:)), Some(t)));
+        }
         for a in local_addresses() {
             menu.addItem(&item(mtm, &format!("This Mac: {a}"), None, None));
         }

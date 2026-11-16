@@ -286,6 +286,8 @@ struct Shared {
     pairing: pairing::Pairing,
     /// The authenticated client, if any.
     link: Mutex<Option<Link>>,
+    /// Asked for here (the menu bar): tell the connected device to go, and end its session.
+    disconnect: AtomicBool,
     last_seen_ns: AtomicU64,
     /// The video streams running: 0 always, others while the client shows more monitors.
     streams: Mutex<HashMap<u8, Arc<StreamCtl>>>,
@@ -344,6 +346,7 @@ impl Shared {
             clients: Mutex::new(clients),
             pairing,
             link: Mutex::new(None),
+            disconnect: AtomicBool::new(false),
             last_seen_ns: AtomicU64::new(0),
             streams: Mutex::new(HashMap::from([(0, Arc::new(StreamCtl::default()))])),
             caps: AtomicU8::new(0),
@@ -1122,6 +1125,21 @@ fn control(
         }
         if shared.link.lock().unwrap().is_none() {
             active = None;
+        }
+        if shared.disconnect.swap(false, Relaxed)
+            && let Some((link, _)) = active.take()
+        {
+            // The device is told, so it stops instead of connecting again (one that doesn't know
+            // `Bye` from a server will be back). More than once: it's small, and may be lost.
+            let mut plain = [0u8; 16];
+            let m = Msg::Bye.encode(&mut plain);
+            for _ in 0..3 {
+                link.send(sock, &plain[..m], &mut out);
+            }
+            println!("{}: disconnected from here", link.addr);
+            *shared.link.lock().unwrap() = None;
+            injector.reset();
+            gamepads.reset();
         }
         pending.retain(|p| now - p.created_ns < PENDING_TTL_NS);
         shared.pairing.tick(now);

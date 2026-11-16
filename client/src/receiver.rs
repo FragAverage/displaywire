@@ -490,6 +490,8 @@ impl Receiver {
                 Some(Msg::Light { slot, r, g, b }) => {
                     let _ = self.proxy.send_event(UserEvent::Light { slot, r, g, b });
                 }
+                // Disconnected from the computer's side: stop, rather than connect again.
+                Some(Msg::Bye) => return Err(format!("{} ended the connection", self.server)),
                 _ => {}
             }
         }

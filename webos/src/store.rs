@@ -58,6 +58,16 @@ impl Store {
         self.save(&servers)
     }
 
+    /// Whether to ask computers for a display of this TV's own, rather than a picture of their screen.
+    pub fn extend(&self) -> bool {
+        std::fs::read_to_string(self.dir.join("extend")).is_ok_and(|t| t.trim() == "1")
+    }
+
+    pub fn set_extend(&self, on: bool) -> Result<(), String> {
+        let file = self.dir.join("extend");
+        std::fs::create_dir_all(&self.dir).and_then(|()| std::fs::write(&file, if on { "1\n" } else { "0\n" })).map_err(|e| format!("{}: {e}", file.display()))
+    }
+
     fn save(&self, servers: &[Server]) -> Result<(), String> {
         let text: String = servers.iter().map(|s| format!("{} {} {}\n", s.address, s.key, s.name)).collect();
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;

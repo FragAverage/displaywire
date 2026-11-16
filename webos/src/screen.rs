@@ -85,6 +85,12 @@ impl Screen {
             let init: extern "C" fn(u32) -> c_int = lib.get(c"SDL_Init")?;
             let create_window: extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void = lib.get(c"SDL_CreateWindow")?;
             let create_renderer: extern "C" fn(*mut c_void, c_int, u32) -> *mut c_void = lib.get(c"SDL_CreateRenderer")?;
+            // The remote's Back is the TV's own (it does nothing, or leaves the app) unless the app asks
+            // for it, in LG's SDL with this hint, before the window; it then comes as a key (482 here).
+            // Other builds of SDL don't know the hint and ignore it.
+            if let Ok(hint) = lib.get::<extern "C" fn(*const c_char, *const c_char) -> c_int>(c"SDL_SetHint") {
+                hint(c"SDL_WEBOS_ACCESS_POLICY_KEYS_BACK".as_ptr(), c"true".as_ptr());
+            }
             if init(SDL_INIT_VIDEO) != 0 {
                 return Err(format!("SDL_Init: {}", error()));
             }

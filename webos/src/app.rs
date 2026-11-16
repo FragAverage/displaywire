@@ -80,8 +80,8 @@ pub fn key(scancode: i32) -> Key {
         80 => Key::Left,
         79 => Key::Right,
         40 | 88 => Key::Ok,
-        // Escape, Backspace, AC Back, and webOS's own Back code.
-        41 | 42 | 270 | 461 => Key::Back,
+        // Escape, Backspace, AC Back, webOS's own Back code, and what the 50UM7450PLA's remote sends.
+        41 | 42 | 270 | 461 | 482 => Key::Back,
         30..=38 => Key::Digit((scancode - 29) as u8),
         39 => Key::Digit(0),
         89..=97 => Key::Digit((scancode - 88) as u8),
@@ -192,6 +192,8 @@ pub struct App {
     dirty: bool,
     /// What the pairing screen last showed.
     last_progress: Option<Progress>,
+    /// Ask for a display of this TV's own (an extra screen for the computer) instead of its screen.
+    extend: bool,
 }
 
 impl App {
@@ -215,7 +217,8 @@ impl App {
                 }
             });
         }
-        let mut app = App { store, video, state: State::List, found, quit, searching, list: Vec::new(), selected: 0, message: None, dirty: true, last_progress: None };
+        let extend = store.extend();
+        let mut app = App { store, video, state: State::List, found, quit, searching, list: Vec::new(), selected: 0, message: None, dirty: true, last_progress: None, extend };
         app.refresh();
         app
     }
@@ -228,8 +231,8 @@ impl App {
             self.list = list;
             self.dirty = true;
         }
-        // One more row than there are computers: "type an address".
-        self.selected = self.selected.min(self.list.len());
+        // Two more rows than there are computers: "type an address", and what to show.
+        self.selected = self.selected.min(self.list.len() + 1);
     }
 
     /// Something to show above the list, until the next thing happens.
@@ -276,11 +279,17 @@ impl App {
         match &mut self.state {
             State::List => match k {
                 Key::Up => self.selected = self.selected.saturating_sub(1),
-                Key::Down => self.selected = (self.selected + 1).min(self.list.len()),
+                Key::Down => self.selected = (self.selected + 1).min(self.list.len() + 1),
                 Key::Ok => match self.list.get(self.selected).cloned() {
                     Some(entry) if entry.paired => self.connect(entry),
                     Some(entry) => self.pair(entry),
-                    None => self.state = State::Address(String::new()),
+                    None if self.selected == self.list.len() => self.state = State::Address(String::new()),
+                    None => {
+                        self.extend = !self.extend;
+                        if let Err(e) = self.store.set_extend(self.extend) {
+                            self.say(e, true);
+                        }
+                    }
                 },
                 // Pair again, if the PC has forgotten this TV.
                 Key::Right => {
@@ -393,7 +402,7 @@ impl App {
         let shown = Arc::new(AtomicBool::new(false));
         let numbers = Arc::new(Numbers::default());
         let sink: Box<dyn VideoSink + Send> = Box::new(Shown(self.video.sink(), shown.clone(), numbers.clone()));
-        let caps = self.video.caps();
+        let caps = self.video.caps() | if self.extend { proto::stream::CAP_VIRTUAL_DISPLAY } else { 0 };
         let thread = {
             let stop = stop.clone();
             std::thread::spawn(move || session::run(addr, key, caps, sink, &stop))
@@ -514,7 +523,8 @@ impl App {
     fn draw_list(&self, c: &mut dyn Canvas) {
         self.page(c, "CHOOSE A COMPUTER", "");
         let (left, right) = (120, WIDTH - 120);
-        let rows = self.list.iter().map(|e| (e.name.as_str(), e.address.as_str(), e.paired, e.online)).chain([("TYPE AN ADDRESS", "", false, false)]);
+        let show = if self.extend { "SHOW: AN EXTRA SCREEN FOR THE COMPUTER" } else { "SHOW: THE COMPUTER'S SCREEN" };
+        let rows = self.list.iter().map(|e| (e.name.as_str(), e.address.as_str(), e.paired, e.online)).chain([("TYPE AN ADDRESS", "", false, false), (show, "", false, false)]);
         for (i, (name, address, paired, online)) in rows.enumerate() {
             let y = 290 + i as i32 * 100;
             if y > HEIGHT - 260 {
@@ -603,6 +613,7 @@ mod tests {
         assert_eq!(key(82), Key::Up);
         assert_eq!(key(40), Key::Ok);
         assert_eq!(key(461), Key::Back);
+        assert_eq!(key(482), Key::Back);
         // Number row and keypad: 1..9 then 0.
         assert_eq!(key(30), Key::Digit(1));
         assert_eq!(key(38), Key::Digit(9));
@@ -643,6 +654,7 @@ mod tests {
             message: Some(("something went wrong".into(), true)),
             dirty: false,
             last_progress: None,
+            extend: true,
         };
         let mut r = Recorder(Vec::new());
         app.draw(&mut r);

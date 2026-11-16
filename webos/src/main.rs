@@ -16,6 +16,8 @@ mod compat;
 #[cfg(unix)]
 mod app;
 #[cfg(unix)]
+mod audio;
+#[cfg(unix)]
 mod discovery;
 #[cfg(unix)]
 mod dl;

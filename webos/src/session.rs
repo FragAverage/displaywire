@@ -28,6 +28,10 @@ const SESSION_DEAD_NS: u64 = 1_500 * MS;
 /// Where complete frames go. Returns false if the frame couldn't be used (a keyframe is then requested).
 pub trait VideoSink {
     fn frame(&mut self, frame: &Frame) -> bool;
+    /// A chunk of the server's sound (16-bit stereo), if this sink plays any.
+    fn audio(&mut self, _pcm: &[u8]) {}
+    /// Once a second: frames shown in it, and the round trip to the server.
+    fn stats(&mut self, _fps: u32, _rtt_ms: f64) {}
 }
 
 /// Milestone 1: count frames and nothing else.
@@ -120,8 +124,9 @@ pub fn run(server: SocketAddr, key: Key, caps: u8, mut sink: Box<dyn VideoSink +
             link.send(Msg::KeyframeRequest { stream: 0 });
             last_keyframe_request = now;
         }
-        if let Some(line) = stats.tick(now, &clock) {
+        if let Some((line, fps, rtt_ms)) = stats.tick(now, &clock) {
             println!("{line}");
+            sink.stats(fps, rtt_ms);
         }
 
         let n = match link.sock.recv(&mut buf) {
@@ -186,7 +191,10 @@ pub fn run(server: SocketAddr, key: Key, caps: u8, mut sink: Box<dyn VideoSink +
                     stats.latency.push(frame.complete_ns as i64 + o - frame.capture_ns as i64);
                 }
             }
+            Some(Msg::Audio(_, pcm)) => sink.audio(pcm),
             Some(Msg::Pong { client_ns, server_ns, .. }) => clock.update(rx, client_ns, server_ns),
+            // Disconnected from the computer's side: stop, rather than connect again.
+            Some(Msg::Bye) => return Err("the computer ended the connection".into()),
             _ => {}
         }
     }
@@ -259,8 +267,8 @@ impl Stats {
         Stats { window_start: now_ns(), frames: 0, bytes: 0, repaired: 0, dropped: 0, lost: 0, errors: 0, datagrams: 0, unverified: 0, latency: Samples::default() }
     }
 
-    /// Once a second, the stats line.
-    fn tick(&mut self, now: u64, clock: &Clock) -> Option<String> {
+    /// Once a second, the stats line, with its frame rate and round trip (ms).
+    fn tick(&mut self, now: u64, clock: &Clock) -> Option<(String, u32, f64)> {
         let elapsed = now - self.window_start;
         if elapsed < SEC {
             return None;
@@ -284,7 +292,8 @@ impl Stats {
         if self.unverified > 0 {
             line += &format!(" (unverified {})", self.unverified);
         }
+        let fps = (self.frames as u64 * SEC).div_ceil(elapsed) as u32;
         *self = Stats { window_start: now, ..Stats::new() };
-        Some(line)
+        Some((line, fps, rtt))
     }
 }

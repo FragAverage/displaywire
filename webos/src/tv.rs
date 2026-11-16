@@ -117,17 +117,29 @@ fn show_frame(decoder: &mut Decoder, frame: &Frame) -> bool {
 /// The decoder, shared between the app (which takes the picture down) and each session's sink.
 struct TvVideo(Arc<Mutex<Decoder>>);
 
-struct SharedSink(Arc<Mutex<Decoder>>);
+/// One session's sink: the shared decoder, and sound opened when the first of it arrives.
+struct SharedSink {
+    decoder: Arc<Mutex<Decoder>>,
+    audio: Option<Option<crate::audio::Audio>>,
+}
 
 impl VideoSink for SharedSink {
     fn frame(&mut self, frame: &Frame) -> bool {
-        show_frame(&mut self.0.lock().unwrap(), frame)
+        show_frame(&mut self.decoder.lock().unwrap(), frame)
+    }
+
+    fn audio(&mut self, pcm: &[u8]) {
+        // Opened once, on this (the session's) thread; if it can't be, the picture goes on without.
+        let audio = self.audio.get_or_insert_with(|| crate::audio::Audio::open().map_err(|e| eprintln!("audio: {e}")).ok());
+        if let Some(a) = audio {
+            a.play(pcm);
+        }
     }
 }
 
 impl Video for TvVideo {
     fn sink(&self) -> Box<dyn VideoSink + Send> {
-        Box::new(SharedSink(self.0.clone()))
+        Box::new(SharedSink { decoder: self.0.clone(), audio: None })
     }
 
     fn close(&self) {
@@ -135,7 +147,7 @@ impl Video for TvVideo {
     }
 
     fn caps(&self) -> u8 {
-        Backend::Lgnc.caps()
+        Backend::Lgnc.caps() | proto::stream::CAP_AUDIO
     }
 }
 

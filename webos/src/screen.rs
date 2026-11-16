@@ -21,9 +21,9 @@ pub const WIDTH: i32 = 1920;
 pub const HEIGHT: i32 = 1080;
 
 #[cfg(target_os = "macos")]
-const SDL_LIBRARY: &CStr = c"/opt/homebrew/lib/libSDL2.dylib";
+pub const SDL_LIBRARY: &CStr = c"/opt/homebrew/lib/libSDL2.dylib";
 #[cfg(not(target_os = "macos"))]
-const SDL_LIBRARY: &CStr = c"libSDL2-2.0.so.0";
+pub const SDL_LIBRARY: &CStr = c"libSDL2-2.0.so.0";
 
 /// `SDL_Event` is a 56-byte union; we read its type and, for key events, the scancode.
 #[repr(C, align(8))]

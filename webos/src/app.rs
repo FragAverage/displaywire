@@ -6,7 +6,7 @@
 //! `DW_WINDOWED=1 displaywire-tv app`.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -123,6 +123,8 @@ enum State {
     List,
     /// Typing a computer's address.
     Address(String),
+    /// Asking whether to forget a paired computer.
+    Forget(Entry),
     Pairing { entry: Entry, pairing: Pairing, pin: String },
     Streaming(Stream),
 }
@@ -135,10 +137,24 @@ struct Stream {
     thread: JoinHandle<Result<(), String>>,
     /// Whether the connecting message has been taken down.
     cleared: bool,
+    numbers: Arc<Numbers>,
+    /// Whether the numbers are on the screen (Up shows and hides them), and which were last drawn.
+    show_numbers: bool,
+    drawn: u32,
 }
 
-/// Passes frames on, noting that the first has come.
-struct Shown(Box<dyn VideoSink + Send>, Arc<AtomicBool>);
+/// The session's last second, for the corner of the picture.
+#[derive(Default)]
+struct Numbers {
+    fps: AtomicU32,
+    /// Round trip to the computer, in tenths of a millisecond.
+    rtt_tenths: AtomicU32,
+    /// Goes up with each new pair.
+    count: AtomicU32,
+}
+
+/// Passes frames on, noting that the first has come, and keeps the session's numbers.
+struct Shown(Box<dyn VideoSink + Send>, Arc<AtomicBool>, Arc<Numbers>);
 
 impl VideoSink for Shown {
     fn frame(&mut self, frame: &Frame) -> bool {
@@ -147,6 +163,16 @@ impl VideoSink for Shown {
             self.1.store(true, Relaxed);
         }
         ok
+    }
+
+    fn audio(&mut self, pcm: &[u8]) {
+        self.0.audio(pcm);
+    }
+
+    fn stats(&mut self, fps: u32, rtt_ms: f64) {
+        self.2.fps.store(fps, Relaxed);
+        self.2.rtt_tenths.store((rtt_ms * 10.0).round() as u32, Relaxed);
+        self.2.count.fetch_add(1, Relaxed);
     }
 }
 
@@ -262,7 +288,26 @@ impl App {
                         self.pair(entry);
                     }
                 }
+                // Forget a paired computer, after asking.
+                Key::Left => {
+                    if let Some(entry) = self.list.get(self.selected).filter(|e| e.paired).cloned() {
+                        self.state = State::Forget(entry);
+                    }
+                }
                 Key::Back => return true,
+                _ => {}
+            },
+            State::Forget(entry) => match k {
+                Key::Ok => {
+                    let entry = entry.clone();
+                    self.state = State::List;
+                    match self.store.remove(&entry.address) {
+                        Ok(()) => self.message = Some((format!("FORGOT {}", entry.name), false)),
+                        Err(e) => self.fail(e),
+                    }
+                    self.refresh();
+                }
+                Key::Back => self.state = State::List,
                 _ => {}
             },
             State::Address(text) => match k {
@@ -308,12 +353,14 @@ impl App {
                 }
                 _ => {}
             },
-            State::Streaming(s) => {
-                if k == Key::Back {
+            State::Streaming(s) => match k {
+                Key::Back => {
                     s.stop.store(true, Relaxed);
                     self.finish_stream();
                 }
-            }
+                Key::Up => s.show_numbers = !s.show_numbers,
+                _ => {}
+            },
         }
         false
     }
@@ -344,7 +391,8 @@ impl App {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let shown = Arc::new(AtomicBool::new(false));
-        let sink: Box<dyn VideoSink + Send> = Box::new(Shown(self.video.sink(), shown.clone()));
+        let numbers = Arc::new(Numbers::default());
+        let sink: Box<dyn VideoSink + Send> = Box::new(Shown(self.video.sink(), shown.clone(), numbers.clone()));
         let caps = self.video.caps();
         let thread = {
             let stop = stop.clone();
@@ -352,7 +400,7 @@ impl App {
         };
         self.searching.store(false, Relaxed);
         self.message = None;
-        self.state = State::Streaming(Stream { entry, stop, shown, thread, cleared: false });
+        self.state = State::Streaming(Stream { entry, stop, shown, thread, cleared: false, numbers, show_numbers: false, drawn: 0 });
     }
 
     /// The stream's thread has been told to stop, or has stopped: join it and go back to the list.
@@ -409,6 +457,9 @@ impl App {
                     // The first picture: stop covering it.
                     s.cleared = true;
                     self.dirty = true;
+                } else if s.show_numbers && s.drawn != s.numbers.count.load(Relaxed) {
+                    s.drawn = s.numbers.count.load(Relaxed);
+                    self.dirty = true;
                 }
             }
             _ => {}
@@ -418,10 +469,18 @@ impl App {
     fn draw(&self, c: &mut dyn Canvas) {
         match &self.state {
             // The picture is on a plane behind the window: leave the window clear.
-            State::Streaming(s) if s.cleared => c.clear([0, 0, 0, 0]),
+            State::Streaming(s) if s.cleared => {
+                c.clear([0, 0, 0, 0]);
+                if s.show_numbers {
+                    let rtt = s.numbers.rtt_tenths.load(Relaxed);
+                    let line = format!("{} FPS   RTT {}.{} MS", s.numbers.fps.load(Relaxed), rtt / 10, rtt % 10);
+                    c.rect(40, 40, crate::font::width(&line, 4) + 48, 76, BOX);
+                    c.text(&line, 64, 64, 4, TEXT);
+                }
+            }
             State::Streaming(s) => {
                 self.page(c, "CONNECTING", &format!("TO {}", s.entry.name));
-                self.hint(c, "BACK: CANCEL");
+                self.hint(c, "BACK: CANCEL   ^, ONCE CONNECTED: FPS AND RTT");
             }
             State::List => self.draw_list(c),
             State::Address(text) => {
@@ -430,6 +489,12 @@ impl App {
                 c.text(&format!("{text}_"), 160, 372, 7, TEXT);
                 c.text("THE ADDRESS ON ITS SCREEN, LIKE 192.168.1.20", 120, 500, 3, MUTED);
                 self.hint(c, "0-9: TYPE   >: DOT   ^: COLON   <: DELETE   OK: GO   BACK: CANCEL");
+            }
+            State::Forget(entry) => {
+                self.page(c, "FORGET", &format!("{}?", entry.name));
+                c.text("THIS TV WILL HAVE TO PAIR WITH IT AGAIN.", 120, 330, 4, TEXT);
+                c.text("IT STAYS IN THE COMPUTER'S LIST OF DEVICES UNTIL REMOVED THERE.", 120, 410, 3, MUTED);
+                self.hint(c, "OK: FORGET   BACK: CANCEL");
             }
             State::Pairing { entry, pairing, pin } => self.draw_pairing(c, entry, &pairing.progress(), pin),
         }
@@ -478,7 +543,7 @@ impl App {
         if let Some((message, bad)) = &self.message {
             c.text(message, left, HEIGHT - 200, 3, if *bad { BAD } else { TEXT });
         }
-        self.hint(c, "OK: CONNECT   >: PAIR AGAIN   BACK: QUIT");
+        self.hint(c, "OK: CONNECT   >: PAIR AGAIN   <: FORGET   BACK: QUIT");
     }
 
     fn draw_pairing(&self, c: &mut dyn Canvas, entry: &Entry, progress: &Progress, pin: &str) {

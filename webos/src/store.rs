@@ -48,6 +48,17 @@ impl Store {
         let mut servers = self.load()?;
         servers.retain(|s| !s.address.eq_ignore_ascii_case(address));
         servers.push(Server { address: address.to_string(), key: key.clone(), name: name.to_string() });
+        self.save(&servers)
+    }
+
+    /// Forgets the computer at `address` (its key here; the computer still lists this TV until told).
+    pub fn remove(&self, address: &str) -> Result<(), String> {
+        let mut servers = self.load()?;
+        servers.retain(|s| !s.address.eq_ignore_ascii_case(address));
+        self.save(&servers)
+    }
+
+    fn save(&self, servers: &[Server]) -> Result<(), String> {
         let text: String = servers.iter().map(|s| format!("{} {} {}\n", s.address, s.key, s.name)).collect();
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
         write_private(&self.file(), &text).map_err(|e| format!("{}: {e}", self.file().display()))

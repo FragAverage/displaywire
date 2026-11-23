@@ -65,7 +65,7 @@ folder of received files, and updates the server.
 A Mac (macOS 13 or later) can be streamed too, to a PC or another Mac. On that Mac, open Terminal and run:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/denvergj/displaywire/main/scripts/install-mac-server.sh | sh
+curl -fsSL https://raw.githubusercontent.com/FragAverage/displaywire/main/scripts/install-mac-server.sh | sh
 ```
 
 That's all there is to run. It puts **DisplayWire Server** in Applications (or updates it), starts it, and from then

@@ -131,6 +131,9 @@ pub struct Cli {
     /// The device-management window (started by the tray icon): the server's loopback port and token.
     #[arg(long, hide = true, num_args = 2, value_names = ["PORT", "TOKEN"])]
     ui: Option<Vec<String>>,
+    /// The Mac's permissions window (started by the menu bar).
+    #[arg(long, hide = true)]
+    permissions: bool,
     /// No notification-area icon (Windows) or menu-bar item (Mac).
     #[arg(long)]
     no_tray: bool,
@@ -358,6 +361,11 @@ fn main() {
     if std::env::args_os().len() == 1 && !windows::setup::interactive() {
         return;
     }
+    // Opened from Finder: set up starting at login (once) and hand over to it.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().skip(1).all(|a| a.to_string_lossy().starts_with("-psn")) && macos::agent::first_launch() {
+        return;
+    }
     let cli = Cli::parse();
     now_ns();
     if let Err(e) = run(cli) {
@@ -508,6 +516,10 @@ fn service_command(cli: &Cli, _data_dir: &std::path::Path) -> Option<Result<(), 
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if cli.permissions {
+        return macos::setup::run();
+    }
     if let Some(a) = &cli.ui {
         let port: u16 = a[0].parse().map_err(|_| "bad --ui port")?;
         #[cfg(any(windows, target_os = "macos", feature = "ui-dev"))]

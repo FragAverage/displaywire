@@ -152,6 +152,7 @@ impl Transfers {
         Ok(())
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     /// Files dropped on a stream window, sent as one batch: the other side puts them where its
     /// pointer is (the client has just moved it to where they were dropped).
     pub fn send_drop(&self, paths: &[std::path::PathBuf]) -> Result<(), String> {

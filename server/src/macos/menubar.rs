@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOff, NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate,
     NSMenuItem, NSModalResponseOK, NSOpenPanel, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString, ns_string};
@@ -35,6 +35,16 @@ define_class!(
     struct Menu;
 
     unsafe impl NSObjectProtocol for Menu {}
+
+    unsafe impl NSApplicationDelegate for Menu {
+        /// The app opened again (from Finder or Launchpad) while it's running: show the
+        /// permissions window, the one thing there is to see.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            super::setup::open();
+            false
+        }
+    }
 
     unsafe impl NSMenuDelegate for Menu {
         /// Rebuilt each time it opens, so the status is current.
@@ -124,11 +134,9 @@ define_class!(
             super::input::set_pc_shortcuts(!super::input::pc_shortcuts());
         }
 
-        #[unsafe(method(openPrivacy:))]
-        fn open_privacy(&self, sender: Option<&NSMenuItem>) {
-            let pane = if sender.is_some_and(|s| s.tag() == 1) { "Privacy_Accessibility" } else { "Privacy_ScreenCapture" };
-            let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
-            let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+        #[unsafe(method(openSetup:))]
+        fn open_setup(&self, _sender: Option<&AnyObject>) {
+            super::setup::open();
         }
 
         #[unsafe(method(openLog:))]
@@ -186,15 +194,12 @@ impl Menu {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let screen = super::screen_recording_allowed_quiet();
         let input = super::accessibility_allowed(false);
-        if !screen {
-            self.item(menu, "Allow Screen Recording…", Some(sel!(openPrivacy:)), 0);
-        }
-        if !input {
-            self.item(menu, "Allow Control of This Mac (Accessibility)…", Some(sel!(openPrivacy:)), 1);
-        }
         if !screen || !input {
-            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            self.item(menu, "⚠︎ Permissions Needed: Set Up…", Some(sel!(openSetup:)), 0);
+        } else {
+            self.item(menu, "Permissions…", Some(sel!(openSetup:)), 0);
         }
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
         let pc = self.item(menu, "PC Shortcuts (Ctrl Works as ⌘)", Some(sel!(togglePcShortcuts:)), 0);
         pc.setState(if super::input::pc_shortcuts() { NSControlStateValueOn } else { NSControlStateValueOff });
         if super::virtual_display::available() {
@@ -291,11 +296,15 @@ pub fn run(shared: Arc<Shared>) -> ! {
             None => button.setTitle(ns_string!("DW")),
         }
     }
+    app.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     let menu = NSMenu::new(mtm);
     menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     target.fill(&menu);
     item.setMenu(Some(&menu));
     println!("menu bar: ready");
+    if super::setup::missing() {
+        super::setup::open();
+    }
     app.run();
     std::process::exit(0)
 }

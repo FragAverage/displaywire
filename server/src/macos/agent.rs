@@ -33,6 +33,46 @@ pub fn installed() -> bool {
 }
 
 /// Whether this process is the one launchd started.
+/// The app opened from Finder (no arguments): the one thing a user runs. It makes sure the
+/// LaunchAgent exists and is running (which starts the server now and at every login, and
+/// opens the permissions window while they're missing), then this process leaves it to that.
+/// Returns false to run normally (not from an app bundle, or already the agent).
+pub fn first_launch() -> bool {
+    if running_as_agent() {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    if !exe.ancestors().any(|p| p.extension().is_some_and(|e| e == "app")) {
+        return false;
+    }
+    let uid = unsafe { getuid() };
+    let target = format!("gui/{uid}/{LABEL}");
+    let running = std::process::Command::new("/bin/launchctl").args(["print", &target]).output().is_ok_and(|o| {
+        o.status.success() && String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim_start().starts_with("pid = "))
+    });
+    // An agent for another copy of the app (moved, or an older install) is replaced.
+    let ours = plist_path().ok().and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|plist| plist.contains(&*exe.canonicalize().unwrap_or(exe.clone()).to_string_lossy()));
+    if running && ours {
+        // Already running in the menu bar: opening the app again shows the permissions.
+        super::setup::open();
+        return true;
+    }
+    if installed() {
+        let _ = uninstall(false);
+    }
+    match install(&[], true) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("start at login: {e}; running here instead");
+            false
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn getuid() -> u32;
+}
+
 pub fn running_as_agent() -> bool {
     std::env::var("XPC_SERVICE_NAME").is_ok_and(|n| n == LABEL)
 }

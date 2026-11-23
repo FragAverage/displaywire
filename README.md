@@ -62,24 +62,33 @@ folder of received files, and updates the server.
 
 ### Stream a Mac
 
-A Mac (macOS 13 or later) can be streamed too, to a PC or another Mac. Download `DisplayWire-Server-macos.zip` from
-the [latest release](https://github.com/FragAverage/displaywire/releases/latest) (releases up to 0.7.0 don't have it:
-build it as [CONTRIBUTING.md](CONTRIBUTING.md#the-mac-server) says), unzip it, drag **DisplayWire Server** to
-Applications, clear the quarantine flag as for the app above (`xattr -dr com.apple.quarantine "/Applications/DisplayWire Server.app"`)
-and open it.
-A display icon appears in the menu bar. Then:
+A Mac (macOS 13 or later) can be streamed too, to a PC or another Mac. On that Mac, open Terminal and run:
 
-1. macOS asks to allow **Screen & System Audio Recording** and **Accessibility** for DisplayWire Server (System
-   Settings › Privacy & Security). Allow both, then quit it from its menu and open it again. The menu shows a
-   shortcut for each permission that's still missing.
-2. Choose **Start at Login** in its menu so it runs whenever you're logged in.
+```
+curl -fsSL https://raw.githubusercontent.com/FragAverage/displaywire/main/scripts/install-mac-server.sh | sh
+```
+
+That's all there is to run. It puts **DisplayWire Server** in Applications (or updates it), starts it, and from then
+on it starts whenever you log in, with a display icon in the menu bar. (Releases up to 0.7.0 don't have it: build it
+as [CONTRIBUTING.md](CONTRIBUTING.md#the-mac-server) says.) Then:
+
+1. A **Set Up DisplayWire Server** window lists the permissions it needs: **Screen & System Audio Recording** and
+   **Accessibility**, and optionally **Finder** (so dropped files land where you drop them) and the BlackHole audio
+   driver. Click each button: it asks, or opens the right page of System Settings, where you switch DisplayWire
+   Server on. Each row turns green by itself; then click **Restart Server**. The window comes back from the menu
+   (**Permissions…**), or by opening the app again.
+2. If macOS asks whether DisplayWire Server may accept incoming network connections, click **Allow**.
 3. Pair from the viewing computer as below, choosing **Pair New Device…** in the Mac's menu instead of the PC's tray.
 
-The Windows key acts as ⌘ and Alt as ⌥. Files you send land in `~/Downloads/DisplayWire`. To send your microphone
-to the Mac, install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install blackhole-2ch`) and choose
-**BlackHole 2ch** as the microphone in the Mac app you're using. A Mac can't be streamed at the login window, and
-controllers aren't passed through to a Mac yet. The log is `~/Library/Logs/DisplayWire/server.log` when it starts at
-login.
+From a PC, the PC's keys do what they do on Windows (**PC Shortcuts** in the menu): Ctrl+C/V/Z… act as ⌘, Alt+Tab
+switches apps, Ctrl+Backspace deletes a word, Home/End go to the line's ends, Delete in Finder moves to the Bin, F3
+shows Mission Control, F11/F12 change the volume, and so on. Files dropped on the window land in the Finder window
+or on the Desktop under the pointer (anywhere else, in `~/Downloads/DisplayWire` and on the clipboard); files copied
+on one computer paste on the other; **Send Files to…** in the menu sends the other way. To send your microphone to
+the Mac, install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install blackhole-2ch`) and choose
+**BlackHole 2ch** as the microphone in the Mac app you're using. **Virtual Display While Connected** in the menu adds
+a screen for the other computer to open in a window of its own. A Mac can't be streamed at the login window, and
+controllers aren't passed through to a Mac yet. The log is `~/Library/Logs/DisplayWire/server.log`.
 
 ## Connect your Mac to your PC (once)
 

@@ -10,6 +10,7 @@ pub mod agent;
 pub mod input;
 pub mod menubar;
 pub mod micout;
+pub mod setup;
 pub mod shell;
 pub mod virtual_display;
 

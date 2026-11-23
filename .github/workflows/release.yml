@@ -34,8 +34,35 @@ jobs:
           done
           lipo -create -output dist/displaywire-server \
             target/aarch64-apple-darwin/release/displaywire-server target/x86_64-apple-darwin/release/displaywire-server
+          # With an Apple Developer ID in the secrets, the app is signed and notarized: it opens
+          # with no warning and keeps its permissions across updates. Without, it's ad-hoc
+          # signed (install it with scripts/install-mac-server.sh).
+          if [ -n "${MACOS_CERT_P12:-}" ]; then
+            kc=$RUNNER_TEMP/sign.keychain-db
+            security create-keychain -p ci "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p ci "$kc"
+            echo "$MACOS_CERT_P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+            security import $RUNNER_TEMP/cert.p12 -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -k ci "$kc" >/dev/null
+            security list-keychains -d user -s "$kc" login.keychain-db
+            export SIGN_IDENTITY=$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)
+          fi
           scripts/bundle-mac-server.sh dist/displaywire-server dist
           ditto -c -k --keepParent "dist/DisplayWire Server.app" dist/DisplayWire-Server-macos.zip
+          if [ -n "${SIGN_IDENTITY:-}" ]; then
+            xcrun notarytool submit dist/DisplayWire-Server-macos.zip --wait \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+            xcrun stapler staple "dist/DisplayWire Server.app"
+            rm dist/DisplayWire-Server-macos.zip
+            ditto -c -k --keepParent "dist/DisplayWire Server.app" dist/DisplayWire-Server-macos.zip
+          fi
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: client

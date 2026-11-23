@@ -36,5 +36,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --deep --sign "${SIGN_IDENTITY:--}" "$app"
+case "${SIGN_IDENTITY:--}" in
+  "Developer ID"*)
+    # For notarizing: the hardened runtime, with what the app needs from it.
+    codesign --force --deep --options runtime --timestamp --entitlements scripts/server.entitlements --sign "$SIGN_IDENTITY" "$app" ;;
+  *)
+    codesign --force --deep --sign "${SIGN_IDENTITY:--}" "$app" ;;
+esac
 echo "$app"

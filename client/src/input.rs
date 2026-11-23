@@ -49,6 +49,12 @@ impl Sender {
         true
     }
 
+    /// A key by its Windows scancode (`0x100` marks E0-extended keys), for keys caught before winit sees them.
+    #[cfg(windows)]
+    pub fn scancode(&self, sc: u16, down: bool) {
+        self.update(|m| m.set_key(sc, down));
+    }
+
     pub fn button(&self, button: MouseButton, down: bool) {
         let bit = match button {
             MouseButton::Left => BUTTON_LEFT,
@@ -139,6 +145,12 @@ impl Sender {
 
 /// ISO Mac keyboards report the key left of `1` and the key left of `Z`
 /// swapped relative to their physical position.
+#[cfg(not(target_os = "macos"))]
+fn iso_keyboard() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
 fn iso_keyboard() -> bool {
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {

@@ -89,6 +89,89 @@ pub fn to_sample(au: &[u8]) -> Sample {
     Sample { param_sets, data }
 }
 
+/// Reads an SPS NAL (with its two header bytes) as far as the picture size: the visible width and
+/// height in pixels, after the conformance window's cropping. `None` if it doesn't parse.
+pub fn sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
+    // Drop the emulation prevention bytes (00 00 03 → 00 00).
+    let mut rbsp = Vec::with_capacity(sps.len());
+    let mut zeros = 0;
+    for &b in sps.get(2..)? {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    let mut r = Bits { data: &rbsp, at: 0 };
+    r.skip(4)?;
+    let sub_layers = r.bits(3)? as usize;
+    r.skip(1)?;
+    // profile_tier_level: the general part, then what each sub-layer says it carries.
+    r.skip(88 + 8)?;
+    let mut present = Vec::new();
+    for _ in 0..sub_layers {
+        present.push((r.bits(1)? == 1, r.bits(1)? == 1));
+    }
+    if sub_layers > 0 {
+        r.skip(2 * (8 - sub_layers))?;
+    }
+    for (profile, level) in present {
+        r.skip(if profile { 88 } else { 0 } + if level { 8 } else { 0 })?;
+    }
+    r.ue()?;
+    let chroma = r.ue()?;
+    if chroma == 3 {
+        r.skip(1)?;
+    }
+    let (mut width, mut height) = (r.ue()?, r.ue()?);
+    if r.bits(1)? == 1 {
+        let (left, right, top, bottom) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
+        let (sub_w, sub_h) = match chroma {
+            1 => (2, 2),
+            2 => (2, 1),
+            _ => (1, 1),
+        };
+        width = width.checked_sub(sub_w * (left.checked_add(right)?))?;
+        height = height.checked_sub(sub_h * (top.checked_add(bottom)?))?;
+    }
+    (width > 0 && height > 0 && width <= 16_384 && height <= 16_384).then_some((width, height))
+}
+
+struct Bits<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl Bits<'_> {
+    fn bits(&mut self, n: usize) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = *self.data.get(self.at / 8)?;
+            v = (v << 1) | ((byte >> (7 - self.at % 8)) & 1) as u32;
+            self.at += 1;
+        }
+        Some(v)
+    }
+
+    fn skip(&mut self, n: usize) -> Option<()> {
+        self.at += n;
+        (self.at <= self.data.len() * 8).then_some(())
+    }
+
+    /// An unsigned Exp-Golomb number.
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bits(1)? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some((1u32 << zeros) - 1 + self.bits(zeros)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +181,16 @@ mod tests {
         let mut v = vec![0, 0, 0, 1, ty << 1, 1];
         v.extend_from_slice(body);
         v
+    }
+
+    #[test]
+    fn reads_the_picture_size_from_an_sps() {
+        // From NVENC at 1920x1080: coded as 1920x1088, cropped by the conformance window.
+        let hex = "420101216000000300900000030000030096a003c0801107cb96274a425909f5550c05a808080820000003002000000f01";
+        let sps: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        assert_eq!(sps_dimensions(&sps), Some((1920, 1080)));
+        assert_eq!(sps_dimensions(&sps[..8]), None, "cut short");
+        assert_eq!(sps_dimensions(&[]), None);
     }
 
     #[test]

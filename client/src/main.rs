@@ -3,52 +3,65 @@
 //!   displaywire-client <server-ip>
 //!   displaywire-client                # or DisplayWire.app: asks for the server
 
-#[cfg(target_os = "macos")]
+// A window of its own on Windows, not a console (output still reaches a terminal it was started from).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+#[cfg(any(target_os = "macos", windows))]
 mod audio;
 #[cfg(target_os = "macos")]
 mod dialog;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod discovery;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod cursor;
 #[cfg(target_os = "macos")]
 mod display;
 #[cfg(target_os = "macos")]
 mod gamepad;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod input;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod keys;
 #[cfg(target_os = "macos")]
 mod launcher;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod link;
 #[cfg(target_os = "macos")]
 mod menu;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod mic;
 #[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod pairui;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod receiver;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod resample;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod servers;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod settings;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod transfer;
 #[cfg(target_os = "macos")]
 mod updater;
 #[cfg(target_os = "macos")]
 mod wifi;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+use win::{app, dialog};
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    eprintln!("displaywire-client currently runs on macOS only");
+    eprintln!("displaywire-client runs on macOS and Windows only");
+}
+
+#[cfg(windows)]
+fn main() {
+    win::app::main();
 }
 
 #[cfg(target_os = "macos")]

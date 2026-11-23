@@ -12,18 +12,22 @@ use timing::history::{Binner, History};
 use timing::{Samples, ms, now_ns};
 use transport::video::{Frame, Reassembler};
 use transport::is_transient;
+#[cfg(target_os = "macos")]
 use videotoolbox::{Format, Image, Output, PIXEL_FORMAT_NV12, Session};
 use winit::event_loop::EventLoopProxy;
 
 use crate::app::UserEvent;
 use crate::audio;
 use crate::cursor;
+#[cfg(target_os = "macos")]
 use crate::display::Layer;
 use crate::input;
 use crate::link::Link;
 use crate::mic;
 use crate::settings::Prefs;
 use crate::transfer::Transfers;
+#[cfg(windows)]
+use crate::win::video::Layer;
 use secure::{Initiator, ReplayWindow};
 
 const MS: u64 = 1_000_000;
@@ -88,6 +92,7 @@ impl Telemetry {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct Decoder {
     param_sets: [Vec<u8>; 3],
     session: Session,
@@ -98,10 +103,13 @@ struct VideoStream {
     id: u8,
     layer: Layer,
     reassembler: Reassembler,
+    #[cfg(target_os = "macos")]
     decoder: Option<Decoder>,
     /// Filled by the decoder callback, which runs before `decode` returns.
+    #[cfg(target_os = "macos")]
     decoded: Arc<Mutex<Option<Result<Image, i32>>>>,
     /// Kept alive while CoreAnimation shows it.
+    #[cfg(target_os = "macos")]
     shown: Option<Image>,
     need_keyframe: bool,
     last_keyframe_request: u64,
@@ -119,8 +127,11 @@ impl VideoStream {
             id,
             layer,
             reassembler: Reassembler::default(),
+            #[cfg(target_os = "macos")]
             decoder: None,
+            #[cfg(target_os = "macos")]
             decoded: Arc::default(),
+            #[cfg(target_os = "macos")]
             shown: None,
             need_keyframe: true,
             last_keyframe_request: 0,
@@ -361,6 +372,9 @@ impl Receiver {
                 }
             }
             for v in &mut self.streams {
+                // The window may have changed size, or what is written over the picture.
+                #[cfg(windows)]
+                v.layer.tick();
                 if v.reassembler.expire(now, PARTIAL_MAX_AGE_NS) {
                     v.need_keyframe = true;
                     v.feedback.frames_lost += 1;
@@ -535,6 +549,53 @@ impl Receiver {
         if frame.repaired > 0 {
             self.stats.repaired += 1;
         }
+        self.decode(i, frame);
+    }
+
+    /// Decodes a frame that is fit to decode and puts the picture on the screen.
+    #[cfg(windows)]
+    fn decode(&mut self, i: usize, frame: Frame) {
+        let st = &mut self.streams[i];
+        let start = now_ns();
+        let result = st.layer.decode(&frame.data, frame.keyframe);
+        let decoded_ns = now_ns();
+        match result {
+            Ok(shown) => {
+                if let Some((w, h)) = shown.size {
+                    println!("stream {}: {w}x{h}", st.id);
+                    let _ = self.proxy.send_event(UserEvent::VideoSize(st.id, w, h));
+                }
+                if frame.keyframe {
+                    st.need_keyframe = false;
+                }
+                if !shown.presented {
+                    return;
+                }
+                self.stats.frames += 1;
+                self.stats.decode.push((decoded_ns - start) as i64);
+                let latency = self.clock.offset().map(|o| decoded_ns as i64 + o - frame.capture_ns as i64);
+                if let Some(l) = latency {
+                    self.stats.latency.push(l);
+                }
+                self.binner.frame((decoded_ns - start) as i64, latency);
+                if let Some(t) = &mut self.trace {
+                    use std::io::Write;
+                    let decoded = decoded_ns as i64 + self.clock.offset().unwrap_or(0);
+                    let _ = writeln!(t, "{},{},{},{},{decoded},{}", frame.id, frame.keyframe as u8, frame.data.len(), frame.capture_ns, decoded_ns - start);
+                }
+            }
+            Err(e) => {
+                eprintln!("decode failed on frame {}: {e}", frame.id);
+                self.stats.errors += 1;
+                self.binner.lost(1);
+                st.need_keyframe = true;
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode(&mut self, i: usize, frame: Frame) {
+        let st = &mut self.streams[i];
         let sample = hevc::to_sample(&frame.data);
         if let Some(ps) = sample.param_sets
             && st.decoder.as_ref().is_none_or(|d| d.param_sets != ps)
@@ -598,6 +659,7 @@ impl Receiver {
 }
 
 /// A decoder for stream `st` from new parameter sets (the first keyframe, or a new size).
+#[cfg(target_os = "macos")]
 fn new_decoder(st: &mut VideoStream, param_sets: [Vec<u8>; 3], proxy: &EventLoopProxy<UserEvent>) -> Result<(), String> {
     let format = Format::hevc(&param_sets)?;
     let (w, h) = format.dimensions();

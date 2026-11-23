@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.2.0 to build and publish the Mac client and Windows server.
+# Push a tag like v0.2.0 to build and publish the Mac client, the Windows client and the Windows server.
 on:
   push:
     tags: ["v*"]
@@ -45,10 +45,20 @@ jobs:
           New-Item -ItemType Directory dist/displaywire-server-windows | Out-Null
           Copy-Item target/release/displaywire-server.exe, README.md dist/displaywire-server-windows/
           Compress-Archive dist/displaywire-server-windows dist/displaywire-server-windows.zip
+      - name: Build Windows client
+        shell: pwsh
+        run: |
+          cargo build --release -p displaywire-client
+          New-Item -ItemType Directory dist/DisplayWire-windows | Out-Null
+          Copy-Item target/release/displaywire-client.exe dist/DisplayWire-windows/DisplayWire.exe
+          Copy-Item README.md dist/DisplayWire-windows/
+          Compress-Archive dist/DisplayWire-windows dist/DisplayWire-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: server
-          path: dist/displaywire-server-windows.zip
+          path: |
+            dist/displaywire-server-windows.zip
+            dist/DisplayWire-windows.zip
 
   publish:
     needs: [client, server]
@@ -75,5 +85,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$GITHUB_REF_NAME" dist/DisplayWire-macos.zip dist/displaywire-server-windows.zip dist/latest.txt dist/latest.txt.sig
+          gh release create "$GITHUB_REF_NAME" dist/DisplayWire-macos.zip dist/DisplayWire-windows.zip dist/displaywire-server-windows.zip dist/latest.txt dist/latest.txt.sig
           --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

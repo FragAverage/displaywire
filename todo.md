@@ -34,23 +34,32 @@ or a DualShock 4 when the Mac pad is a PlayStation one (gyro, touchpad, light ba
 - [ ] Installer: offer ViGEmBus; check its licence (BSD-3) and redistribution of the signed driver.
 - [ ] README: controllers section.
 
-## 3. Windows client (agreed)
-Decided: D3D11 video decode (any GPU, zero-copy to the swapchain); one shared cross-platform UI for the PC list,
-pairing and settings on both Mac and Windows; one `client` crate with platform modules like the server; v1 has the
-Win key / Alt-Tab hook, raw relative mouse, gamepads, clipboard and file drop. UI toolkit: egui, drawn in our own
-winit window (also replaces the AppKit launcher, pairing sheet and settings on the Mac).
-- [ ] Split `client/src` into shared code (receiver, pacing, clock, stats, settings, servers, transfer, updater) and
-      `macos/` + `windows/` behind small traits: Decoder, Presenter, AudioOut, Mic, Input, Clipboard.
-- [ ] Shared UI toolkit for launcher, pairing, settings and dialogs; port the Mac launcher to it with egui.
-- [ ] Decode: `ID3D11VideoDecoder` HEVC Main (Main10 later for item 8), parse slices with `crates/hevc`.
-- [ ] Present: flip-model swapchain (`FLIP_DISCARD`, waitable object, tearing allowed), NV12 → RGB in a pixel shader.
-- [ ] Audio: WASAPI shared-mode render with the existing jitter cushion; WASAPI capture for the mic.
-- [ ] Input: Raw Input for relative mouse; `WH_KEYBOARD_LL` hook for Win key, Alt-Tab and friends while focused;
-      ClipCursor when captured; let go of everything on focus loss.
-- [ ] Gamepads: GameInput (or XInput) to the item 2 protocol.
-- [ ] Clipboard (text, skip `ExcludeClipboardContentFromMonitorProcessing`) and drag-and-drop files.
-- [ ] Wi-Fi: the Windows equivalent of AWDL tuning (`WlanSetInterface` background scan off, streaming mode).
-- [ ] Packaging: signed zip + update channel for the client; winget later.
+## 3. Windows client (first version built 2026-11-23, tested against a local server; input not yet tested by hand)
+Built in `client/src/win/`, sharing the receiver, audio, input, transfer and saved-PC code with the Mac.
+What differs from what was decided:
+- Decode is Media Foundation's HEVC decoder on D3D11 (needs the *HEVC Video Extensions*), not our own
+  `ID3D11VideoDecoder` with slice parsing. Far less code and it works on any GPU the extension supports; our own
+  DXVA decode would drop the extension requirement.
+- The PC list, pairing and settings are egui (eframe) in a process of their own, which starts one
+  `displaywire-client <address>` per connection: eframe and the stream can't share an event loop. The Mac keeps its
+  AppKit launcher for now.
+- [x] Decode + present: MFT (low latency mode) → `ID3D11VideoProcessor` → flip-model swap chain, tearing allowed;
+      banner, placeholder and stats graph drawn with Direct2D. Measured on loopback at 1080p: decode 0.4–0.9 ms,
+      capture → decoded 4–8 ms; 5% simulated loss repaired with no decode errors.
+- [x] Other monitors in windows of their own, placed on a free local display, reopened on the next connection;
+      "Open All Monitors" (Ctrl+Alt+A, `--all-monitors`).
+- [x] Audio and microphone (cpal/WASAPI, the Mac's code), clipboard text (skips
+      `ExcludeClipboardContentFromMonitorProcessing`), file drop and Send File, the PC's pointer as the local cursor.
+- [x] Input: winit keys and raw relative mouse; `WH_KEYBOARD_LL` for the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc and
+      Alt+F4 while in full screen or with the pointer captured (confined + hidden). **Needs a test by hand against
+      another PC**: it was only run view-only here, since the test server was the same machine. The same goes for
+      the microphone, clipboard, file sending and gamepads.
+- [x] Gamepads: XInput (Xbox layout, rumble). No Guide button, no PlayStation extras.
+- [x] Wi-Fi: `transport::wlan` tuning while connected (the setting the Mac uses for AWDL).
+- [x] CI builds and lints it; the release workflow zips `DisplayWire-windows.zip` (not run yet).
+- [ ] Signed updates for the Windows client (`dwsign` only signs the Mac app and the server), an icon, winget.
+- [ ] Our own D3D11VA decode, to drop the HEVC extension requirement.
+- [ ] Port the Mac launcher to the shared egui UI, or the Windows one to native: one of them should go.
 ## 4. Mac server (agreed)
 Decided: macOS 13+ (ScreenCaptureKit captures system audio, no loopback driver); menu-bar app started by a
 LaunchAgent at login, mirroring the Windows tray (no login-window streaming); virtual display comes with item 7.

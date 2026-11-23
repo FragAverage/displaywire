@@ -1,7 +1,8 @@
 # DisplayWire
 
-Stream your Windows PC's desktop to your Mac with very low latency. Play games, run apps and use the PC as if you
-were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and your microphone all go across.
+Stream your Windows PC's desktop to your Mac, or to another Windows PC, with very low latency. Play games, run apps
+and use the PC as if you were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and your microphone
+all go across. Each of the PC's monitors can have a window of its own.
 
 - **Fast:** hardware video encoding on the PC (NVIDIA), hardware decoding on the Mac, a custom UDP protocol, and
   repair packets so a lost packet doesn't cost a frame. Typically 10 to 20 ms from the PC's screen to yours.
@@ -14,6 +15,8 @@ were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and yo
 - **PC:** Windows 10 or 11, with an NVIDIA graphics card for the best performance. (Sound from every app needs
   Windows 10 version 2004 or later; older versions send the default output only.)
 - **Mac:** macOS 12 or later, Apple Silicon or Intel.
+- **Or a Windows PC to view from:** Windows 10 or 11 with any graphics card that decodes HEVC, and Microsoft's
+  *HEVC Video Extensions* (many PCs have them already; otherwise they are in the Microsoft Store).
 - Both on the same network, or on the same [Tailscale](https://tailscale.com) network (use the PC's Tailscale address in
   **Add PC…**). A wired connection on at least one side helps a lot. DisplayWire uses UDP port 9000 on the PC; the
   installer opens it in the Windows firewall for the local network and Tailscale only. To reach the PC any other
@@ -38,6 +41,13 @@ refuse to open it. Clear the flag once:
 ```
 xattr -dr com.apple.quarantine /Applications/DisplayWire.app
 ```
+
+### On a Windows PC you view from
+
+Download `DisplayWire-windows.zip` from the [latest release](https://github.com/FragAverage/displaywire/releases/latest),
+unzip it and run **DisplayWire.exe**. (Releases up to 0.7.0 don't have it yet: build it with
+`cargo build --release -p displaywire-client`, see [CONTRIBUTING.md](CONTRIBUTING.md).) Everything below works the
+same as on a Mac, except where the *On Windows* section says otherwise.
 
 ### On the PC
 
@@ -82,6 +92,26 @@ The ⌘ key acts as the Windows key on the PC. Switching away from the window le
 To skip ⌃⌥M, turn on **Capture the pointer when the window has focus** in Settings. The mouse is then captured
 whenever the stream window has focus. ⌃⌥M still releases it, a click in the window captures it again, and
 switching away (⌘Tab) releases it.
+
+### On Windows
+
+The Windows client has the same list of PCs, pairing and settings, and a menu bar on the stream window.
+
+| Shortcut | What it does |
+|---|---|
+| **Ctrl+Alt+M** | Capture or release the mouse |
+| **Ctrl+Alt+F** | Full screen (for the stream window that has focus) |
+| **Ctrl+Alt+A** | Open every monitor of the PC, each in a window of its own |
+| **Ctrl+Alt+S** | Show or hide the stats graph |
+| **Ctrl+Alt+V** | Microphone on or off |
+| **Ctrl+Alt+D** | Disconnect |
+
+- **More than one monitor:** **Monitors** in the menu chooses which one the main window shows, and opens the others
+  in windows of their own (each goes to a display of yours that has no stream window yet). The windows that were open
+  are opened again the next time you connect to that PC.
+- **The Windows key, Alt+Tab and Alt+F4** go to the remote PC while the stream is in full screen or the mouse is
+  captured. In an ordinary window they stay with the PC you are sitting at.
+- Xbox-style (XInput) controllers work, with rumble. Wi-Fi tuning needs no setup. There are no automatic updates yet.
 
 ### Sound and microphone
 

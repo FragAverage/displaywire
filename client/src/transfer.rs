@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
 use proto::stream::Msg;
 use timing::now_ns;
@@ -212,13 +214,19 @@ impl Sink for ClipboardSink {
     }
 }
 
+#[cfg(windows)]
+use crate::win::clipboard::{pasteboard_count, pasteboard_text, set_pasteboard_text};
+
+#[cfg(target_os = "macos")]
 fn pasteboard_count() -> isize {
     NSPasteboard::generalPasteboard().changeCount()
 }
 
 /// Password managers mark what they copy so clipboard tools leave it alone.
+#[cfg(target_os = "macos")]
 const CONCEALED: [&str; 2] = ["org.nspasteboard.ConcealedType", "com.agilebits.onepassword"];
 
+#[cfg(target_os = "macos")]
 fn pasteboard_text() -> Option<String> {
     let pb = NSPasteboard::generalPasteboard();
     if pb.types()?.iter().any(|t| CONCEALED.contains(&t.to_string().as_str())) {
@@ -228,6 +236,7 @@ fn pasteboard_text() -> Option<String> {
 }
 
 /// Puts `text` on the pasteboard; returns the change count that results.
+#[cfg(target_os = "macos")]
 fn set_pasteboard_text(text: &str) -> isize {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();

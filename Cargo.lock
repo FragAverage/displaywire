@@ -732,6 +732,7 @@ version = "0.7.0"
 dependencies = [
  "clap",
  "cpal",
+ "eframe",
  "hevc",
  "if-addrs",
  "objc2 0.6.5",
@@ -750,6 +751,9 @@ dependencies = [
  "transport",
  "update",
  "videotoolbox",
+ "windows",
+ "windows-core",
+ "windows-numerics",
  "winit",
  "xfer",
 ]

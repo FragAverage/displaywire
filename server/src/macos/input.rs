@@ -70,7 +70,7 @@ impl Injector {
             self.trusted_checked = true;
             if !unsafe { AXIsProcessTrusted() } {
                 println!(
-                    "input: not allowed to control this Mac; allow DisplayWire (or the terminal running it) in System Settings › Privacy & Security › Accessibility, then restart it"
+                    "input: not allowed to control this Mac; allow DisplayWire Server (or the terminal running it) in System Settings › Privacy & Security › Accessibility, then restart it"
                 );
             }
         }

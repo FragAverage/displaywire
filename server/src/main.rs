@@ -434,7 +434,7 @@ fn client_command(cli: &Cli, dir: &std::path::Path) -> Option<Result<(), String>
                 None => return Err(format!("no paired device with the id or name {who:?} (see --list-clients)")),
             }
         } else if store.list().is_empty() {
-            println!("no devices are paired yet: choose Pair new device in the tray menu");
+            println!("no devices are paired yet: choose Pair new device in the tray (Windows) or menu-bar (Mac) menu");
         } else {
             println!("{:<10} {:<28} {:<16} paired", "id", "name", "last seen from");
             for c in store.list() {
@@ -539,7 +539,7 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     let store = clients::Store::open(&data_dir)?;
     match store.list().len() {
-        0 => println!("no devices are paired yet: choose Pair new device in the tray menu"),
+        0 => println!("no devices are paired yet: choose Pair new device in the tray (Windows) or menu-bar (Mac) menu"),
         n => println!("{n} paired device{}", if n == 1 { "" } else { "s" }),
     }
     #[cfg(target_os = "macos")]

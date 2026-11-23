@@ -119,7 +119,7 @@ impl ScreenSource {
     /// Stream `stream` of monitor `monitor` (its place in the list the client sees), or the main display.
     pub fn open(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<ScreenSource, String> {
         if !screen_recording_allowed() {
-            return Err("not allowed to record the screen: allow DisplayWire (or the terminal running it) in System Settings › Privacy & Security › Screen & System Audio Recording, then restart it".into());
+            return Err("not allowed to record the screen: allow DisplayWire Server (or the terminal running it) in System Settings › Privacy & Security › Screen & System Audio Recording, then restart it".into());
         }
         let display = match monitor {
             Some(m) => monitor_list().get(m as usize).map(|(d, _)| *d).ok_or("no such monitor")?,
@@ -343,7 +343,7 @@ impl AudioSource for SystemAudio {
 pub fn start_background(shared: Arc<Shared>) {
     if !accessibility_allowed(true) {
         println!(
-            "input: not allowed to control this Mac yet; allow DisplayWire (or the terminal running it) in System Settings › Privacy & Security › Accessibility"
+            "input: not allowed to control this Mac yet; allow DisplayWire Server (or the terminal running it) in System Settings › Privacy & Security › Accessibility"
         );
     }
     let _ = std::thread::Builder::new().name("awake".into()).spawn(move || {

@@ -20,6 +20,8 @@ use crate::app::UserEvent;
 pub enum Action {
     Disconnect,
     SendFile,
+    /// The folder files from the other computer go to.
+    OpenReceived,
     FullScreen,
     /// Every stream window in or out of full screen.
     FullScreenAll,
@@ -37,7 +39,7 @@ pub enum Action {
     OpenAllMonitors,
 }
 
-const FIXED: [(u32, Action); 11] = [
+const FIXED: [(u32, Action); 12] = [
     (1, Action::Disconnect),
     (2, Action::SendFile),
     (3, Action::FullScreen),
@@ -49,6 +51,7 @@ const FIXED: [(u32, Action); 11] = [
     (9, Action::Shortcuts),
     (10, Action::OpenAllMonitors),
     (11, Action::FullScreenAll),
+    (12, Action::OpenReceived),
 ];
 const MONITOR_BASE: u32 = 100;
 const OPEN_BASE: u32 = 200;
@@ -101,7 +104,8 @@ impl Menu {
         unsafe {
             let bar = CreateMenu().unwrap_or_default();
             let connection = CreatePopupMenu().unwrap_or_default();
-            add(connection, Action::SendFile, "Send File to PC…");
+            add(connection, Action::SendFile, "Send File…");
+            add(connection, Action::OpenReceived, "Open Received Files");
             separator(connection);
             add(connection, Action::Disconnect, "Disconnect\tCtrl+Alt+D");
             let view = CreatePopupMenu().unwrap_or_default();

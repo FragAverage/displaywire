@@ -406,6 +406,12 @@ impl App {
                     let _ = std::process::Command::new(exe).arg("--settings").spawn();
                 }
             }
+            Action::OpenReceived => {
+                if let Ok(dir) = crate::transfer::received_dir() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                }
+            }
             Action::Microphone => self.toggle_mic(),
             Action::FullScreen => self.toggle_fullscreen(),
             Action::FullScreenAll => self.toggle_fullscreen_all(),

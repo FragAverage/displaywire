@@ -11,7 +11,7 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSMenuItem, NSModalResponseOK, NSOpenPanel, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString, ns_string};
 
@@ -57,6 +57,31 @@ define_class!(
             if let Ok(dir) = super::shell::uploads_dir() {
                 let _ = std::fs::create_dir_all(&dir);
                 super::shell::open(&dir);
+            }
+        }
+
+        #[unsafe(method(sendFile:))]
+        fn send_file(&self, _sender: Option<&AnyObject>) {
+            let mtm = self.mtm();
+            let panel = NSOpenPanel::openPanel(mtm);
+            panel.setCanChooseFiles(true);
+            panel.setCanChooseDirectories(false);
+            panel.setAllowsMultipleSelection(true);
+            panel.setPrompt(Some(ns_string!("Send")));
+            panel.setMessage(Some(&NSString::from_str(&format!("Choose files to send to {}", device_name(&self.ivars().shared)))));
+            // A menu-bar app isn't frontmost: bring the panel up in front of everything.
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            if panel.runModal() != NSModalResponseOK {
+                return;
+            }
+            for url in panel.URLs().iter() {
+                if let Some(path) = url.path() {
+                    let path = PathBuf::from(path.to_string());
+                    if let Err(e) = crate::transfer::Transfers::send_file(&path) {
+                        super::shell::notify(&e);
+                    }
+                }
             }
         }
 
@@ -151,6 +176,9 @@ impl Menu {
         for (i, a) in st.addresses.iter().enumerate() {
             self.item(menu, &format!("Copy Address {a}"), Some(sel!(copyAddress:)), i as isize);
         }
+        if st.shared.link.lock().unwrap().is_some() {
+            self.item(menu, &format!("Send Files to {}…", device_name(&st.shared)), Some(sel!(sendFile:)), 0);
+        }
         self.item(menu, "Open Received Files", Some(sel!(openFiles:)), 0);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         self.item(menu, "Pair New Device…", Some(sel!(pair:)), 0);
@@ -189,6 +217,15 @@ fn status(shared: &Shared) -> String {
         }
         None => "DisplayWire Server: waiting for a client".to_string(),
     }
+}
+
+/// The connected device's name, or "the PC".
+fn device_name(shared: &Shared) -> String {
+    let client = shared.link.lock().unwrap().as_ref().map(|l| l.client.clone());
+    client
+        .and_then(|c| shared.clients.lock().unwrap().get(&c).map(|c| c.name.clone()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "the PC".into())
 }
 
 fn local_addresses() -> Vec<String> {

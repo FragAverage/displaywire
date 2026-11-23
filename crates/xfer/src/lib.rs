@@ -10,7 +10,9 @@
 //! and clocks belong to the caller.
 
 mod endpoint;
+mod names;
 pub use endpoint::{Endpoint, Event, Outgoing};
+pub use names::{safe_file_name, unique_path};
 
 use std::collections::BTreeMap;
 use std::io;

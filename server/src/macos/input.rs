@@ -14,6 +14,11 @@ const SEC: u64 = 1_000_000_000;
 /// what they do there: Ctrl+Backspace/Delete/←/→ by word, Home/End to the line's ends,
 /// Ctrl+Home/End to the document's. On unless switched off in the menu bar, which a Mac
 /// client (whose ⌘ arrives as the Windows key) wants.
+const CMD: u64 = kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK;
+const OPT: u64 = kCGEventFlagMaskAlternate | NX_DEVICELALTKEYMASK;
+const SHIFT: u64 = kCGEventFlagMaskShift | NX_DEVICELSHIFTKEYMASK;
+const CTRL: u64 = kCGEventFlagMaskControl | NX_DEVICELCTLKEYMASK;
+
 static PC_SHORTCUTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 fn pc_shortcuts_off_path() -> std::path::PathBuf {
@@ -57,9 +62,13 @@ pub struct Injector {
     /// The last button pressed: which, when, where, and its click count.
     last_click: Option<(u8, u64, CGPoint, i64)>,
     trusted_checked: bool,
-    /// Keys sent as something else (PC shortcuts): scancode → the Mac key and flags it went
-    /// down as, so it comes up the same way.
-    translated: std::collections::HashMap<u16, (u16, (u64, u64))>,
+    /// Keys sent as something else (PC shortcuts): scancode → the Mac key and modifiers it went
+    /// down as, so it repeats and comes up the same way.
+    translated: std::collections::HashMap<u16, (u16, u64)>,
+    /// Alt+Tab is showing the app switcher: ⌘ is held for it until Alt comes up.
+    alt_tab: bool,
+    /// The Windows key is down and nothing else has been pressed with it.
+    win_tap: bool,
 }
 
 // The event source is only used from the control thread.
@@ -78,6 +87,8 @@ impl Injector {
             last_click: None,
             trusted_checked: false,
             translated: std::collections::HashMap::new(),
+            alt_tab: false,
+            win_tap: false,
         }
     }
 
@@ -181,7 +192,16 @@ impl Injector {
 
     fn key(&mut self, code: u16, down: bool, repeat: bool) {
         let Some(mut vk) = mac_key(code) else { return };
+        if code == 0x3A && down && !repeat {
+            self.caps_lock = !self.caps_lock;
+        }
+        let modifier = is_modifier(code);
+        if modifier && repeat {
+            return;
+        }
         let pc = pc_shortcuts();
+        // Exactly these flags, for a key sent as another (PC shortcuts).
+        let mut exact: Option<u64> = None;
         if pc {
             vk = match code {
                 0x1D => 0x37,  // Left Control → Command
@@ -190,55 +210,125 @@ impl Injector {
                 0x15C => 0x3E, // Right Windows → Right Control
                 _ => vk,
             };
-        }
-        // Flags to add and take away for a key Windows treats differently (PC shortcuts).
-        let mut change: Option<(u64, u64)> = None;
-        if pc && !is_modifier(code) {
-            if !down && let Some((v, c)) = self.translated.remove(&code) {
-                (vk, change) = (v, Some(c));
-            } else if down {
-                let ctrl = self.held.key(0x1D) || self.held.key(0x11D);
-                let cmd = kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK | NX_DEVICERCMDKEYMASK;
-                let word = (kCGEventFlagMaskAlternate | NX_DEVICELALTKEYMASK, cmd);
-                let t = match (code, ctrl) {
-                    // Backspace, Delete, ← and → by word: ⌥ instead of ⌘.
-                    (0x0E | 0x153 | 0x14B | 0x14D, true) => Some((vk, word)),
-                    (0x147, false) => Some((0x7B, (kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK, 0))), // Home → ⌘←
-                    (0x14F, false) => Some((0x7C, (kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK, 0))), // End → ⌘→
-                    (0x147, true) => Some((0x7E, (0, 0))), // Ctrl+Home → ⌘↑
-                    (0x14F, true) => Some((0x7D, (0, 0))), // Ctrl+End → ⌘↓
-                    _ => None,
-                };
-                if let Some((v, c)) = t {
-                    vk = v;
-                    change = Some(c);
-                    self.translated.insert(code, (v, c));
+            if down && !matches!(code, 0x15B | 0x15C) {
+                self.win_tap = false;
+            }
+            let alt = self.held.key(0x38) || self.held.key(0x138);
+            let shift = if self.held.key(0x2A) || self.held.key(0x36) { SHIFT } else { 0 };
+            // Alt+Tab: ⌘Tab, with ⌘ held until Alt comes up so the switcher stays open.
+            if code == 0x0F && (self.alt_tab || (down && alt && !self.ctrl_held() && !self.win_held())) {
+                if down && !self.alt_tab {
+                    self.alt_tab = true;
+                    self.post_key(0x37, true, self.base_flags() | CMD, true);
+                }
+                self.post_key(0x30, down, self.base_flags() | CMD | shift, false);
+                return;
+            }
+            if !modifier {
+                if !down || repeat {
+                    if let Some(&(v, f)) = self.translated.get(&code) {
+                        (vk, exact) = (v, Some(self.base_flags() | f));
+                    }
+                    if !down {
+                        self.translated.remove(&code);
+                    }
+                } else if let Some((v, f)) = self.pc_combo(code, vk) {
+                    self.translated.insert(code, (v, f));
+                    (vk, exact) = (v, Some(self.base_flags() | f));
                 }
             }
         }
-        if code == 0x3A && down && !repeat {
-            self.caps_lock = !self.caps_lock;
+        let mut flags = exact.unwrap_or_else(|| self.flags());
+        if is_keypad(vk) {
+            flags |= kCGEventFlagMaskNumericPad;
         }
-        let modifier = is_modifier(code);
-        if modifier && repeat {
-            return;
+        self.post_key_repeat(vk, down, flags, modifier, repeat);
+        if pc && modifier {
+            match (code, down) {
+                (0x38 | 0x138, false) if self.alt_tab => {
+                    // Alt up: let go of ⌘, which picks the app.
+                    self.alt_tab = false;
+                    self.post_key(0x37, false, self.flags(), true);
+                }
+                (0x15B | 0x15C, true) => self.win_tap = true,
+                (0x15B | 0x15C, false) if std::mem::take(&mut self.win_tap) => {
+                    // The Windows key on its own opens Start: Spotlight here.
+                    let f = self.base_flags() | CMD;
+                    self.post_key(0x31, true, f, false);
+                    self.post_key(0x31, false, f, false);
+                }
+                _ => {}
+            }
         }
+    }
+
+    fn ctrl_held(&self) -> bool {
+        self.held.key(0x1D) || self.held.key(0x11D)
+    }
+
+    fn win_held(&self) -> bool {
+        self.held.key(0x15B) || self.held.key(0x15C)
+    }
+
+    /// Flags no modifier contributes to.
+    fn base_flags(&self) -> u64 {
+        NX_NONCOALSESCEDMASK | if self.caps_lock { kCGEventFlagMaskAlphaShift } else { 0 }
+    }
+
+    /// A Windows shortcut as the Mac one that does the same: the Mac key and the modifiers to
+    /// send with it (and nothing else held), or `None` to send the key as it is.
+    fn pc_combo(&self, code: u16, vk: u16) -> Option<(u16, u64)> {
+        let (c, a, w) = (self.ctrl_held(), self.held.key(0x38) || self.held.key(0x138), self.win_held());
+        let s = self.held.key(0x2A) || self.held.key(0x36);
+        let sh = if s { SHIFT } else { 0 };
+        // Explorer's keys in Finder's file list (not while a name is being typed).
+        let finder = matches!(code, 0x153 | 0x1C | 0x3C | 0x0E | 0x148) && finder_files_focused();
+        Some(match code {
+            0x153 if finder && c && s => (0x33, CMD | SHIFT), // Ctrl+Shift+Delete: empty the Bin
+            0x153 if finder && s => (0x33, CMD | OPT),       // Shift+Delete: delete at once
+            0x153 if finder => (0x33, CMD),                  // Delete: to the Bin
+            0x1C if finder && a => (0x22, CMD),              // Alt+Enter: Get Info
+            0x1C if finder && !c => (0x7D, CMD),             // Enter: open
+            0x3C if finder && !c && !a => (0x24, 0),         // F2: rename
+            0x0E if finder && !c && !a => (0x21, CMD),       // Backspace: back
+            0x148 if finder && a => (0x7E, CMD),             // Alt+↑: up a folder
+            // The Windows key with a letter.
+            0x20 if w => (0x63, CMD),               // Win+D: show the desktop (⌘F3)
+            0x12 if w => (0x31, CMD | OPT),         // Win+E: a Finder window (⌥⌘Space)
+            0x26 if w => (0x0C, CMD | CTRL),        // Win+L: lock (⌃⌘Q)
+            0x13 if w => (0x31, CMD),               // Win+R: Spotlight
+            0x1F if w && s => (0x15, CMD | SHIFT),  // Win+Shift+S: screenshot of an area (⇧⌘4)
+            0x0F if w => (0x7E, CTRL),              // Win+Tab: Mission Control (⌃↑)
+            0x137 => (0x14, CMD | SHIFT),           // Print Screen: the whole screen (⇧⌘3)
+            0x3E if a && !c => (0x0C, CMD),         // Alt+F4: quit (⌘Q)
+            0x01 if c && s => (0x35, CMD | OPT),    // Ctrl+Shift+Esc: Force Quit (⌥⌘Esc)
+            0x15 if c && !s && !a => (0x06, CMD | SHIFT), // Ctrl+Y: redo (⇧⌘Z)
+            0x14B if a && !c => (0x21, CMD),        // Alt+←: back (⌘[)
+            0x14D if a && !c => (0x1E, CMD),        // Alt+→: forward (⌘])
+            // By word: ⌥ where Windows uses Ctrl.
+            0x0E | 0x153 | 0x14B | 0x14D if c && !a => (vk, OPT | sh),
+            0x147 if c => (0x7E, CMD | sh), // Ctrl+Home: the top
+            0x147 => (0x7B, CMD | sh),      // Home: the line's start
+            0x14F if c => (0x7D, CMD | sh), // Ctrl+End: the end
+            0x14F => (0x7C, CMD | sh),      // End: the line's end
+            _ => return None,
+        })
+    }
+
+    fn post_key(&self, vk: u16, down: bool, flags: u64, flags_changed: bool) {
+        self.post_key_repeat(vk, down, flags, flags_changed, false);
+    }
+
+    fn post_key_repeat(&self, vk: u16, down: bool, mut flags: u64, flags_changed: bool, repeat: bool) {
         unsafe {
             let e = CGEventCreateKeyboardEvent(self.source, vk, down);
             if e.is_null() {
                 return;
             }
-            let mut flags = self.flags();
-            if let Some((add, remove)) = change {
-                flags = (flags | add) & !remove;
-            }
-            if is_keypad(vk) {
-                flags |= kCGEventFlagMaskNumericPad;
-            }
             if is_fn_key(vk) {
                 flags |= kCGEventFlagMaskSecondaryFn;
             }
-            if modifier {
+            if flags_changed {
                 // What a real keyboard sends for a modifier: a flags change, with the new state.
                 CGEventSetType(e, kCGEventFlagsChanged);
             }
@@ -384,6 +474,37 @@ fn clamp_to_displays(p: CGPoint) -> CGPoint {
         })
         .min_by(|a, b| (a.x - p.x).hypot(a.y - p.y).total_cmp(&(b.x - p.x).hypot(b.y - p.y)))
         .unwrap_or(p)
+}
+
+/// Whether Finder is in front with its files (not a name being typed or the search field) focused.
+fn finder_files_focused() -> bool {
+    use objc2_app_kit::NSWorkspace;
+    let finder = objc2::rc::autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .and_then(|a| a.bundleIdentifier())
+            .is_some_and(|id| id.to_string() == "com.apple.finder")
+    });
+    if !finder {
+        return false;
+    }
+    unsafe {
+        let Some(system) = ffi::Cf::owned(AXUIElementCreateSystemWide()) else { return true };
+        let focused_attr = ffi::Cf::string("AXFocusedUIElement");
+        let mut focused: CFTypeRef = std::ptr::null_mut();
+        if AXUIElementCopyAttributeValue(system.0, focused_attr.0, &mut focused) != 0 || focused.is_null() {
+            return true;
+        }
+        let focused = ffi::Cf(focused);
+        let role_attr = ffi::Cf::string("AXRole");
+        let mut role: CFTypeRef = std::ptr::null_mut();
+        if AXUIElementCopyAttributeValue(focused.0, role_attr.0, &mut role) != 0 || role.is_null() {
+            return true;
+        }
+        let role = ffi::Cf(role);
+        let name = (*(role.0 as *const objc2_foundation::NSString)).to_string();
+        !matches!(name.as_str(), "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox")
+    }
 }
 
 fn is_modifier(code: u16) -> bool {

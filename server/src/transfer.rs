@@ -2,7 +2,7 @@
 //!
 //! Text copied on either machine appears on the other. Files sent from the
 //! client are saved in the logged-in user's `Downloads\DisplayWire` folder (`~/Downloads/DisplayWire`
-//! on a Mac).
+//! on a Mac); files the server's user sends (the Mac's menu bar) go to the client's.
 //! Everything arrives through the authenticated session; `--no-files` and
 //! `--no-clipboard` turn the two features off.
 
@@ -15,15 +15,19 @@ use std::time::Duration;
 
 use proto::stream::Msg;
 use timing::now_ns;
-use xfer::{Bytes, Endpoint, Event, Kind, Meta, Outgoing, Sink};
+use xfer::{Bytes, Endpoint, Event, Kind, Meta, Outgoing, Sink, safe_file_name, unique_path};
 
 use crate::Shared;
 
 /// Clipboard text beyond this is neither sent nor accepted.
 const MAX_CLIPBOARD: u64 = 1 << 20;
 const CLIPBOARD_POLL_NS: u64 = 250_000_000;
-/// Uploads to the client (there are none yet) and clipboard text go at this rate.
-const SEND_RATE: u64 = 5_000_000;
+/// Files to the client and clipboard text go at no more than this (bytes a second), so they
+/// can't starve the video.
+const SEND_RATE: u64 = 8_000_000;
+
+/// The one set of transfers, for sending a file from elsewhere (the menu bar).
+static TRANSFERS: std::sync::OnceLock<Arc<Transfers>> = std::sync::OnceLock::new();
 
 pub struct Options {
     pub clipboard: bool,
@@ -65,11 +69,36 @@ impl Transfers {
     pub fn new(options: Options) -> Arc<Transfers> {
         let options = Arc::new(options);
         let (slot, last_dir) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
-        Arc::new(Transfers { endpoint: Mutex::new(make_endpoint(&options, &slot, &last_dir)), options, slot, last_dir })
+        let t = Arc::new(Transfers { endpoint: Mutex::new(make_endpoint(&options, &slot, &last_dir)), options, slot, last_dir });
+        let _ = TRANSFERS.set(t.clone());
+        t
+    }
+
+    /// Starts sending a file to the connected client, which saves it in its Downloads folder.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn send_file(path: &Path) -> Result<(), String> {
+        let t = TRANSFERS.get().ok_or("transfers aren't running")?;
+        if !t.options.files {
+            return Err("file transfer is off (--no-files)".into());
+        }
+        let file = File::open(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+        let md = file.metadata().map_err(|e| e.to_string())?;
+        if !md.is_file() {
+            return Err(format!("{} is a folder: zip it first", path.display()));
+        }
+        let name = path.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+        println!("sending {name} ({} bytes) to the client", md.len());
+        t.endpoint.lock().unwrap().send(Meta { kind: Kind::File, size: md.len(), name }, Box::new(file));
+        Ok(())
     }
 
     /// A transfer message from the client; returns what to send back.
     pub fn handle(&self, now: u64, msg: &Msg) -> Vec<Outgoing> {
+        match *msg {
+            Msg::Xfer { id, index: 0, .. } => println!("transfer {id}: starting"),
+            Msg::XferCancel { id, reason } => println!("transfer {id}: the client stopped it (reason {reason})"),
+            _ => {}
+        }
         let mut e = self.endpoint.lock().unwrap();
         transport::transfer::handle(&mut e, now, msg).unwrap_or_default()
     }
@@ -125,7 +154,15 @@ impl Transfers {
                         println!("received {} ({} bytes) in {dir}", meta.name, meta.size);
                         platform::notify(&format!("Received {}", meta.name));
                     }
-                    Event::ReceiveFailed { why, .. } => eprintln!("transfer from the client failed: {why}"),
+                    Event::ReceiveFailed { why, .. } => println!("transfer from the client failed: {why}"),
+                    Event::Sent { meta, .. } if meta.kind == Kind::File => {
+                        println!("sent {}", meta.name);
+                        platform::notify(&format!("Sent {}", meta.name));
+                    }
+                    Event::SendFailed { meta, why, .. } if meta.kind == Kind::File => {
+                        println!("sending {} failed: {why}", meta.name);
+                        platform::notify(&format!("Couldn't send {}: {why}", meta.name));
+                    }
                     Event::Sent { .. } | Event::SendFailed { .. } => {}
                 }
             }
@@ -209,46 +246,6 @@ impl Sink for FileSink {
         drop(file);
         let _ = platform::as_user(|| std::fs::remove_file(&part));
     }
-}
-
-/// A file name that can't escape the folder or collide with a Windows device name.
-pub fn safe_file_name(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
-    let mut clean: String = base.chars().filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c)).collect();
-    clean = clean.trim_matches([' ', '.']).to_string();
-    let stem = clean.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
-    if clean.is_empty() {
-        return "file".into();
-    }
-    if reserved {
-        clean.insert(0, '_');
-    }
-    // Keep the extension when shortening.
-    if clean.chars().count() > 150 {
-        let ext: String = clean.rsplit_once('.').filter(|(_, e)| e.len() <= 12).map(|(_, e)| format!(".{e}")).unwrap_or_default();
-        let keep = 150 - ext.chars().count();
-        clean = clean.chars().take(keep).collect::<String>() + &ext;
-    }
-    clean
-}
-
-/// `name`, or `name (1)`, `name (2)`… if that exists already.
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
-        _ => (name.to_string(), String::new()),
-    };
-    let taken = |p: &Path| p.exists() || p.with_file_name(format!("{}.part", p.file_name().unwrap().to_string_lossy())).exists();
-    let first = dir.join(name);
-    if !taken(&first) {
-        return first;
-    }
-    (1..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !taken(p))
-        .unwrap()
 }
 
 #[cfg(windows)]

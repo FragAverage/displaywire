@@ -2,7 +2,8 @@
 //!
 //! Text copied on the Mac appears on the PC and the other way round (skipping
 //! anything a password manager marks as concealed). Files dropped on the window
-//! or chosen from the menu are sent to the PC's Downloads folder.
+//! or chosen from the menu are sent to the other computer's Downloads folder, and
+//! files it sends (a Mac server's menu bar) land in `Downloads/DisplayWire` here.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -27,6 +28,8 @@ const MAX_CLIPBOARD: u64 = 1 << 20;
 /// Files go out at no more than this, so they can't starve the video.
 const SEND_RATE: u64 = 8_000_000;
 const CLIPBOARD_POLL_NS: u64 = 250 * MS;
+/// Largest file accepted from the other computer.
+const MAX_FILE: u64 = 16 << 30;
 
 pub struct Transfers {
     endpoint: Mutex<Endpoint>,
@@ -40,14 +43,60 @@ pub struct Transfers {
 
 fn make_endpoint(slot: &Arc<Mutex<Vec<u8>>>) -> Endpoint {
     let slot = slot.clone();
-    Endpoint::new(MAX_CLIPBOARD, SEND_RATE, move |meta| {
-        // Only clipboard text comes this way: the PC sends no files.
-        if meta.kind != Kind::Clipboard || meta.size > MAX_CLIPBOARD {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not accepted"));
+    Endpoint::new(MAX_FILE, SEND_RATE, move |meta| match meta.kind {
+        Kind::Clipboard if meta.size <= MAX_CLIPBOARD => {
+            slot.lock().unwrap().clear();
+            Ok(Box::new(ClipboardSink(slot.clone())) as Box<dyn Sink>)
         }
-        slot.lock().unwrap().clear();
-        Ok(Box::new(ClipboardSink(slot.clone())) as Box<dyn Sink>)
+        Kind::File if meta.size <= MAX_FILE => Ok(Box::new(FileSink::create(&meta.name)?) as Box<dyn Sink>),
+        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not accepted")),
     })
+}
+
+/// Where received files go: `Downloads/DisplayWire` in the user's folder.
+pub fn received_dir() -> std::io::Result<std::path::PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .ok_or_else(|| std::io::Error::other("no home folder"))?;
+    Ok(std::path::PathBuf::from(home).join("Downloads").join("DisplayWire"))
+}
+
+/// A file being received: written to `<name>.part`, renamed when complete.
+struct FileSink {
+    file: std::fs::File,
+    part: std::path::PathBuf,
+    dest: std::path::PathBuf,
+}
+
+impl FileSink {
+    fn create(name: &str) -> std::io::Result<FileSink> {
+        let dir = received_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let dest = xfer::unique_path(&dir, &xfer::safe_file_name(name));
+        let part = dest.with_file_name(format!("{}.part", dest.file_name().unwrap().to_string_lossy()));
+        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&part)?;
+        Ok(FileSink { file, part, dest })
+    }
+}
+
+impl Sink for FileSink {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(data)
+    }
+
+    fn finish(self: Box<Self>) -> std::io::Result<()> {
+        let FileSink { file, part, dest } = *self;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&part, &dest)
+    }
+
+    fn abort(self: Box<Self>) {
+        let FileSink { file, part, .. } = *self;
+        drop(file);
+        let _ = std::fs::remove_file(&part);
+    }
 }
 
 impl Transfers {
@@ -145,6 +194,11 @@ impl Transfers {
                         }
                     }
                     Event::Sent { meta, .. } if meta.kind == Kind::File => message = Some((format!("Sent {}", meta.name), 3_000)),
+                    Event::Received { meta, .. } if meta.kind == Kind::File => {
+                        let place = if cfg!(windows) { "Downloads\\DisplayWire" } else { "Downloads/DisplayWire" };
+                        message = Some((format!("Received {} (in {place})", meta.name), 6_000));
+                    }
+                    Event::ReceiveFailed { why, .. } => message = Some((format!("Couldn't receive a file: {why}"), 7_000)),
                     Event::SendFailed { meta, why, .. } if meta.kind == Kind::File => {
                         message = Some((format!("Couldn't send {}: {why}", meta.name), 7_000));
                     }
@@ -161,15 +215,22 @@ impl Transfers {
             } else if clear_at > now {
                 // A final message is still up.
             } else {
-                let files: Vec<_> = self.endpoint.lock().unwrap().active().into_iter().filter(|a| a.1 && a.2 == Kind::File).collect();
-                let line = (!files.is_empty()).then(|| {
-                    let (done, total) = files.iter().fold((0, 0), |(d, t), a| (d + a.3, t + a.4));
-                    let pct = (done * 100).checked_div(total).unwrap_or(100);
-                    match files.as_slice() {
-                        [one] => format!("Sending {}… {pct}%", one.5),
-                        many => format!("Sending {} files… {pct}%", many.len()),
-                    }
-                });
+                let active = self.endpoint.lock().unwrap().active();
+                let progress = |sending: bool, verb: &str| {
+                    let files: Vec<_> = active.iter().filter(|a| a.1 == sending && a.2 == Kind::File).collect();
+                    (!files.is_empty()).then(|| {
+                        let (done, total) = files.iter().fold((0, 0), |(d, t), a| (d + a.3, t + a.4));
+                        let pct = (done * 100).checked_div(total).unwrap_or(100);
+                        match files.as_slice() {
+                            [one] => format!("{verb} {}… {pct}%", one.5),
+                            many => format!("{verb} {} files… {pct}%", many.len()),
+                        }
+                    })
+                };
+                let line = match (progress(true, "Sending"), progress(false, "Receiving")) {
+                    (Some(a), Some(b)) => Some(format!("{a}  ·  {b}")),
+                    (a, b) => a.or(b),
+                };
                 if line != showing {
                     self.notice(line.clone());
                     showing = line;

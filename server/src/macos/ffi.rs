@@ -191,6 +191,8 @@ unsafe extern "C" {
     pub static kAXTrustedCheckOptionPrompt: CFTypeRef;
     pub fn AXIsProcessTrusted() -> bool;
     pub fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> bool;
+    pub fn AXUIElementCreateSystemWide() -> CFTypeRef;
+    pub fn AXUIElementCopyAttributeValue(element: CFTypeRef, attribute: CFTypeRef, value: *mut CFTypeRef) -> i32;
 }
 
 /// An owned CoreFoundation object.

@@ -155,7 +155,7 @@ fn style(ctx: &egui::Context) {
     ctx.style_mut(|s| {
         s.spacing.item_spacing = vec2(10.0, 10.0);
         s.spacing.button_padding = vec2(12.0, 6.0);
-        for (_, font) in s.text_styles.iter_mut() {
+        for font in s.text_styles.values_mut() {
             font.size = font.size.max(14.5);
         }
     });
@@ -299,7 +299,7 @@ impl Launcher {
         let mut act: Option<(usize, &str)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, row) in self.rows.iter().enumerate() {
-                egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, LINE)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(16, 12)).show(
+                egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(16, 12)).show(
                     ui,
                     |ui| {
                         ui.horizontal(|ui| {
@@ -565,7 +565,7 @@ impl eframe::App for Launcher {
                 View::List => self.list(ctx, ui),
                 _ => {
                     ui.add_space(8.0);
-                    egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, LINE)).corner_radius(CornerRadius::same(12)).inner_margin(Margin::same(20)).show(ui, |ui| {
+                    egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(CornerRadius::same(12)).inner_margin(Margin::same(20)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         self.dialog(ctx, ui);
                     });

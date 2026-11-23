@@ -27,10 +27,21 @@ jobs:
             target/aarch64-apple-darwin/release/displaywire-client target/x86_64-apple-darwin/release/displaywire-client
           scripts/bundle-mac.sh dist/displaywire-client dist
           ditto -c -k --keepParent dist/DisplayWire.app dist/DisplayWire-macos.zip
+      - name: Build universal DisplayWire Server.app
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release -p displaywire-server --target $t
+          done
+          lipo -create -output dist/displaywire-server \
+            target/aarch64-apple-darwin/release/displaywire-server target/x86_64-apple-darwin/release/displaywire-server
+          scripts/bundle-mac-server.sh dist/displaywire-server dist
+          ditto -c -k --keepParent "dist/DisplayWire Server.app" dist/DisplayWire-Server-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: client
-          path: dist/DisplayWire-macos.zip
+          path: |
+            dist/DisplayWire-macos.zip
+            dist/DisplayWire-Server-macos.zip
 
   server:
     runs-on: windows-2025
@@ -85,5 +96,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$GITHUB_REF_NAME" dist/DisplayWire-macos.zip dist/DisplayWire-windows.zip dist/displaywire-server-windows.zip dist/latest.txt dist/latest.txt.sig
+          gh release create "$GITHUB_REF_NAME" dist/DisplayWire-macos.zip dist/DisplayWire-Server-macos.zip dist/DisplayWire-windows.zip dist/displaywire-server-windows.zip dist/latest.txt dist/latest.txt.sig
           --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

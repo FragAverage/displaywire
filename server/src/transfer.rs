@@ -1,7 +1,8 @@
 //! Clipboard sharing and file upload: the server's side of `xfer`.
 //!
 //! Text copied on either machine appears on the other. Files sent from the
-//! client are saved in the logged-in user's `Downloads\DisplayWire` folder.
+//! client are saved in the logged-in user's `Downloads\DisplayWire` folder (`~/Downloads/DisplayWire`
+//! on a Mac).
 //! Everything arrives through the authenticated session; `--no-files` and
 //! `--no-clipboard` turn the two features off.
 
@@ -258,9 +259,14 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 mod platform {
-    //! Off Windows (the `--file` test mode): files go to `~/Downloads/DisplayWire`, no clipboard.
+    pub use crate::macos::shell::{as_user, clipboard_sequence, clipboard_text, notify, set_clipboard_text, uploads_dir};
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod platform {
+    //! Elsewhere (the `--file` test mode): files go to `~/Downloads/DisplayWire`, no clipboard.
     use std::io;
     use std::path::PathBuf;
 

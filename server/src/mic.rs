@@ -1,11 +1,11 @@
 //! The client's microphone: datagrams arrive on the control thread and are
 //! queued for the platform's renderer, which plays them into a virtual audio
-//! cable (see `windows::micout`).
+//! cable (see `windows::micout`, `macos::micout`).
 
 use proto::stream::AUDIO_CHANNELS;
 
 /// About 200 ms of audio: enough to ride out a stalled renderer, short enough not to matter.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 const RING_FRAMES: usize = 9600;
 
 pub struct Sink {
@@ -17,7 +17,7 @@ pub struct Sink {
     reported_ns: u64,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub fn channel() -> (Sink, rtrb::Consumer<i16>) {
     let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * AUDIO_CHANNELS);
     (Sink { producer, last_seq: None, chunks: 0, peak: 0, reported_ns: 0 }, consumer)

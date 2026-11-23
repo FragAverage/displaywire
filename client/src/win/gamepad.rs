@@ -52,14 +52,14 @@ impl Poller {
         }
         let focused = self.focused.load(Relaxed);
         let mut pads = Pads::default();
-        for slot in 0..MAX_PADS {
-            if !self.connected[slot] && !scan {
+        for (slot, connected) in self.connected.iter_mut().enumerate().take(MAX_PADS) {
+            if !*connected && !scan {
                 continue;
             }
             let mut state = XINPUT_STATE::default();
             let here = unsafe { XInputGetState(slot as u32, &mut state) } == 0;
-            if here != self.connected[slot] {
-                self.connected[slot] = here;
+            if here != *connected {
+                *connected = here;
                 println!("gamepad: player {} {}", slot + 1, if here { "connected" } else { "disconnected" });
             }
             if !here {

@@ -60,22 +60,40 @@ What differs from what was decided:
 - [ ] Signed updates for the Windows client (`dwsign` only signs the Mac app and the server), an icon, winget.
 - [ ] Our own D3D11VA decode, to drop the HEVC extension requirement.
 - [ ] Port the Mac launcher to the shared egui UI, or the Windows one to native: one of them should go.
-## 4. Mac server (agreed)
+## 4. Mac server (built 2026-11-23, tested on one MacBook Air over loopback)
 Decided: macOS 13+ (ScreenCaptureKit captures system audio, no loopback driver); menu-bar app started by a
 LaunchAgent at login, mirroring the Windows tray (no login-window streaming); virtual display comes with item 7.
-- [ ] Split `server/src` like the client: shared session/auth/pairing/transfer code, `windows/` and `macos/` sources.
-- [ ] Capture: `SCStream` of one display at native size and refresh rate, IOSurface-backed, cursor composited by SCK
-      (until item 6), frames only on change.
-- [ ] Encode: VideoToolbox HEVC, `RealTime`, `PrioritizeEncodingSpeedOverQuality`, low-latency rate control
-      (`EnableLowLatencyRateControl`), no B-frames, infinite GOP; reuse `crates/videotoolbox`.
-- [ ] Audio: SCK audio (exclude our own process) → the existing PCM16 path.
-- [ ] Mic: play into a virtual input device; decide on BlackHole vs our own Audio Server plug-in.
-- [ ] Input: `CGEventPost` for keys, mouse, wheel; Windows-key ↔ ⌘ mapping the other way round; Accessibility
-      permission prompt and a clear message when it's missing.
-- [ ] Clipboard (NSPasteboard, skip `org.nspasteboard.ConcealedType`) and received files into `~/Downloads/DisplayWire`.
-- [ ] Permissions UX: Screen Recording + Accessibility first-run walkthrough; pairing and device list in the menu bar.
-- [ ] Keep the Mac awake while streaming (`IOPMAssertion`); Bonjour/our discovery answer.
-- [ ] Packaging: same `.app` with a server mode, or a second app; Homebrew cask; signed updates.
+Built in `server/src/macos/`; `main.rs`, sessions, pairing, rate control and transfers are shared with Windows.
+Tested here: pairing (pairprobe), the Mac client against it (1920×1200 at 60 fps cap, capture → decoded ~9 ms on
+loopback, 0 decode errors), system audio arriving at the client, and by hand-run tests (`--ignored`) the pointer
+(absolute and relative), a modifier key and the clipboard. **Not yet tested from a PC**: the Windows client
+viewing and controlling the Mac (typing, shortcuts, double-clicks, scrolling, files, the mic into BlackHole).
+- [x] Split `server/src`: already shared apart from the platform parts; `macos/` sits beside `windows/`.
+- [x] Capture: `SCStream` of one display at its mode's pixel size, NV12 IOSurfaces, frames only on change
+      (`SCFrameStatus::Complete`), the newest kept; resolution changes followed every second (new encoder, keyframe).
+- [x] Encode: VideoToolbox HEVC (`crates/videotoolbox::Encoder`): hardware only, `RealTime`, no reordering, no periodic
+      keyframes, `EnableLowLatencyRateControl` when offered, `PrioritizeEncodingSpeedOverQuality`, Annex B with AUD.
+      Low-latency rate control alone made ~12 KB keyframes (smeared text): `MaxAllowedFrameQP` 30 fixes that
+      (~95 KB at 1920×1200), and a still screen is encoded once more after 250 ms to sharpen it.
+- [x] Audio: a second, audio-only `SCStream` (own process excluded) → PCM16 chunks.
+- [x] Mic: plays into BlackHole (`--mic-device`, default "BlackHole"), opened on its own thread (CoreAudio hung
+      opening it on the main thread). Our own Audio Server plug-in: not now.
+- [x] Input: `CGEventPost` at the HID tap; scancode → Mac key code by position (Windows key = ⌘, Alt = ⌥); modifiers as
+      flags-changed events with the flags set on every event; click counts for double clicks; pixel scrolling;
+      relative motion with deltas for games; Accessibility prompt and a clear message when it's missing.
+- [x] Pointer for `CAP_CURSOR` clients from `NSCursor.currentSystemCursor` (deprecated: falls back to drawing it in the
+      video if macOS stops giving it).
+- [x] Clipboard (NSPasteboard, skips `org.nspasteboard.ConcealedType`/`TransientType`); files into `~/Downloads/DisplayWire`.
+- [x] Menu bar: status, copy address, received files, pair / manage (the egui window, now built on macOS too), Start
+      at Login, shortcuts to the missing permissions, log, quit. Waits and retries until Screen Recording is allowed.
+- [x] Keeps the display awake while a client is connected (`IOPMAssertion`); discovery is the shared UDP answer.
+- [x] Packaging: `DisplayWire Server.app` (`scripts/bundle-mac-server.sh`, LSUIElement), `--install-service` /
+      `--uninstall-service` write and remove the LaunchAgent; the release workflow builds it universal and zips it.
+- [ ] Test from a PC (Windows client) and from another Mac; a Retina (2×) display; two displays; sleep/wake.
+- [ ] Gamepads into the Mac (no ViGEm equivalent: a DriverKit virtual HID device, or skip).
+- [ ] Signed updates and a Homebrew cask for the server app; notarization (needs the Developer account, item 11).
+- [ ] Display names: "Built-in Display" / "Display N" for now (NSScreen's names need the main thread).
+- [ ] Bonjour, if the shared discovery isn't enough.
 ## 5. Adaptive bitrate + reference-frame invalidation (done 2026-11-03, tested)
 Decided: the Settings bitrate becomes a ceiling and the server adapts below it ("fixed" checkbox keeps today's
 behaviour); controller on one-way delay plus loss; reference-frame invalidation for lost frames with a keyframe as
@@ -122,7 +140,7 @@ Display Driver (MIT); add a mode matching the client's size and refresh when con
 - [ ] 7c VDD: installer offers it; on connect, add a mode for the client display (e.g. 3024×1964@120), optionally make
       it primary and turn physical screens off for the session ("headless mode" setting); restore on disconnect,
       including after a crash (persist what we changed).
-- [ ] Mac server (item 4): `CGVirtualDisplay` equivalent.
+- [ ] Mac server (item 4, built): `CGVirtualDisplay` equivalent.
 - [ ] `lg-proto` is protocol 5: rebase it onto protocol 6 before the TV can stream from this server again.
 
 ## 8. HDR and AV1 (agreed)

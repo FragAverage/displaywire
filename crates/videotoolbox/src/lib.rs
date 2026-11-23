@@ -6,8 +6,11 @@
 use std::ffi::{c_char, c_void};
 use std::ptr;
 
-type CFTypeRef = *const c_void;
-type OSStatus = i32;
+mod encode;
+pub use encode::{EncodedFrame, Encoder};
+
+pub(crate) type CFTypeRef = *const c_void;
+pub(crate) type OSStatus = i32;
 
 pub const CODEC_HEVC: u32 = u32::from_be_bytes(*b"hvc1");
 pub const CODEC_AV1: u32 = u32::from_be_bytes(*b"av01");
@@ -20,11 +23,11 @@ const CF_STRING_UTF8: u32 = 0x0800_0100;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CMTime {
-    value: i64,
-    timescale: i32,
-    flags: u32,
-    epoch: i64,
+pub(crate) struct CMTime {
+    pub value: i64,
+    pub timescale: i32,
+    pub flags: u32,
+    pub epoch: i64,
 }
 
 #[repr(C)]
@@ -34,7 +37,7 @@ struct CMVideoDimensions {
 }
 
 #[repr(C)]
-struct Opaque {
+pub(crate) struct Opaque {
     _p: [u8; 0],
 }
 
@@ -50,15 +53,19 @@ struct OutputCallbackRecord {
 unsafe extern "C" {
     static kCFTypeDictionaryKeyCallBacks: Opaque;
     static kCFTypeDictionaryValueCallBacks: Opaque;
-    static kCFBooleanTrue: CFTypeRef;
+    pub(crate) static kCFBooleanTrue: CFTypeRef;
+    pub(crate) static kCFBooleanFalse: CFTypeRef;
     static kCFAllocatorNull: CFTypeRef;
     fn CFDictionaryCreateMutable(alloc: CFTypeRef, cap: isize, k: *const Opaque, v: *const Opaque) -> CFTypeRef;
-    fn CFDictionarySetValue(dict: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
+    pub(crate) fn CFDictionarySetValue(dict: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
+    pub(crate) fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    pub(crate) fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    pub(crate) fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
     fn CFDataCreate(alloc: CFTypeRef, bytes: *const u8, len: isize) -> CFTypeRef;
     fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
     fn CFNumberCreate(alloc: CFTypeRef, ty: isize, value: *const c_void) -> CFTypeRef;
-    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
-    fn CFRelease(cf: CFTypeRef);
+    pub(crate) fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+    pub(crate) fn CFRelease(cf: CFTypeRef);
 }
 
 #[link(name = "CoreMedia", kind = "framework")]
@@ -142,7 +149,7 @@ unsafe extern "C" {
 }
 
 /// Owned (retained) CoreFoundation object.
-pub struct Cf(CFTypeRef);
+pub struct Cf(pub(crate) CFTypeRef);
 
 // CF objects used here are immutable after creation and thread-safe to retain/release.
 unsafe impl Send for Cf {}
@@ -168,12 +175,23 @@ impl Drop for Cf {
     }
 }
 
-fn check(status: OSStatus, what: &str) -> Result<(), String> {
+pub(crate) fn check(status: OSStatus, what: &str) -> Result<(), String> {
     if status == 0 { Ok(()) } else { Err(format!("{what} failed: OSStatus {status}")) }
 }
 
-fn dict() -> Cf {
+pub(crate) fn dict() -> Cf {
     Cf(unsafe { CFDictionaryCreateMutable(ptr::null(), 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) })
+}
+
+/// A CFNumber holding a 32-bit integer.
+pub(crate) fn number_i32(v: i32) -> Cf {
+    Cf(unsafe { CFNumberCreate(ptr::null(), CF_NUMBER_SINT32, &v as *const i32 as *const c_void) })
+}
+
+/// A CFNumber holding a double.
+pub(crate) fn number_f64(v: f64) -> Cf {
+    const CF_NUMBER_FLOAT64: isize = 6;
+    Cf(unsafe { CFNumberCreate(ptr::null(), CF_NUMBER_FLOAT64, &v as *const f64 as *const c_void) })
 }
 
 fn fourcc(f: u32) -> String {

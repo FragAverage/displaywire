@@ -52,7 +52,7 @@ fn make_endpoint(slot: &Arc<Mutex<Vec<u8>>>, inbox: &Option<Arc<Mutex<Inbox>>>) 
             Ok(Box::new(ClipboardSink(slot.clone())) as Box<dyn Sink>)
         }
         Kind::File if meta.size <= MAX_FILE => Ok(Box::new(FileSink::create(&meta.name)?) as Box<dyn Sink>),
-        Kind::ClipboardFile if meta.size <= MAX_FILE && let Some(inbox) = &inbox => inbox.lock().unwrap().sink(meta),
+        Kind::ClipboardFile if meta.size <= MAX_FILE && inbox.is_some() => inbox.as_ref().unwrap().lock().unwrap().sink(meta),
         _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not accepted")),
     })
 }

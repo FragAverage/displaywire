@@ -359,6 +359,7 @@ pub fn start_background(shared: Arc<Shared>) {
         );
     }
     virtual_display::load_setting();
+    input::load_pc_shortcuts();
     {
         let shared = shared.clone();
         let _ = std::thread::Builder::new().name("virtual-display".into()).spawn(move || {

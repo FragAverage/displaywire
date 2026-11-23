@@ -94,6 +94,11 @@ define_class!(
             super::virtual_display::set_enabled(!super::virtual_display::enabled());
         }
 
+        #[unsafe(method(togglePcShortcuts:))]
+        fn toggle_pc_shortcuts(&self, _sender: Option<&AnyObject>) {
+            super::input::set_pc_shortcuts(!super::input::pc_shortcuts());
+        }
+
         #[unsafe(method(openPrivacy:))]
         fn open_privacy(&self, sender: Option<&NSMenuItem>) {
             let pane = if sender.is_some_and(|s| s.tag() == 1) { "Privacy_Accessibility" } else { "Privacy_ScreenCapture" };
@@ -162,6 +167,8 @@ impl Menu {
         if !screen || !input {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
         }
+        let pc = self.item(menu, "PC Shortcuts (Ctrl Works as ⌘)", Some(sel!(togglePcShortcuts:)), 0);
+        pc.setState(if super::input::pc_shortcuts() { NSControlStateValueOn } else { NSControlStateValueOff });
         if super::virtual_display::available() {
             let v = self.item(menu, "Virtual Display While Connected", Some(sel!(toggleVirtual:)), 0);
             v.setState(if super::virtual_display::enabled() { NSControlStateValueOn } else { NSControlStateValueOff });

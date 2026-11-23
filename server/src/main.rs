@@ -1202,6 +1202,10 @@ fn control(
                         println!("{from}: connected ({name})");
                         store.touch(&p.client, from);
                     }
+                    // The virtual display first, so the monitors the client is told about include it
+                    // and the window it reopens on it finds it.
+                    #[cfg(target_os = "macos")]
+                    macos::virtual_display::on_connect();
                     *shared.link.lock().unwrap() = Some(link.clone());
                     shared.caps.store(p.caps, Relaxed);
                     shared.last_seen_ns.store(now, Relaxed);

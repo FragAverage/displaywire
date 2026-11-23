@@ -127,6 +127,16 @@ pub fn create() -> Result<u32, String> {
     }
 }
 
+/// A client connected: adds it now if it's switched on (the background thread would, a moment
+/// later, after the client had already asked for its window).
+pub fn on_connect() {
+    if enabled()
+        && let Err(e) = create()
+    {
+        println!("virtual display: {e}");
+    }
+}
+
 /// Removes it; the windows on it move to the other screens.
 pub fn remove() {
     if let Some(l) = LIVE.lock().unwrap().take() {

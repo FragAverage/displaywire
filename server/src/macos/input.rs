@@ -9,6 +9,34 @@ use proto::stream::{BUTTON_BACK, BUTTON_FORWARD, BUTTON_LEFT, BUTTON_MIDDLE, BUT
 use super::ffi::{self, *};
 
 const SEC: u64 = 1_000_000_000;
+
+/// PC shortcuts: Ctrl works as ⌘ (and the Windows key as Control), and Windows' text keys do
+/// what they do there: Ctrl+Backspace/Delete/←/→ by word, Home/End to the line's ends,
+/// Ctrl+Home/End to the document's. On unless switched off in the menu bar, which a Mac
+/// client (whose ⌘ arrives as the Windows key) wants.
+static PC_SHORTCUTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn pc_shortcuts_off_path() -> std::path::PathBuf {
+    crate::auth::default_dir().join("pc-shortcuts-off")
+}
+
+pub fn load_pc_shortcuts() {
+    PC_SHORTCUTS.store(!pc_shortcuts_off_path().exists(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn pc_shortcuts() -> bool {
+    PC_SHORTCUTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_pc_shortcuts(on: bool) {
+    PC_SHORTCUTS.store(on, std::sync::atomic::Ordering::Relaxed);
+    let path = pc_shortcuts_off_path();
+    let _ = if on {
+        std::fs::remove_file(&path)
+    } else {
+        std::fs::create_dir_all(path.parent().unwrap()).and_then(|()| std::fs::write(&path, b"off\n"))
+    };
+}
 /// Everything is released if the client goes quiet this long (it sends its state at least every 50 ms).
 const IDLE_RELEASE_NS: u64 = SEC / 2;
 /// The client's scroll unit (120 per notch) in pixels, as the Mac client converts the other way.
@@ -29,6 +57,9 @@ pub struct Injector {
     /// The last button pressed: which, when, where, and its click count.
     last_click: Option<(u8, u64, CGPoint, i64)>,
     trusted_checked: bool,
+    /// Keys sent as something else (PC shortcuts): scancode → the Mac key and flags it went
+    /// down as, so it comes up the same way.
+    translated: std::collections::HashMap<u16, (u16, (u64, u64))>,
 }
 
 // The event source is only used from the control thread.
@@ -46,6 +77,7 @@ impl Injector {
             scroll_rest: (0.0, 0.0),
             last_click: None,
             trusted_checked: false,
+            translated: std::collections::HashMap::new(),
         }
     }
 
@@ -126,15 +158,16 @@ impl Injector {
     fn flags(&self) -> u64 {
         let k = |c: u16| self.held.key(c);
         let mut f = NX_NONCOALSESCEDMASK;
+        let (ctrl, win) = if pc_shortcuts() { ((0x15B, 0x15C), (0x1D, 0x11D)) } else { ((0x1D, 0x11D), (0x15B, 0x15C)) };
         for (code, generic, side) in [
             (0x2A, kCGEventFlagMaskShift, NX_DEVICELSHIFTKEYMASK),
             (0x36, kCGEventFlagMaskShift, NX_DEVICERSHIFTKEYMASK),
-            (0x1D, kCGEventFlagMaskControl, NX_DEVICELCTLKEYMASK),
-            (0x11D, kCGEventFlagMaskControl, NX_DEVICERCTLKEYMASK),
+            (ctrl.0, kCGEventFlagMaskControl, NX_DEVICELCTLKEYMASK),
+            (ctrl.1, kCGEventFlagMaskControl, NX_DEVICERCTLKEYMASK),
             (0x38, kCGEventFlagMaskAlternate, NX_DEVICELALTKEYMASK),
             (0x138, kCGEventFlagMaskAlternate, NX_DEVICERALTKEYMASK),
-            (0x15B, kCGEventFlagMaskCommand, NX_DEVICELCMDKEYMASK),
-            (0x15C, kCGEventFlagMaskCommand, NX_DEVICERCMDKEYMASK),
+            (win.0, kCGEventFlagMaskCommand, NX_DEVICELCMDKEYMASK),
+            (win.1, kCGEventFlagMaskCommand, NX_DEVICERCMDKEYMASK),
         ] {
             if k(code) {
                 f |= generic | side;
@@ -147,7 +180,42 @@ impl Injector {
     }
 
     fn key(&mut self, code: u16, down: bool, repeat: bool) {
-        let Some(vk) = mac_key(code) else { return };
+        let Some(mut vk) = mac_key(code) else { return };
+        let pc = pc_shortcuts();
+        if pc {
+            vk = match code {
+                0x1D => 0x37,  // Left Control → Command
+                0x11D => 0x36, // Right Control → Right Command
+                0x15B => 0x3B, // Left Windows → Control
+                0x15C => 0x3E, // Right Windows → Right Control
+                _ => vk,
+            };
+        }
+        // Flags to add and take away for a key Windows treats differently (PC shortcuts).
+        let mut change: Option<(u64, u64)> = None;
+        if pc && !is_modifier(code) {
+            if !down && let Some((v, c)) = self.translated.remove(&code) {
+                (vk, change) = (v, Some(c));
+            } else if down {
+                let ctrl = self.held.key(0x1D) || self.held.key(0x11D);
+                let cmd = kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK | NX_DEVICERCMDKEYMASK;
+                let word = (kCGEventFlagMaskAlternate | NX_DEVICELALTKEYMASK, cmd);
+                let t = match (code, ctrl) {
+                    // Backspace, Delete, ← and → by word: ⌥ instead of ⌘.
+                    (0x0E | 0x153 | 0x14B | 0x14D, true) => Some((vk, word)),
+                    (0x147, false) => Some((0x7B, (kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK, 0))), // Home → ⌘←
+                    (0x14F, false) => Some((0x7C, (kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK, 0))), // End → ⌘→
+                    (0x147, true) => Some((0x7E, (0, 0))), // Ctrl+Home → ⌘↑
+                    (0x14F, true) => Some((0x7D, (0, 0))), // Ctrl+End → ⌘↓
+                    _ => None,
+                };
+                if let Some((v, c)) = t {
+                    vk = v;
+                    change = Some(c);
+                    self.translated.insert(code, (v, c));
+                }
+            }
+        }
         if code == 0x3A && down && !repeat {
             self.caps_lock = !self.caps_lock;
         }
@@ -161,6 +229,9 @@ impl Injector {
                 return;
             }
             let mut flags = self.flags();
+            if let Some((add, remove)) = change {
+                flags = (flags | add) & !remove;
+            }
             if is_keypad(vk) {
                 flags |= kCGEventFlagMaskNumericPad;
             }
@@ -535,5 +606,25 @@ mod live {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let flags = unsafe { CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) | CGEventSourceFlagsState(0) };
         assert!(flags & kCGEventFlagMaskShift == 0, "shift is stuck");
+    }
+
+    /// PC shortcuts: the PC's Ctrl is ⌘ on the Mac. Holds it for 50 ms (nothing else pressed).
+    #[test]
+    #[ignore]
+    fn pc_ctrl_is_command() {
+        super::set_pc_shortcuts(true);
+        let mut inj = Injector::new();
+        let mut input = Input { seq: 1, ..Input::default() };
+        input.set_key(0x1D, true);
+        inj.apply(&input, timing::now_ns());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (key, flags) = unsafe { (CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 0x37), CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)) };
+        input.seq = 2;
+        input.set_key(0x1D, false);
+        inj.apply(&input, timing::now_ns());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(key && flags & kCGEventFlagMaskCommand != 0 && flags & kCGEventFlagMaskControl == 0, "Ctrl didn't arrive as ⌘");
+        let flags = unsafe { CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) };
+        assert!(flags & kCGEventFlagMaskCommand == 0, "⌘ is stuck");
     }
 }

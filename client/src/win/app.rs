@@ -434,8 +434,8 @@ impl App {
             }
             Action::Shortcuts => dialog::show_message(
                 "Keyboard shortcuts",
-                "Ctrl+Alt+F    Full screen\n\
-                 Ctrl+Shift+W  Full screen for every window of the PC, or back to windows\n\
+                "Ctrl+Alt+F    Full screen (this window)\n\
+                 Ctrl+Shift+W  Full screen (this window)\n\
                  Ctrl+Alt+M    Capture or release the pointer (for games)\n\
                  Ctrl+Alt+A    Open every monitor of the PC, each in its own window\n\
                  Ctrl+Alt+S    Show or hide the stats graph\n\
@@ -814,11 +814,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 let down = event.state == ElementState::Pressed;
-                // Ctrl+Shift+W: every stream window in or out of full screen. Neither press nor
-                // release goes to the PC.
+                // Ctrl+Shift+W: this window in or out of full screen, like Ctrl+Alt+F. Neither
+                // press nor release goes to the PC.
                 if code == KeyCode::KeyW && self.modifiers.control_key() && self.modifiers.shift_key() && !self.modifiers.alt_key() {
                     if down && !event.repeat {
-                        self.on_menu(el, menu::Action::FullScreenAll);
+                        self.on_menu(el, menu::Action::FullScreen);
                     }
                     return;
                 }

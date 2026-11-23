@@ -105,8 +105,8 @@ impl Menu {
             separator(connection);
             add(connection, Action::Disconnect, "Disconnect\tCtrl+Alt+D");
             let view = CreatePopupMenu().unwrap_or_default();
-            add(view, Action::FullScreen, "Full Screen\tCtrl+Alt+F");
-            add(view, Action::FullScreenAll, "Full Screen (All Windows)\tCtrl+Shift+W");
+            add(view, Action::FullScreen, "Full Screen\tCtrl+Shift+W");
+            add(view, Action::FullScreenAll, "Full Screen (All Windows)");
             add(view, Action::Capture, "Capture Pointer (for games)\tCtrl+Alt+M");
             add(view, Action::ToggleStats, "Show Stats\tCtrl+Alt+S");
             separator(view);

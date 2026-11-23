@@ -123,7 +123,7 @@ The Windows client has the same list of PCs, pairing and settings, and a menu ba
 |---|---|
 | **Ctrl+Alt+M** | Capture or release the mouse |
 | **Ctrl+Alt+F** | Full screen (for the stream window that has focus) |
-| **Ctrl+Shift+W** | Full screen for every stream window at once (each on its own monitor), or back to windows |
+| **Ctrl+Shift+W** | The same as Ctrl+Alt+F (View › Full Screen (All Windows) does every window at once) |
 | **Ctrl+Alt+A** | Open every monitor of the PC, each in a window of its own |
 | **Ctrl+Alt+S** | Show or hide the stats graph |
 | **Ctrl+Alt+V** | Microphone on or off |

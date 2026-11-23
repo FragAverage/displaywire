@@ -41,14 +41,14 @@ pub struct Transfers {
     options: Arc<Options>,
     /// Clipboard text arriving from the client.
     slot: Arc<Mutex<Vec<u8>>>,
-    /// Folder uploads go to, once known.
-    last_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Where the last upload was saved.
+    last_saved: Arc<Mutex<Option<PathBuf>>>,
     /// Files copied on the client, waiting to be pasted here.
     inbox: Option<Arc<Mutex<Inbox>>>,
 }
 
-fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &Arc<Mutex<Option<PathBuf>>>, inbox: &Option<Arc<Mutex<Inbox>>>) -> Endpoint {
-    let (opts, slot, last_dir, inbox) = (options.clone(), slot.clone(), last_dir.clone(), inbox.clone());
+fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_saved: &Arc<Mutex<Option<PathBuf>>>, inbox: &Option<Arc<Mutex<Inbox>>>) -> Endpoint {
+    let (opts, slot, last_saved, inbox) = (options.clone(), slot.clone(), last_saved.clone(), inbox.clone());
     Endpoint::new(options.max_file_bytes.max(MAX_CLIPBOARD), SEND_RATE, move |meta| match meta.kind {
         Kind::Clipboard => {
             if !opts.clipboard || meta.size > MAX_CLIPBOARD {
@@ -66,7 +66,7 @@ fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "file upload is off or the file is too large"));
             }
             let sink = FileSink::create(&meta.name)?;
-            *last_dir.lock().unwrap() = sink.dest.parent().map(Path::to_path_buf);
+            *last_saved.lock().unwrap() = Some(sink.dest.clone());
             Ok(Box::new(sink))
         }
     })
@@ -75,10 +75,10 @@ fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &
 impl Transfers {
     pub fn new(options: Options) -> Arc<Transfers> {
         let options = Arc::new(options);
-        let (slot, last_dir) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
+        let (slot, last_saved) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
         let inbox = platform::clipboard_files_dir().ok().map(Inbox::new);
-        let endpoint = Mutex::new(make_endpoint(&options, &slot, &last_dir, &inbox));
-        let t = Arc::new(Transfers { endpoint, options, slot, last_dir, inbox });
+        let endpoint = Mutex::new(make_endpoint(&options, &slot, &last_saved, &inbox));
+        let t = Arc::new(Transfers { endpoint, options, slot, last_saved, inbox });
         let _ = TRANSFERS.set(t.clone());
         t
     }
@@ -136,7 +136,7 @@ impl Transfers {
             if link.session.id() != session {
                 // A new session: whatever was in flight belonged to the last one.
                 if session != 0 {
-                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_dir, &self.inbox);
+                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_saved, &self.inbox);
                 }
                 session = link.session.id();
                 last_seq = platform::clipboard_sequence();
@@ -169,9 +169,12 @@ impl Transfers {
                         }
                     }
                     Event::Received { meta, .. } => {
-                        let dir = self.last_dir.lock().unwrap().clone().map(|d| d.display().to_string()).unwrap_or_default();
-                        println!("received {} ({} bytes) in {dir}", meta.name, meta.size);
+                        let saved = self.last_saved.lock().unwrap().clone();
+                        println!("received {} ({} bytes) as {}", meta.name, meta.size, saved.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
                         platform::notify(&format!("Received {}", meta.name));
+                        if let Some(p) = saved {
+                            platform::reveal(&p);
+                        }
                     }
                     Event::ReceiveFailed { why, .. } => println!("transfer from the client failed: {why}"),
                     Event::Sent { meta, .. } if meta.kind == Kind::File => {
@@ -280,6 +283,8 @@ mod platform {
     pub fn notify(text: &str) {
         crate::windows::tray::notify(text);
     }
+    /// The tray notification says where it is.
+    pub fn reveal(_: &std::path::Path) {}
     // Files on the clipboard aren't shared by the Windows server yet.
     pub fn clipboard_files() -> Option<Vec<std::path::PathBuf>> {
         None
@@ -295,8 +300,8 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     pub use crate::macos::shell::{
-        as_user, clipboard_files, clipboard_files_dir, clipboard_sequence, clipboard_text, notify, set_clipboard_files, set_clipboard_text,
-        uploads_dir,
+        as_user, clipboard_files, clipboard_files_dir, clipboard_sequence, clipboard_text, notify, reveal, set_clipboard_files,
+        set_clipboard_text, uploads_dir,
     };
 }
 
@@ -324,6 +329,7 @@ mod platform {
     pub fn clipboard_files_dir() -> io::Result<PathBuf> {
         Err(io::Error::other("no clipboard here"))
     }
+    pub fn reveal(_: &std::path::Path) {}
     pub fn uploads_dir() -> io::Result<PathBuf> {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no home directory"))?;
         Ok(PathBuf::from(home).join("Downloads/DisplayWire"))

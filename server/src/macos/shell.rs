@@ -88,6 +88,11 @@ pub fn notify(text: &str) {
     let _ = std::process::Command::new("/usr/bin/osascript").args(["-e", &script]).spawn();
 }
 
+/// Shows a file in a Finder window, selected.
+pub fn reveal(path: &std::path::Path) {
+    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+}
+
 /// Opens a folder in the Finder.
 pub fn open(path: &std::path::Path) {
     let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();

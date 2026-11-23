@@ -1,4 +1,5 @@
-//! Files copied to the clipboard on one computer, pasted on the other.
+//! Files copied to the clipboard on one computer, pasted on the other (and files dropped on
+//! the stream window, which travel the same way as `Kind::DropFile`).
 //!
 //! When files are copied, they are sent at once, as a batch: each one's name carries the
 //! batch, its place in it and the batch's size (`batch/index/count/name`). They arrive in a
@@ -35,7 +36,7 @@ fn parse(name: &str) -> Option<(u32, u32, u32, &str)> {
 
 /// Sends `paths` as a new batch. Folders aren't sent (Finder and Explorer copy them as one
 /// item, which would need zipping); returns how many files were sent.
-pub fn send(endpoint: &mut Endpoint, paths: &[PathBuf]) -> Result<usize, String> {
+pub fn send(endpoint: &mut Endpoint, paths: &[PathBuf], kind: Kind) -> Result<usize, String> {
     let mut files = Vec::new();
     let mut total = 0u64;
     for p in paths.iter().take(MAX_BATCH_FILES) {
@@ -57,7 +58,7 @@ pub fn send(endpoint: &mut Endpoint, paths: &[PathBuf]) -> Result<usize, String>
     let batch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u32) | 1;
     let count = files.len() as u32;
     for (i, (f, size, name)) in files.into_iter().enumerate() {
-        endpoint.send(Meta { kind: Kind::ClipboardFile, size, name: batch_name(batch, i as u32, count, &name) }, Box::new(f));
+        endpoint.send(Meta { kind, size, name: batch_name(batch, i as u32, count, &name) }, Box::new(f));
     }
     Ok(count as usize)
 }

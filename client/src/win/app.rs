@@ -307,6 +307,9 @@ struct App {
     /// Which stream's window has the keyboard.
     focused: Option<WindowId>,
     error: Option<String>,
+    /// Files just dropped on a stream window (Windows gives them one event each): sent together
+    /// once the events stop, after moving the other computer's pointer to where they landed.
+    dropped: Option<(u8, Vec<std::path::PathBuf>)>,
 }
 
 impl App {
@@ -383,6 +386,27 @@ impl App {
     }
 
     /// Sends a file to the PC, saying so in the banner if it can't.
+    /// Moves the other computer's pointer to where the files were dropped, then sends them to go there.
+    fn send_drop(&mut self, stream: u8, paths: &[std::path::PathBuf]) {
+        if self.view_only {
+            return;
+        }
+        let mut at = windows::Win32::Foundation::POINT::default();
+        let over = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut at) }.is_ok().then_some(()).and_then(|()| {
+            let s = self.session.as_ref()?;
+            let origin = s.stream_window(stream)?.0.inner_position().ok()?;
+            self.to_video(stream, PhysicalPosition::new((at.x - origin.x) as f64, (at.y - origin.y) as f64))
+        });
+        let Some(s) = &mut self.session else { return };
+        if let Some((x, y)) = over {
+            s.input.absolute(stream, x, y);
+        }
+        if let Err(e) = s.telemetry.transfers.send_drop(paths) {
+            s.notice = Some(e);
+            s.refresh_banner();
+        }
+    }
+
     fn send_file(&mut self, path: &std::path::Path) {
         let Some(s) = &mut self.session else { return };
         if let Err(e) = s.telemetry.transfers.send_file(path) {
@@ -815,7 +839,10 @@ impl ApplicationHandler<UserEvent> for App {
                     show_pc_pointer(s, el, self.locked);
                 }
             }
-            WindowEvent::DroppedFile(path) => self.send_file(&path),
+            WindowEvent::DroppedFile(path) => match &mut self.dropped {
+                Some((_, paths)) => paths.push(path),
+                None => self.dropped = Some((stream, vec![path])),
+            },
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
@@ -893,6 +920,9 @@ impl ApplicationHandler<UserEvent> for App {
     /// While streaming, wake every 4 ms to read the gamepads; otherwise sleep until an event.
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.reload_settings();
+        if let Some((stream, paths)) = self.dropped.take() {
+            self.send_drop(stream, &paths);
+        }
         match &mut self.session {
             Some(s) => {
                 if !self.view_only {
@@ -1135,6 +1165,7 @@ fn run(cli: Cli) -> Result<(), String> {
         swallow_release: None,
         focused: None,
         error: None,
+        dropped: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.session = None;

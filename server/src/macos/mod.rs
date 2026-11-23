@@ -4,6 +4,7 @@
 
 mod capture;
 mod cursor;
+pub mod drop;
 mod ffi;
 pub mod agent;
 pub mod input;

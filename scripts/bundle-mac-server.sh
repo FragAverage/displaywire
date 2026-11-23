@@ -31,6 +31,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>DisplayWire Server asks Finder which folder a file dropped from the other computer goes into.</string>
   <key>NSLocalNetworkUsageDescription</key><string>DisplayWire Server answers the computers you stream this Mac's screen to on your local network.</string>
 </dict>
 </plist>

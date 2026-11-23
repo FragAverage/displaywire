@@ -45,10 +45,18 @@ pub struct Transfers {
     last_saved: Arc<Mutex<Option<PathBuf>>>,
     /// Files copied on the client, waiting to be pasted here.
     inbox: Option<Arc<Mutex<Inbox>>>,
+    /// Files dropped on the client's window, arriving before they're put where the pointer is.
+    drops: Option<Arc<Mutex<Inbox>>>,
 }
 
-fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_saved: &Arc<Mutex<Option<PathBuf>>>, inbox: &Option<Arc<Mutex<Inbox>>>) -> Endpoint {
-    let (opts, slot, last_saved, inbox) = (options.clone(), slot.clone(), last_saved.clone(), inbox.clone());
+fn make_endpoint(
+    options: &Arc<Options>,
+    slot: &Arc<Mutex<Vec<u8>>>,
+    last_saved: &Arc<Mutex<Option<PathBuf>>>,
+    inbox: &Option<Arc<Mutex<Inbox>>>,
+    drops: &Option<Arc<Mutex<Inbox>>>,
+) -> Endpoint {
+    let (opts, slot, last_saved, inbox, drops) = (options.clone(), slot.clone(), last_saved.clone(), inbox.clone(), drops.clone());
     Endpoint::new(options.max_file_bytes.max(MAX_CLIPBOARD), SEND_RATE, move |meta| match meta.kind {
         Kind::Clipboard => {
             if !opts.clipboard || meta.size > MAX_CLIPBOARD {
@@ -60,6 +68,10 @@ fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_saved:
         Kind::ClipboardFile => match &inbox {
             Some(inbox) if opts.clipboard && opts.files => inbox.lock().unwrap().sink(meta),
             _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "copying files across is off")),
+        },
+        Kind::DropFile => match &drops {
+            Some(drops) if opts.files && meta.size <= opts.max_file_bytes => drops.lock().unwrap().sink(meta),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "file upload is off or the file is too large")),
         },
         Kind::File => {
             if !opts.files || meta.size > opts.max_file_bytes {
@@ -77,8 +89,9 @@ impl Transfers {
         let options = Arc::new(options);
         let (slot, last_saved) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
         let inbox = platform::clipboard_files_dir().ok().map(Inbox::new);
-        let endpoint = Mutex::new(make_endpoint(&options, &slot, &last_saved, &inbox));
-        let t = Arc::new(Transfers { endpoint, options, slot, last_saved, inbox });
+        let drops = platform::clipboard_files_dir().ok().map(|d| Inbox::new(d.with_file_name("Drops")));
+        let endpoint = Mutex::new(make_endpoint(&options, &slot, &last_saved, &inbox, &drops));
+        let t = Arc::new(Transfers { endpoint, options, slot, last_saved, inbox, drops });
         let _ = TRANSFERS.set(t.clone());
         t
     }
@@ -99,6 +112,40 @@ impl Transfers {
         println!("sending {name} ({} bytes) to the client", md.len());
         t.endpoint.lock().unwrap().send(Meta { kind: Kind::File, size: md.len(), name }, Box::new(file));
         Ok(())
+    }
+
+    /// Files dropped on the client's window have all arrived: into the folder under the pointer
+    /// (a Finder window or the Desktop), as a drag there would; anywhere else, into the
+    /// received-files folder and onto the clipboard, ready to paste.
+    fn place_drop(&self, paths: &[PathBuf], own_seq: &mut u32, last_seq: &mut u32) {
+        let target = platform::folder_under_pointer();
+        let dir = match &target {
+            Some(d) => d.clone(),
+            None => match platform::uploads_dir() {
+                Ok(d) => d,
+                Err(e) => return println!("drop: {e}"),
+            },
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let mut placed = Vec::new();
+        for p in paths {
+            let name = p.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+            let dest = unique_path(&dir, &safe_file_name(&name));
+            if std::fs::rename(p, &dest).or_else(|_| std::fs::copy(p, &dest).map(|_| ())).is_ok() {
+                placed.push(dest);
+            }
+        }
+        println!("dropped {} file(s) into {}", placed.len(), dir.display());
+        if target.is_none() && platform::set_clipboard_files(&placed) {
+            *own_seq = platform::clipboard_sequence();
+            *last_seq = *own_seq;
+            platform::notify(&format!("{} file(s) in Downloads › DisplayWire, also on the clipboard: ⌘V to paste", placed.len()));
+        }
+        if let Some(last) = placed.last()
+            && target.is_none()
+        {
+            platform::reveal(last);
+        }
     }
 
     /// A transfer message from the client; returns what to send back.
@@ -136,7 +183,7 @@ impl Transfers {
             if link.session.id() != session {
                 // A new session: whatever was in flight belonged to the last one.
                 if session != 0 {
-                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_saved, &self.inbox);
+                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_saved, &self.inbox, &self.drops);
                 }
                 session = link.session.id();
                 last_seq = platform::clipboard_sequence();
@@ -168,6 +215,11 @@ impl Transfers {
                             println!("{} copied file(s) from the client, ready to paste", paths.len());
                         }
                     }
+                    Event::Received { meta, .. } if meta.kind == Kind::DropFile => {
+                        if let Some(paths) = self.drops.as_ref().and_then(|d| d.lock().unwrap().received(&meta)) {
+                            self.place_drop(&paths, &mut own_seq, &mut last_seq);
+                        }
+                    }
                     Event::Received { meta, .. } => {
                         let saved = self.last_saved.lock().unwrap().clone();
                         println!("received {} ({} bytes) as {}", meta.name, meta.size, saved.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
@@ -196,7 +248,7 @@ impl Transfers {
                     let files = if seq != own_seq && self.options.files { platform::clipboard_files() } else { None };
                     if let Some(files) = files {
                         // Files copied here: they go across now, ready to paste there.
-                        match xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files) {
+                        match xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files, Kind::ClipboardFile) {
                             Ok(n) => println!("copying {n} file(s) to the client's clipboard"),
                             Err(e) => platform::notify(&format!("Not copied to the other computer: {e}")),
                         }
@@ -285,6 +337,9 @@ mod platform {
     }
     /// The tray notification says where it is.
     pub fn reveal(_: &std::path::Path) {}
+    pub fn folder_under_pointer() -> Option<std::path::PathBuf> {
+        None
+    }
     // Files on the clipboard aren't shared by the Windows server yet.
     pub fn clipboard_files() -> Option<Vec<std::path::PathBuf>> {
         None
@@ -303,6 +358,7 @@ mod platform {
         as_user, clipboard_files, clipboard_files_dir, clipboard_sequence, clipboard_text, notify, reveal, set_clipboard_files,
         set_clipboard_text, uploads_dir,
     };
+    pub use crate::macos::drop::folder_under_pointer;
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -330,6 +386,9 @@ mod platform {
         Err(io::Error::other("no clipboard here"))
     }
     pub fn reveal(_: &std::path::Path) {}
+    pub fn folder_under_pointer() -> Option<PathBuf> {
+        None
+    }
     pub fn uploads_dir() -> io::Result<PathBuf> {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no home directory"))?;
         Ok(PathBuf::from(home).join("Downloads/DisplayWire"))

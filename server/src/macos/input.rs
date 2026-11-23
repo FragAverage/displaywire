@@ -69,6 +69,8 @@ pub struct Injector {
     alt_tab: bool,
     /// The Windows key is down and nothing else has been pressed with it.
     win_tap: bool,
+    /// Keys that went down as media keys: scancode → `NX_KEYTYPE_*`.
+    media_down: std::collections::HashMap<u16, u32>,
 }
 
 // The event source is only used from the control thread.
@@ -89,6 +91,7 @@ impl Injector {
             translated: std::collections::HashMap::new(),
             alt_tab: false,
             win_tap: false,
+            media_down: std::collections::HashMap::new(),
         }
     }
 
@@ -224,6 +227,12 @@ impl Injector {
                 self.post_key(0x30, down, self.base_flags() | CMD | shift, false);
                 return;
             }
+            if !modifier && let Some(nx) = self.media_key(code, down, alt || shift != 0) {
+                if !repeat {
+                    post_media(nx, down);
+                }
+                return;
+            }
             if !modifier {
                 if !down || repeat {
                     if let Some(&(v, f)) = self.translated.get(&code) {
@@ -260,6 +269,38 @@ impl Injector {
                 _ => {}
             }
         }
+    }
+
+    /// A key that is a media key on the Mac: the PC's own media keys, and (with PC shortcuts,
+    /// pressed on their own) the F-keys that are media keys on a Mac's top row. The
+    /// `NX_KEYTYPE_*`; a key comes up as what it went down as.
+    fn media_key(&mut self, code: u16, down: bool, alt_or_shift: bool) -> Option<u32> {
+        if !down {
+            return self.media_down.remove(&code);
+        }
+        if let Some(&nx) = self.media_down.get(&code) {
+            return Some(nx);
+        }
+        let plain = !alt_or_shift && !self.ctrl_held() && !self.win_held();
+        let nx = match code {
+            0x120 => 7,         // Mute
+            0x12E => 1,         // Volume down
+            0x130 => 0,         // Volume up
+            0x122 => 16,        // Play/pause
+            0x110 => 18,        // Previous track
+            0x119 => 17,        // Next track
+            0x3B if plain => 3, // F1: brightness down
+            0x3C if plain && !finder_files_focused() => 2, // F2: brightness up (renames in Finder)
+            0x41 if plain => 18, // F7: previous
+            0x42 if plain => 16, // F8: play/pause
+            0x43 if plain => 17, // F9: next
+            0x44 if plain => 7,  // F10: mute
+            0x57 if plain => 1,  // F11: volume down
+            0x58 if plain => 0,  // F12: volume up
+            _ => return None,
+        };
+        self.media_down.insert(code, nx);
+        Some(nx)
     }
 
     fn ctrl_held(&self) -> bool {
@@ -301,6 +342,10 @@ impl Injector {
             0x0F if w => (0x7E, CTRL),              // Win+Tab: Mission Control (⌃↑)
             0x137 => (0x14, CMD | SHIFT),           // Print Screen: the whole screen (⇧⌘3)
             0x3E if a && !c => (0x0C, CMD),         // Alt+F4: quit (⌘Q)
+            // F3 to F5 on their own: what a Mac's top row (and Windows' F5) does.
+            0x3D if !c && !a && !s && !w => (0x7E, CTRL), // F3: Mission Control (⌃↑)
+            0x3E if !c && !a && !s && !w => (0x31, CMD),  // F4: Spotlight
+            0x3F if !c && !a && !s && !w => (0x0F, CMD),  // F5: refresh (⌘R)
             0x01 if c && s => (0x35, CMD | OPT),    // Ctrl+Shift+Esc: Force Quit (⌥⌘Esc)
             0x15 if c && !s && !a => (0x06, CMD | SHIFT), // Ctrl+Y: redo (⇧⌘Z)
             0x14B if a && !c => (0x21, CMD),        // Alt+←: back (⌘[)
@@ -474,6 +519,29 @@ fn clamp_to_displays(p: CGPoint) -> CGPoint {
         })
         .min_by(|a, b| (a.x - p.x).hypot(a.y - p.y).total_cmp(&(b.x - p.x).hypot(b.y - p.y)))
         .unwrap_or(p)
+}
+
+/// A media key (volume, brightness, play): the system-defined event a Mac keyboard's top row sends.
+fn post_media(nx: u32, down: bool) {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    objc2::rc::autoreleasepool(|_| {
+        let state: usize = if down { 0xA } else { 0xB };
+        let e = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+            NSEventType::SystemDefined,
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags(state << 8),
+            0.0,
+            0,
+            None,
+            8,
+            ((nx as isize) << 16) | ((state as isize) << 8),
+            -1,
+        );
+        if let Some(cg) = e.and_then(|e| e.CGEvent()) {
+            // The NSEvent owns it: posted, not released.
+            unsafe { CGEventPost(kCGHIDEventTap, &*cg as *const _ as CGEventRef) };
+        }
+    });
 }
 
 /// Whether Finder is in front with its files (not a name being typed or the search field) focused.
@@ -747,5 +815,32 @@ mod live {
         assert!(key && flags & kCGEventFlagMaskCommand != 0 && flags & kCGEventFlagMaskControl == 0, "Ctrl didn't arrive as ⌘");
         let flags = unsafe { CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) };
         assert!(flags & kCGEventFlagMaskCommand == 0, "⌘ is stuck");
+    }
+
+    /// F12 (PC shortcuts) turns the volume up, as on a Mac keyboard; F11 back down.
+    #[test]
+    #[ignore]
+    fn f12_is_volume_up() {
+        let vol = || {
+            let o = std::process::Command::new("osascript").args(["-e", "output volume of (get volume settings)"]).output().unwrap();
+            String::from_utf8_lossy(&o.stdout).trim().parse::<i32>().unwrap()
+        };
+        super::set_pc_shortcuts(true);
+        let before = vol();
+        let mut inj = Injector::new();
+        let mut input = Input { seq: 1, ..Input::default() };
+        let tap = |inj: &mut Injector, input: &mut Input, code: u16| {
+            for down in [true, false] {
+                input.seq += 1;
+                input.set_key(code, down);
+                inj.apply(input, timing::now_ns());
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        };
+        let code = if before >= 90 { 0x57 } else { 0x58 };
+        tap(&mut inj, &mut input, code);
+        let after = vol();
+        tap(&mut inj, &mut input, if code == 0x58 { 0x57 } else { 0x58 });
+        assert_ne!(before, after, "the volume didn't change");
     }
 }

@@ -152,6 +152,12 @@ impl Transfers {
         Ok(())
     }
 
+    /// Files dropped on a stream window, sent as one batch: the other side puts them where its
+    /// pointer is (the client has just moved it to where they were dropped).
+    pub fn send_drop(&self, paths: &[std::path::PathBuf]) -> Result<(), String> {
+        xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), paths, Kind::DropFile).map(|_| ())
+    }
+
     pub fn spawn(self: &Arc<Self>) {
         let this = self.clone();
         let _ = std::thread::Builder::new().name("transfer".into()).spawn(move || this.run());
@@ -246,7 +252,7 @@ impl Transfers {
                         }
                     })
                 };
-                let copying = active.iter().filter(|a| a.2 == Kind::ClipboardFile).collect::<Vec<_>>();
+                let copying = active.iter().filter(|a| a.2 == Kind::ClipboardFile || (a.1 && a.2 == Kind::DropFile)).collect::<Vec<_>>();
                 let copy_line = (!copying.is_empty()).then(|| {
                     let (done, total) = copying.iter().fold((0, 0), |(d, t), a| (d + a.3, t + a.4));
                     let pct = (done * 100).checked_div(total).unwrap_or(100);
@@ -266,7 +272,7 @@ impl Transfers {
                     let files = if count != own_count { pasteboard_files() } else { None };
                     if let Some(files) = files {
                         // Files copied here: they go across now, ready to paste there.
-                        if let Err(e) = xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files) {
+                        if let Err(e) = xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files, Kind::ClipboardFile) {
                             later = Some((format!("Not copied to the other computer: {e}"), 5_000));
                         }
                     } else if count != own_count

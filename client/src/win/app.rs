@@ -326,7 +326,9 @@ impl App {
         let link = Arc::new(Link::new(sock, key));
         let input = Arc::new(input::Sender::new(link.clone()));
         let name = servers::find(server).map(|s| s.name).filter(|n| !n.is_empty()).unwrap_or_else(|| server.to_string());
-        let attrs = Window::default_attributes().with_title(format!("DisplayWire: {name}")).with_inner_size(LogicalSize::new(1280.0, 720.0));
+        let attrs = super::icon::stream_window(
+            Window::default_attributes().with_title(format!("DisplayWire: {name}")).with_inner_size(LogicalSize::new(1280.0, 720.0)),
+        );
         let window = el.create_window(attrs).map_err(|e| format!("create window: {e}"))?;
         let menu = Menu::install(&window, self.proxy.clone());
         let pads = gamepad::Poller::new(link.clone(), input.focused.clone());
@@ -406,6 +408,7 @@ impl App {
             }
             Action::Microphone => self.toggle_mic(),
             Action::FullScreen => self.toggle_fullscreen(),
+            Action::FullScreenAll => self.toggle_fullscreen_all(),
             Action::Capture if self.view_only => {}
             Action::Capture => self.set_locked(!self.locked),
             Action::Monitor(index) => {
@@ -432,6 +435,7 @@ impl App {
             Action::Shortcuts => dialog::show_message(
                 "Keyboard shortcuts",
                 "Ctrl+Alt+F    Full screen\n\
+                 Ctrl+Shift+W  Full screen for every window of the PC, or back to windows\n\
                  Ctrl+Alt+M    Capture or release the pointer (for games)\n\
                  Ctrl+Alt+A    Open every monitor of the PC, each in its own window\n\
                  Ctrl+Alt+S    Show or hide the stats graph\n\
@@ -526,6 +530,19 @@ impl App {
         self.update_hook();
     }
 
+    /// Full screen for every stream window at once, each on the monitor it's on; if any is
+    /// windowed they all go full screen, otherwise they all go back to windows.
+    fn toggle_fullscreen_all(&mut self) {
+        let Some(s) = &self.session else { return };
+        let windows: Vec<&Window> = std::iter::once(&s.window).chain(s.extra.iter().map(|e| &e.window)).collect();
+        let full = windows.iter().any(|w| w.fullscreen().is_none());
+        s.menu.set_visible(!full);
+        for w in windows {
+            w.set_fullscreen(full.then(|| Fullscreen::Borderless(w.current_monitor())));
+        }
+        self.update_hook();
+    }
+
     /// Whether Windows' own keys go to the PC: with the pointer captured, or in full screen.
     fn update_hook(&self) {
         let immersive = self.session.as_ref().is_some_and(|s| {
@@ -599,7 +616,9 @@ impl App {
             return dialog::show_message("Too many windows", "Close one of the other monitor windows first.");
         };
         let name = s.monitors.as_ref().and_then(|m| m.iter().nth(monitor as usize)).map_or(String::new(), |m| m.name().to_string());
-        let mut attrs = Window::default_attributes().with_title(format!("DisplayWire: {} · {name}", s.name)).with_inner_size(LogicalSize::new(1280.0, 720.0));
+        let mut attrs = super::icon::stream_window(
+            Window::default_attributes().with_title(format!("DisplayWire: {} · {name}", s.name)).with_inner_size(LogicalSize::new(1280.0, 720.0)),
+        );
         // On a display of this computer that has no stream window yet, when there is one.
         let taken: Vec<_> = std::iter::once(&s.window).chain(s.extra.iter().map(|e| &e.window)).filter_map(|w| w.current_monitor()).collect();
         if let Some(free) = el.available_monitors().find(|m| !taken.contains(m)) {
@@ -795,6 +814,14 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 let down = event.state == ElementState::Pressed;
+                // Ctrl+Shift+W: every stream window in or out of full screen. Neither press nor
+                // release goes to the PC.
+                if code == KeyCode::KeyW && self.modifiers.control_key() && self.modifiers.shift_key() && !self.modifiers.alt_key() {
+                    if down && !event.repeat {
+                        self.on_menu(el, menu::Action::FullScreenAll);
+                    }
+                    return;
+                }
                 if self.modifiers.control_key() && self.modifiers.alt_key() {
                     let action = match code {
                         KeyCode::KeyM => Some(menu::Action::Capture),

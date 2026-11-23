@@ -21,6 +21,8 @@ pub enum Action {
     Disconnect,
     SendFile,
     FullScreen,
+    /// Every stream window in or out of full screen.
+    FullScreenAll,
     Capture,
     ToggleStats,
     Mute,
@@ -35,7 +37,7 @@ pub enum Action {
     OpenAllMonitors,
 }
 
-const FIXED: [(u32, Action); 10] = [
+const FIXED: [(u32, Action); 11] = [
     (1, Action::Disconnect),
     (2, Action::SendFile),
     (3, Action::FullScreen),
@@ -46,6 +48,7 @@ const FIXED: [(u32, Action); 10] = [
     (8, Action::Settings),
     (9, Action::Shortcuts),
     (10, Action::OpenAllMonitors),
+    (11, Action::FullScreenAll),
 ];
 const MONITOR_BASE: u32 = 100;
 const OPEN_BASE: u32 = 200;
@@ -102,7 +105,8 @@ impl Menu {
             separator(connection);
             add(connection, Action::Disconnect, "Disconnect\tCtrl+Alt+D");
             let view = CreatePopupMenu().unwrap_or_default();
-            add(view, Action::FullScreen, "Full Screen\tF11");
+            add(view, Action::FullScreen, "Full Screen\tCtrl+Alt+F");
+            add(view, Action::FullScreenAll, "Full Screen (All Windows)\tCtrl+Shift+W");
             add(view, Action::Capture, "Capture Pointer (for games)\tCtrl+Alt+M");
             add(view, Action::ToggleStats, "Show Stats\tCtrl+Alt+S");
             separator(view);

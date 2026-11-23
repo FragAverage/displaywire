@@ -649,7 +649,7 @@ impl eframe::App for SettingsWindow {
 }
 
 fn options(size: [f32; 2], min: [f32; 2]) -> eframe::NativeOptions {
-    eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size(size).with_min_inner_size(min), ..Default::default() }
+    eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size(size).with_min_inner_size(min).with_icon(super::icon::egui()), ..Default::default() }
 }
 
 pub fn run() -> Result<(), String> {

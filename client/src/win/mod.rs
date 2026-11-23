@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod dialog;
 pub mod gamepad;
 pub mod hook;
+pub mod icon;
 pub mod launcher;
 pub mod menu;
 pub mod video;

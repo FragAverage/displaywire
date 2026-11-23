@@ -17,6 +17,7 @@ use objc2_foundation::NSString;
 use proto::stream::Msg;
 use timing::now_ns;
 use winit::event_loop::EventLoopProxy;
+use xfer::clipfiles::Inbox;
 use xfer::{Bytes, Endpoint, Event, Kind, Meta, Sink};
 
 use crate::app::UserEvent;
@@ -39,16 +40,19 @@ pub struct Transfers {
     slot: Arc<Mutex<Vec<u8>>>,
     clipboard_on: AtomicBool,
     stopped: AtomicBool,
+    /// Files copied on the other computer, waiting to be pasted here.
+    inbox: Option<Arc<Mutex<Inbox>>>,
 }
 
-fn make_endpoint(slot: &Arc<Mutex<Vec<u8>>>) -> Endpoint {
-    let slot = slot.clone();
+fn make_endpoint(slot: &Arc<Mutex<Vec<u8>>>, inbox: &Option<Arc<Mutex<Inbox>>>) -> Endpoint {
+    let (slot, inbox) = (slot.clone(), inbox.clone());
     Endpoint::new(MAX_FILE, SEND_RATE, move |meta| match meta.kind {
         Kind::Clipboard if meta.size <= MAX_CLIPBOARD => {
             slot.lock().unwrap().clear();
             Ok(Box::new(ClipboardSink(slot.clone())) as Box<dyn Sink>)
         }
         Kind::File if meta.size <= MAX_FILE => Ok(Box::new(FileSink::create(&meta.name)?) as Box<dyn Sink>),
+        Kind::ClipboardFile if meta.size <= MAX_FILE && let Some(inbox) = &inbox => inbox.lock().unwrap().sink(meta),
         _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not accepted")),
     })
 }
@@ -102,8 +106,10 @@ impl Sink for FileSink {
 impl Transfers {
     pub fn new(link: Arc<Link>, proxy: EventLoopProxy<UserEvent>, clipboard_on: bool) -> Arc<Transfers> {
         let slot = Arc::new(Mutex::new(Vec::new()));
+        let inbox = clipboard_files_dir().map(Inbox::new);
         Arc::new(Transfers {
-            endpoint: Mutex::new(make_endpoint(&slot)),
+            endpoint: Mutex::new(make_endpoint(&slot, &inbox)),
+            inbox,
             link,
             proxy,
             slot,
@@ -162,6 +168,8 @@ impl Transfers {
         let mut last_sent_text = String::new();
         let mut showing: Option<String> = None;
         let mut clear_at = 0u64;
+        // A message from the end of one pass, shown in the next.
+        let mut later: Option<(String, u64)> = None;
         while !self.stopped.load(Relaxed) {
             std::thread::sleep(Duration::from_millis(2));
             let now = now_ns();
@@ -170,7 +178,7 @@ impl Transfers {
                 // A new session after an earlier one: what was in flight belonged to that
                 // one. (The first session keeps what was queued before it existed.)
                 if session != 0 {
-                    *self.endpoint.lock().unwrap() = make_endpoint(&self.slot);
+                    *self.endpoint.lock().unwrap() = make_endpoint(&self.slot, &self.inbox);
                 }
                 session = s.id();
                 last_count = pasteboard_count();
@@ -182,7 +190,7 @@ impl Transfers {
                 let n = transport::transfer::encode(o, &mut plain);
                 self.link.send(&plain[..n]);
             }
-            let mut message: Option<(String, u64)> = None;
+            let mut message: Option<(String, u64)> = later.take();
             for e in events {
                 match e {
                     Event::Received { meta, .. } if meta.kind == Kind::Clipboard => {
@@ -194,6 +202,17 @@ impl Transfers {
                         }
                     }
                     Event::Sent { meta, .. } if meta.kind == Kind::File => message = Some((format!("Sent {}", meta.name), 3_000)),
+                    Event::Received { meta, .. } if meta.kind == Kind::ClipboardFile => {
+                        let paths = self.inbox.as_ref().and_then(|i| i.lock().unwrap().received(&meta));
+                        if let Some(paths) = paths
+                            && self.clipboard_on.load(Relaxed)
+                        {
+                            own_count = set_pasteboard_files(&paths);
+                            last_count = own_count;
+                            let what = if paths.len() == 1 { "1 file".to_string() } else { format!("{} files", paths.len()) };
+                            message = Some((format!("Copied {what}: ready to paste"), 4_000));
+                        }
+                    }
                     Event::Received { meta, .. } if meta.kind == Kind::File => {
                         let place = if cfg!(windows) { "Downloads\\DisplayWire" } else { "Downloads/DisplayWire" };
                         message = Some((format!("Received {} (in {place})", meta.name), 6_000));
@@ -227,10 +246,13 @@ impl Transfers {
                         }
                     })
                 };
-                let line = match (progress(true, "Sending"), progress(false, "Receiving")) {
-                    (Some(a), Some(b)) => Some(format!("{a}  ·  {b}")),
-                    (a, b) => a.or(b),
-                };
+                let copying = active.iter().filter(|a| a.2 == Kind::ClipboardFile).collect::<Vec<_>>();
+                let copy_line = (!copying.is_empty()).then(|| {
+                    let (done, total) = copying.iter().fold((0, 0), |(d, t), a| (d + a.3, t + a.4));
+                    let pct = (done * 100).checked_div(total).unwrap_or(100);
+                    format!("Copying {} file(s) across… {pct}%", copying.len())
+                });
+                let line = [progress(true, "Sending"), progress(false, "Receiving"), copy_line].into_iter().flatten().reduce(|a, b| format!("{a}  ·  {b}"));
                 if line != showing {
                     self.notice(line.clone());
                     showing = line;
@@ -241,7 +263,13 @@ impl Transfers {
                 let count = pasteboard_count();
                 if count != last_count {
                     last_count = count;
-                    if count != own_count
+                    let files = if count != own_count { pasteboard_files() } else { None };
+                    if let Some(files) = files {
+                        // Files copied here: they go across now, ready to paste there.
+                        if let Err(e) = xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files) {
+                            later = Some((format!("Not copied to the other computer: {e}"), 5_000));
+                        }
+                    } else if count != own_count
                         && let Some(text) = pasteboard_text()
                         && !text.is_empty()
                         && text != last_sent_text
@@ -276,7 +304,43 @@ impl Sink for ClipboardSink {
 }
 
 #[cfg(windows)]
-use crate::win::clipboard::{pasteboard_count, pasteboard_text, set_pasteboard_text};
+use crate::win::clipboard::{clipboard_files_dir, pasteboard_count, pasteboard_files, pasteboard_text, set_pasteboard_files, set_pasteboard_text};
+
+#[cfg(target_os = "macos")]
+fn pasteboard_files() -> Option<Vec<std::path::PathBuf>> {
+    use objc2_app_kit::NSPasteboardTypeFileURL;
+    use objc2_foundation::NSURL;
+    let items = NSPasteboard::generalPasteboard().pasteboardItems()?;
+    let paths: Vec<std::path::PathBuf> = items
+        .iter()
+        .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+        .filter_map(|s| NSURL::URLWithString(&s))
+        .filter_map(|u| u.filePathURL()?.path())
+        .map(|p| std::path::PathBuf::from(p.to_string()))
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// Puts files on the pasteboard as Finder's Copy does; returns the change count that results.
+#[cfg(target_os = "macos")]
+fn set_pasteboard_files(paths: &[std::path::PathBuf]) -> isize {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::NSPasteboardWriting;
+    use objc2_foundation::{NSArray, NSURL};
+    let urls: Vec<_> = paths
+        .iter()
+        .map(|p| ProtocolObject::<dyn NSPasteboardWriting>::from_retained(NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()))))
+        .collect();
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    pb.writeObjects(&NSArray::from_retained_slice(&urls));
+    pb.changeCount()
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_files_dir() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/DisplayWire/Clipboard"))
+}
 
 #[cfg(target_os = "macos")]
 fn pasteboard_count() -> isize {

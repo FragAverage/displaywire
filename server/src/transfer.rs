@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use proto::stream::Msg;
 use timing::now_ns;
+use xfer::clipfiles::Inbox;
 use xfer::{Bytes, Endpoint, Event, Kind, Meta, Outgoing, Sink, safe_file_name, unique_path};
 
 use crate::Shared;
@@ -42,10 +43,12 @@ pub struct Transfers {
     slot: Arc<Mutex<Vec<u8>>>,
     /// Folder uploads go to, once known.
     last_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Files copied on the client, waiting to be pasted here.
+    inbox: Option<Arc<Mutex<Inbox>>>,
 }
 
-fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &Arc<Mutex<Option<PathBuf>>>) -> Endpoint {
-    let (opts, slot, last_dir) = (options.clone(), slot.clone(), last_dir.clone());
+fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &Arc<Mutex<Option<PathBuf>>>, inbox: &Option<Arc<Mutex<Inbox>>>) -> Endpoint {
+    let (opts, slot, last_dir, inbox) = (options.clone(), slot.clone(), last_dir.clone(), inbox.clone());
     Endpoint::new(options.max_file_bytes.max(MAX_CLIPBOARD), SEND_RATE, move |meta| match meta.kind {
         Kind::Clipboard => {
             if !opts.clipboard || meta.size > MAX_CLIPBOARD {
@@ -54,6 +57,10 @@ fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &
             slot.lock().unwrap().clear();
             Ok(Box::new(ClipboardSink(slot.clone())) as Box<dyn Sink>)
         }
+        Kind::ClipboardFile => match &inbox {
+            Some(inbox) if opts.clipboard && opts.files => inbox.lock().unwrap().sink(meta),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "copying files across is off")),
+        },
         Kind::File => {
             if !opts.files || meta.size > opts.max_file_bytes {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "file upload is off or the file is too large"));
@@ -69,7 +76,9 @@ impl Transfers {
     pub fn new(options: Options) -> Arc<Transfers> {
         let options = Arc::new(options);
         let (slot, last_dir) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
-        let t = Arc::new(Transfers { endpoint: Mutex::new(make_endpoint(&options, &slot, &last_dir)), options, slot, last_dir });
+        let inbox = platform::clipboard_files_dir().ok().map(Inbox::new);
+        let endpoint = Mutex::new(make_endpoint(&options, &slot, &last_dir, &inbox));
+        let t = Arc::new(Transfers { endpoint, options, slot, last_dir, inbox });
         let _ = TRANSFERS.set(t.clone());
         t
     }
@@ -127,7 +136,7 @@ impl Transfers {
             if link.session.id() != session {
                 // A new session: whatever was in flight belonged to the last one.
                 if session != 0 {
-                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_dir);
+                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_dir, &self.inbox);
                 }
                 session = link.session.id();
                 last_seq = platform::clipboard_sequence();
@@ -147,6 +156,16 @@ impl Transfers {
                             own_seq = platform::clipboard_sequence();
                             last_seq = own_seq;
                             last_sent_text = text;
+                        }
+                    }
+                    Event::Received { meta, .. } if meta.kind == Kind::ClipboardFile => {
+                        let paths = self.inbox.as_ref().and_then(|i| i.lock().unwrap().received(&meta));
+                        if let Some(paths) = paths
+                            && platform::set_clipboard_files(&paths)
+                        {
+                            own_seq = platform::clipboard_sequence();
+                            last_seq = own_seq;
+                            println!("{} copied file(s) from the client, ready to paste", paths.len());
                         }
                     }
                     Event::Received { meta, .. } => {
@@ -171,7 +190,14 @@ impl Transfers {
                 let seq = platform::clipboard_sequence();
                 if seq != last_seq {
                     last_seq = seq;
-                    if seq != own_seq
+                    let files = if seq != own_seq && self.options.files { platform::clipboard_files() } else { None };
+                    if let Some(files) = files {
+                        // Files copied here: they go across now, ready to paste there.
+                        match xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files) {
+                            Ok(n) => println!("copying {n} file(s) to the client's clipboard"),
+                            Err(e) => platform::notify(&format!("Not copied to the other computer: {e}")),
+                        }
+                    } else if seq != own_seq
                         && let Some(text) = platform::clipboard_text()
                         && !text.is_empty()
                         && text != last_sent_text
@@ -254,11 +280,24 @@ mod platform {
     pub fn notify(text: &str) {
         crate::windows::tray::notify(text);
     }
+    // Files on the clipboard aren't shared by the Windows server yet.
+    pub fn clipboard_files() -> Option<Vec<std::path::PathBuf>> {
+        None
+    }
+    pub fn set_clipboard_files(_: &[std::path::PathBuf]) -> bool {
+        false
+    }
+    pub fn clipboard_files_dir() -> std::io::Result<std::path::PathBuf> {
+        Err(std::io::Error::other("not on Windows"))
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
-    pub use crate::macos::shell::{as_user, clipboard_sequence, clipboard_text, notify, set_clipboard_text, uploads_dir};
+    pub use crate::macos::shell::{
+        as_user, clipboard_files, clipboard_files_dir, clipboard_sequence, clipboard_text, notify, set_clipboard_files, set_clipboard_text,
+        uploads_dir,
+    };
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -275,6 +314,15 @@ mod platform {
     }
     pub fn set_clipboard_text(_: &str) -> bool {
         false
+    }
+    pub fn clipboard_files() -> Option<Vec<PathBuf>> {
+        None
+    }
+    pub fn set_clipboard_files(_: &[PathBuf]) -> bool {
+        false
+    }
+    pub fn clipboard_files_dir() -> io::Result<PathBuf> {
+        Err(io::Error::other("no clipboard here"))
     }
     pub fn uploads_dir() -> io::Result<PathBuf> {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no home directory"))?;

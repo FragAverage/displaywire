@@ -1,7 +1,10 @@
 #!/bin/sh
-# Wraps a built server binary as "DisplayWire Server.app" (ad-hoc signed): a menu-bar app, so
-# macOS lists it by name when it asks for Screen Recording and Accessibility.
+# Wraps a built server binary as "DisplayWire Server.app": a menu-bar app, so macOS lists it by
+# name when it asks for Screen Recording and Accessibility.
 #   scripts/bundle-mac-server.sh <displaywire-server binary> <output dir>
+# Ad-hoc signed unless SIGN_IDENTITY names a certificate. An ad-hoc signature changes with every
+# build, and macOS then forgets the permissions; a certificate (even a self-signed one in the
+# login keychain) keeps them across rebuilds.
 set -eu
 bin=$1
 out=$2
@@ -32,5 +35,5 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --deep --sign - "$app"
+codesign --force --deep --sign "${SIGN_IDENTITY:--}" "$app"
 echo "$app"

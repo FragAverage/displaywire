@@ -89,6 +89,11 @@ define_class!(
             }
         }
 
+        #[unsafe(method(toggleVirtual:))]
+        fn toggle_virtual(&self, _sender: Option<&AnyObject>) {
+            super::virtual_display::set_enabled(!super::virtual_display::enabled());
+        }
+
         #[unsafe(method(openPrivacy:))]
         fn open_privacy(&self, sender: Option<&NSMenuItem>) {
             let pane = if sender.is_some_and(|s| s.tag() == 1) { "Privacy_Accessibility" } else { "Privacy_ScreenCapture" };
@@ -156,6 +161,10 @@ impl Menu {
         }
         if !screen || !input {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        if super::virtual_display::available() {
+            let v = self.item(menu, "Virtual Display While Connected", Some(sel!(toggleVirtual:)), 0);
+            v.setState(if super::virtual_display::enabled() { NSControlStateValueOn } else { NSControlStateValueOff });
         }
         let login = self.item(menu, "Start at Login", Some(sel!(toggleLogin:)), 0);
         login.setState(if super::agent::installed() { NSControlStateValueOn } else { NSControlStateValueOff });

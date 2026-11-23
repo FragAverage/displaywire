@@ -140,7 +140,10 @@ Display Driver (MIT); add a mode matching the client's size and refresh when con
 - [ ] 7c VDD: installer offers it; on connect, add a mode for the client display (e.g. 3024×1964@120), optionally make
       it primary and turn physical screens off for the session ("headless mode" setting); restore on disconnect,
       including after a crash (persist what we changed).
-- [ ] Mac server (item 4, built): `CGVirtualDisplay` equivalent.
+- [x] Mac server (item 4): a `CGVirtualDisplay` (private API, as Parsec/DeskPad) while a client is connected,
+      switched on in the menu bar (remembered); 1:1 modes 1280×720 to 3840×2160 at 60 Hz, picked in System
+      Settings › Displays; stays 10 s after a disconnect; a stream on it falls back to the main display when it goes.
+      Tested: appears, streams, removed. Open: size it to the client's monitor (needs the client to send it).
 - [ ] `lg-proto` is protocol 5: rebase it onto protocol 6 before the TV can stream from this server again.
 
 ## 8. HDR and AV1 (agreed)

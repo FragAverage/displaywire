@@ -10,6 +10,7 @@ pub mod input;
 pub mod menubar;
 pub mod micout;
 pub mod shell;
+pub mod virtual_display;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -56,6 +57,8 @@ fn monitor_list() -> Vec<(CGDirectDisplayID, Monitor)> {
             let (w, h, hz) = ffi::display_mode(d)?;
             let name = if unsafe { ffi::CGDisplayIsBuiltin(d) } != 0 {
                 "Built-in Display".to_string()
+            } else if virtual_display::current() == Some(d) {
+                "Virtual Display".to_string()
             } else {
                 external += 1;
                 format!("Display {external}")
@@ -166,6 +169,15 @@ impl Source for ScreenSource {
         let now = timing::now_ns();
         if now - self.mode_checked_ns > SEC {
             self.mode_checked_ns = now;
+            // Its display went away (the virtual one, or one unplugged): show the main one.
+            if !ffi::displays().contains(&self.capture.display) {
+                let main = unsafe { ffi::CGMainDisplayID() };
+                println!("display {} is gone; streaming the main display", self.capture.display);
+                let cursor = self.cursor.in_video();
+                self.capture = Capture::new(main, self.fps, cursor).map_err(|e| format!("capture display {main}: {e}"))?;
+                set_stream(self.stream, Some(main));
+                self.rebuild_encoder()?;
+            }
             // A resolution change: the new encoder starts with a keyframe at the new size.
             if self.capture.follow_mode()? {
                 self.rebuild_encoder()?;
@@ -345,6 +357,31 @@ pub fn start_background(shared: Arc<Shared>) {
         println!(
             "input: not allowed to control this Mac yet; allow DisplayWire Server (or the terminal running it) in System Settings › Privacy & Security › Accessibility"
         );
+    }
+    virtual_display::load_setting();
+    {
+        let shared = shared.clone();
+        let _ = std::thread::Builder::new().name("virtual-display".into()).spawn(move || {
+            let mut connected_ns = 0;
+            loop {
+                let now = timing::now_ns();
+                if shared.link.lock().unwrap().is_some() {
+                    connected_ns = now;
+                }
+                let want = virtual_display::enabled() && connected_ns != 0 && now - connected_ns < virtual_display::LINGER_NS;
+                match (want, virtual_display::current().is_some()) {
+                    (true, false) => {
+                        if let Err(e) = virtual_display::create() {
+                            println!("virtual display: {e}");
+                            virtual_display::set_enabled(false);
+                        }
+                    }
+                    (false, true) => virtual_display::remove(),
+                    _ => {}
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
     }
     let _ = std::thread::Builder::new().name("awake".into()).spawn(move || {
         let mut assertion: Option<u32> = None;

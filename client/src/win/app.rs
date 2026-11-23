@@ -572,6 +572,23 @@ impl App {
         Some(((pos.x - x0) / (vw as f64 * scale), (pos.y - y0) / (vh as f64 * scale)))
     }
 
+    /// A position outside stream `stream`'s video (only seen while a button is held) that is over
+    /// another stream's video: that stream, and the position in its window.
+    fn under_drag(&self, stream: u8, pos: PhysicalPosition<f64>) -> Option<(u8, PhysicalPosition<f64>)> {
+        let inside = |(x, y): (f64, f64)| (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y);
+        if self.to_video(stream, pos).is_none_or(inside) {
+            return None;
+        }
+        let s = self.session.as_ref()?;
+        let origin = s.stream_window(stream)?.0.inner_position().ok()?;
+        let (sx, sy) = (origin.x as f64 + pos.x, origin.y as f64 + pos.y);
+        (0..proto::stream::MAX_STREAMS as u8).filter(|&id| id != stream).find_map(|id| {
+            let o = s.stream_window(id)?.0.inner_position().ok()?;
+            let p = PhysicalPosition::new(sx - o.x as f64, sy - o.y as f64);
+            self.to_video(id, p).filter(|&v| inside(v)).map(|_| (id, p))
+        })
+    }
+
     /// Shows monitor `monitor` in a new window (a stream of its own).
     fn open_monitor(&mut self, el: &ActiveEventLoop, monitor: u8) {
         let Some(s) = &mut self.session else { return };
@@ -825,6 +842,10 @@ impl ApplicationHandler<UserEvent> for App {
                 MouseScrollDelta::PixelDelta(p) => input.wheel_pixels(p.x, p.y),
             },
             WindowEvent::CursorMoved { position, .. } if !self.locked => {
+                // Dragging out of the window (Windows keeps sending the moves to it): over another
+                // stream's window, the pointer goes on there, so a window can be dragged between the
+                // other computer's screens.
+                let (stream, position) = self.under_drag(stream, position).unwrap_or((stream, position));
                 if let Some((x, y)) = self.to_video(stream, position) {
                     input.absolute(stream, x, y);
                     if let Some(s) = &mut self.session {

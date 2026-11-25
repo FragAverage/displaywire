@@ -1,7 +1,7 @@
 //! displaywire-server: captures the desktop, encodes HEVC and streams it to one
 //! client over UDP.
 //!
-//!   displaywire-server                       # Windows: stream the primary monitor
+//!   displaywire-server                       # Windows or Mac: stream the primary monitor
 //!   displaywire-server --file clip.h265      # any OS: loop an Annex B file (testing)
 
 mod audio;
@@ -12,7 +12,9 @@ mod mic;
 mod pairing;
 mod rate;
 mod transfer;
-#[cfg(any(windows, feature = "ui-dev"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(any(windows, target_os = "macos", feature = "ui-dev"))]
 mod ui;
 mod uiserver;
 #[cfg(windows)]
@@ -37,14 +39,16 @@ const CLIENT_TIMEOUT_NS: u64 = 3 * SEC;
 
 #[cfg(windows)]
 use windows::gamepad::Gamepads;
+#[cfg(target_os = "macos")]
+use macos::input::Injector;
 #[cfg(windows)]
 use windows::input::Injector;
 
-/// Input is only injected on Windows.
-#[cfg(not(windows))]
+/// Input is only injected on Windows and macOS.
+#[cfg(not(any(windows, target_os = "macos")))]
 struct Injector;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Injector {
     fn new() -> Injector {
         Injector
@@ -76,6 +80,11 @@ impl Gamepads {
     fn tick(&mut self, _now_ns: u64) {}
     fn apply(&mut self, _pads: &proto::stream::Pads, _now_ns: u64) {}
 }
+
+#[cfg(windows)]
+const DEFAULT_MIC_DEVICE: &str = "CABLE Input|Steam Streaming Microphone";
+#[cfg(not(windows))]
+const DEFAULT_MIC_DEVICE: &str = "BlackHole";
 
 #[derive(Parser, Clone)]
 #[command(about = "Stream this machine's screen to a displaywire client")]
@@ -122,7 +131,10 @@ pub struct Cli {
     /// The device-management window (started by the tray icon): the server's loopback port and token.
     #[arg(long, hide = true, num_args = 2, value_names = ["PORT", "TOKEN"])]
     ui: Option<Vec<String>>,
-    /// Windows: no notification-area icon.
+    /// The Mac's permissions window (started by the menu bar).
+    #[arg(long, hide = true)]
+    permissions: bool,
+    /// No notification-area icon (Windows) or menu-bar item (Mac).
     #[arg(long)]
     no_tray: bool,
     /// Don't share the clipboard with the client.
@@ -143,10 +155,10 @@ pub struct Cli {
     /// Don't play the client's microphone.
     #[arg(long)]
     no_mic: bool,
-    /// Windows: the audio output the client's microphone is played into, by (part of) its name; `|` separates
-    /// alternatives, tried in order. A virtual cable such as VB-Cable ("CABLE Input", whose other end,
-    /// "CABLE Output", apps then record from) or Steam's virtual microphone.
-    #[arg(long, default_value = "CABLE Input|Steam Streaming Microphone")]
+    /// The audio output the client's microphone is played into, by (part of) its name; `|` separates
+    /// alternatives, tried in order. On Windows a virtual cable such as VB-Cable ("CABLE Input", whose other
+    /// end, "CABLE Output", apps then record from) or Steam's virtual microphone; on a Mac, BlackHole.
+    #[arg(long, default_value = DEFAULT_MIC_DEVICE)]
     mic_device: String,
     /// Send a test tone instead of the desktop's audio.
     #[arg(long)]
@@ -161,9 +173,10 @@ pub struct Cli {
     pub profile: bool,
     /// Windows: install and start a service that runs this server as SYSTEM
     /// (streams UAC prompts and the lock screen), with the other options given.
+    /// Mac: start it at login (a LaunchAgent), with the other options given, and start it now.
     #[arg(long)]
     install_service: bool,
-    /// Windows: stop and remove the service.
+    /// Windows: stop and remove the service. Mac: stop it and no longer start it at login.
     #[arg(long)]
     uninstall_service: bool,
     /// Windows: install to Program Files, with the service, firewall rule and an entry in Installed apps
@@ -348,6 +361,11 @@ fn main() {
     if std::env::args_os().len() == 1 && !windows::setup::interactive() {
         return;
     }
+    // Opened from Finder: set up starting at login (once) and hand over to it.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().skip(1).all(|a| a.to_string_lossy().starts_with("-psn")) && macos::agent::first_launch() {
+        return;
+    }
     let cli = Cli::parse();
     now_ns();
     if let Err(e) = run(cli) {
@@ -424,7 +442,7 @@ fn client_command(cli: &Cli, dir: &std::path::Path) -> Option<Result<(), String>
                 None => return Err(format!("no paired device with the id or name {who:?} (see --list-clients)")),
             }
         } else if store.list().is_empty() {
-            println!("no devices are paired yet: choose Pair new device in the tray menu");
+            println!("no devices are paired yet: choose Pair new device in the tray (Windows) or menu-bar (Mac) menu");
         } else {
             println!("{:<10} {:<28} {:<16} paired", "id", "name", "last seen from");
             for c in store.list() {
@@ -475,15 +493,36 @@ fn service_command(cli: &Cli, data_dir: &std::path::Path) -> Option<Result<(), S
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn service_command(cli: &Cli, data_dir: &std::path::Path) -> Option<Result<(), String>> {
+    use macos::agent;
+    if cli.install_service {
+        if let Err(e) = clients::Store::open(data_dir) {
+            return Some(Err(e));
+        }
+        let args: Vec<_> = std::env::args_os().skip(1).filter(|a| a != "--install-service").collect();
+        Some(agent::install(&args, true))
+    } else if cli.uninstall_service {
+        Some(agent::uninstall(false))
+    } else {
+        (cli.service || cli.check_update || cli.update || cli.setup || cli.uninstall)
+            .then(|| Err("on a Mac, use --install-service to start at login; updates aren't automatic yet".into()))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn service_command(cli: &Cli, _data_dir: &std::path::Path) -> Option<Result<(), String>> {
     (cli.install_service || cli.uninstall_service || cli.service || cli.check_update || cli.update).then(|| Err("the service and updates are Windows only".into()))
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if cli.permissions {
+        return macos::setup::run();
+    }
     if let Some(a) = &cli.ui {
         let port: u16 = a[0].parse().map_err(|_| "bad --ui port")?;
-        #[cfg(any(windows, feature = "ui-dev"))]
+        #[cfg(any(windows, target_os = "macos", feature = "ui-dev"))]
         {
             // No console to read errors from: keep them in a file the user can find.
             let log = std::env::temp_dir().join("displaywire-ui.log");
@@ -497,7 +536,7 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             return result;
         }
-        #[cfg(not(any(windows, feature = "ui-dev")))]
+        #[cfg(not(any(windows, target_os = "macos", feature = "ui-dev")))]
         return Err(format!("the management window is only built for Windows (port {port})"));
     }
     let data_dir = cli.data_dir.clone().unwrap_or_else(auth::default_dir);
@@ -512,13 +551,23 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     let store = clients::Store::open(&data_dir)?;
     match store.list().len() {
-        0 => println!("no devices are paired yet: choose Pair new device in the tray menu"),
+        0 => println!("no devices are paired yet: choose Pair new device in the tray (Windows) or menu-bar (Mac) menu"),
         n => println!("{n} paired device{}", if n == 1 { "" } else { "s" }),
     }
-    let server_name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "displaywire-server".into());
+    #[cfg(target_os = "macos")]
+    let mac_name = macos::computer_name();
+    #[cfg(not(target_os = "macos"))]
+    let mac_name: Option<String> = None;
+    let server_name = mac_name
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "displaywire-server".into());
     let _tuning = (!cli.no_wifi_tuning).then(wlan::tune).flatten();
+    // On a Mac the menu-bar item takes the main thread and the main stream runs beside it, opening
+    // its screen source there (a source belongs to the thread that uses it).
+    let menu_bar = cfg!(target_os = "macos") && !cli.no_tray && cli.file.is_none() && !cli.control_only;
     let source: Box<dyn Source> = match &cli.file {
-        _ if cli.control_only => Box::new(NoSource),
+        _ if cli.control_only || menu_bar => Box::new(NoSource),
         Some(path) => Box::new(file::FileSource::open(path, cli.fps)?),
         None => open_screen(&cli, 0, None)?,
     };
@@ -554,6 +603,10 @@ fn run(cli: Cli) -> Result<(), String> {
             windows::tray::start(shared.clone());
             windows::updater::start();
         }
+        #[cfg(target_os = "macos")]
+        if cli.file.is_none() && !cli.control_only {
+            macos::start_background(shared.clone());
+        }
         let opener = stream_opener(&cli, &shared, &sock)?;
         std::thread::spawn(move || control(&sock, &shared, announcement.as_ref(), &transfers, mic, &opener));
     }
@@ -578,7 +631,37 @@ fn run(cli: Cli) -> Result<(), String> {
     }
     println!("displaywire-server on udp/{}, waiting for a client", cli.port);
     let main = shared.stream(0).ok_or("no main stream")?;
-    stream_loop(0, source, main, &shared, &sock, 8e3 / cli.pace_mbps, None)
+    let pace = 8e3 / cli.pace_mbps;
+    #[cfg(target_os = "macos")]
+    if menu_bar {
+        let (shared2, sock) = (shared.clone(), sock.try_clone().map_err(|e| e.to_string())?);
+        drop(source);
+        let cli2 = cli.clone();
+        std::thread::Builder::new()
+            .name("stream-0".into())
+            .spawn(move || {
+                // Without the Screen Recording permission yet, keep trying: the menu says how to allow it.
+                let mut said = String::new();
+                loop {
+                    match open_screen(&cli2, 0, None) {
+                        Ok(source) => {
+                            if let Err(e) = stream_loop(0, source, main.clone(), &shared2, &sock, pace, None) {
+                                eprintln!("error: {e}");
+                            }
+                        }
+                        Err(e) if e != said => {
+                            eprintln!("{e}");
+                            said = e;
+                        }
+                        Err(_) => {}
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        macos::menubar::run(shared);
+    }
+    stream_loop(0, source, main, &shared, &sock, pace, None)
 }
 
 /// Starts stream `id` showing `monitor` for the session at the given address, in a thread of its own
@@ -856,14 +939,23 @@ fn open_screen(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<Box<dyn Sou
     Ok(Box::new(windows::ScreenSource::open(cli, stream, monitor)?))
 }
 
+#[cfg(target_os = "macos")]
+fn open_screen(cli: &Cli, stream: u8, monitor: Option<u8>) -> Result<Box<dyn Source>, String> {
+    Ok(Box::new(macos::ScreenSource::open(cli, stream, monitor)?))
+}
+
 /// Starts playing the client's microphone, if there's somewhere to play it.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn open_mic(cli: &Cli) -> Option<mic::Sink> {
     if cli.no_mic || cli.file.is_some() {
         return None;
     }
     let (sink, consumer) = mic::channel();
-    match windows::micout::start(&cli.mic_device, consumer) {
+    #[cfg(windows)]
+    let started = windows::micout::start(&cli.mic_device, consumer);
+    #[cfg(target_os = "macos")]
+    let started = macos::micout::start(&cli.mic_device, consumer);
+    match started {
         Ok(()) => Some(sink),
         Err(e) => {
             eprintln!("microphone passthrough unavailable: {e}");
@@ -872,7 +964,7 @@ fn open_mic(cli: &Cli) -> Option<mic::Sink> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_mic(_cli: &Cli) -> Option<mic::Sink> {
     None
 }
@@ -888,14 +980,25 @@ fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
+    match macos::SystemAudio::open() {
+        Ok(a) => Some(Box::new(a)),
+        Err(e) => {
+            eprintln!("audio capture unavailable, streaming video only: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_audio() -> Option<Box<dyn audio::AudioSource>> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_screen(_cli: &Cli, _stream: u8, _monitor: Option<u8>) -> Result<Box<dyn Source>, String> {
-    Err("screen capture is only implemented on Windows; use --file".into())
+    Err("screen capture is only implemented on Windows and macOS; use --file".into())
 }
 
 /// A token bucket: `per_sec` on average, up to `burst` at once.
@@ -912,7 +1015,7 @@ impl HandshakeLimiter {
     }
 
     fn allow(&mut self, now: u64) -> bool {
-        self.tokens = (self.tokens + (now - self.last_ns) as f64 / SEC as f64 * self.per_sec).min(self.burst);
+        self.tokens = (self.tokens + now.saturating_sub(self.last_ns) as f64 / SEC as f64 * self.per_sec).min(self.burst);
         self.last_ns = now;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -946,7 +1049,7 @@ struct PerSource(std::collections::HashMap<std::net::IpAddr, HandshakeLimiter>);
 impl PerSource {
     fn allow(&mut self, ip: std::net::IpAddr, now: u64) -> bool {
         if self.0.len() > 256 {
-            self.0.retain(|_, l| now - l.last_ns < 60 * SEC);
+            self.0.retain(|_, l| now.saturating_sub(l.last_ns) < 60 * SEC);
         }
         self.0.entry(ip).or_insert_with(|| HandshakeLimiter::new(2.0, 5.0)).allow(now)
     }
@@ -1111,6 +1214,10 @@ fn control(
                         println!("{from}: connected ({name})");
                         store.touch(&p.client, from);
                     }
+                    // The virtual display first, so the monitors the client is told about include it
+                    // and the window it reopens on it finds it.
+                    #[cfg(target_os = "macos")]
+                    macos::virtual_display::on_connect();
                     *shared.link.lock().unwrap() = Some(link.clone());
                     shared.caps.store(p.caps, Relaxed);
                     shared.last_seen_ns.store(now, Relaxed);

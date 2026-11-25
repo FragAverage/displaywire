@@ -1,7 +1,8 @@
 //! Clipboard sharing and file upload: the server's side of `xfer`.
 //!
 //! Text copied on either machine appears on the other. Files sent from the
-//! client are saved in the logged-in user's `Downloads\DisplayWire` folder.
+//! client are saved in the logged-in user's `Downloads\DisplayWire` folder (`~/Downloads/DisplayWire`
+//! on a Mac); files the server's user sends (the Mac's menu bar) go to the client's.
 //! Everything arrives through the authenticated session; `--no-files` and
 //! `--no-clipboard` turn the two features off.
 
@@ -14,15 +15,20 @@ use std::time::Duration;
 
 use proto::stream::Msg;
 use timing::now_ns;
-use xfer::{Bytes, Endpoint, Event, Kind, Meta, Outgoing, Sink};
+use xfer::clipfiles::Inbox;
+use xfer::{Bytes, Endpoint, Event, Kind, Meta, Outgoing, Sink, safe_file_name, unique_path};
 
 use crate::Shared;
 
 /// Clipboard text beyond this is neither sent nor accepted.
 const MAX_CLIPBOARD: u64 = 1 << 20;
 const CLIPBOARD_POLL_NS: u64 = 250_000_000;
-/// Uploads to the client (there are none yet) and clipboard text go at this rate.
-const SEND_RATE: u64 = 5_000_000;
+/// Files to the client and clipboard text go at no more than this (bytes a second), so they
+/// can't starve the video.
+const SEND_RATE: u64 = 8_000_000;
+
+/// The one set of transfers, for sending a file from elsewhere (the menu bar).
+static TRANSFERS: std::sync::OnceLock<Arc<Transfers>> = std::sync::OnceLock::new();
 
 pub struct Options {
     pub clipboard: bool,
@@ -35,12 +41,22 @@ pub struct Transfers {
     options: Arc<Options>,
     /// Clipboard text arriving from the client.
     slot: Arc<Mutex<Vec<u8>>>,
-    /// Folder uploads go to, once known.
-    last_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Where the last upload was saved.
+    last_saved: Arc<Mutex<Option<PathBuf>>>,
+    /// Files copied on the client, waiting to be pasted here.
+    inbox: Option<Arc<Mutex<Inbox>>>,
+    /// Files dropped on the client's window, arriving before they're put where the pointer is.
+    drops: Option<Arc<Mutex<Inbox>>>,
 }
 
-fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &Arc<Mutex<Option<PathBuf>>>) -> Endpoint {
-    let (opts, slot, last_dir) = (options.clone(), slot.clone(), last_dir.clone());
+fn make_endpoint(
+    options: &Arc<Options>,
+    slot: &Arc<Mutex<Vec<u8>>>,
+    last_saved: &Arc<Mutex<Option<PathBuf>>>,
+    inbox: &Option<Arc<Mutex<Inbox>>>,
+    drops: &Option<Arc<Mutex<Inbox>>>,
+) -> Endpoint {
+    let (opts, slot, last_saved, inbox, drops) = (options.clone(), slot.clone(), last_saved.clone(), inbox.clone(), drops.clone());
     Endpoint::new(options.max_file_bytes.max(MAX_CLIPBOARD), SEND_RATE, move |meta| match meta.kind {
         Kind::Clipboard => {
             if !opts.clipboard || meta.size > MAX_CLIPBOARD {
@@ -49,12 +65,20 @@ fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &
             slot.lock().unwrap().clear();
             Ok(Box::new(ClipboardSink(slot.clone())) as Box<dyn Sink>)
         }
+        Kind::ClipboardFile => match &inbox {
+            Some(inbox) if opts.clipboard && opts.files => inbox.lock().unwrap().sink(meta),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "copying files across is off")),
+        },
+        Kind::DropFile => match &drops {
+            Some(drops) if opts.files && meta.size <= opts.max_file_bytes => drops.lock().unwrap().sink(meta),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "file upload is off or the file is too large")),
+        },
         Kind::File => {
             if !opts.files || meta.size > opts.max_file_bytes {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "file upload is off or the file is too large"));
             }
             let sink = FileSink::create(&meta.name)?;
-            *last_dir.lock().unwrap() = sink.dest.parent().map(Path::to_path_buf);
+            *last_saved.lock().unwrap() = Some(sink.dest.clone());
             Ok(Box::new(sink))
         }
     })
@@ -63,12 +87,74 @@ fn make_endpoint(options: &Arc<Options>, slot: &Arc<Mutex<Vec<u8>>>, last_dir: &
 impl Transfers {
     pub fn new(options: Options) -> Arc<Transfers> {
         let options = Arc::new(options);
-        let (slot, last_dir) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
-        Arc::new(Transfers { endpoint: Mutex::new(make_endpoint(&options, &slot, &last_dir)), options, slot, last_dir })
+        let (slot, last_saved) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
+        let inbox = platform::clipboard_files_dir().ok().map(Inbox::new);
+        let drops = platform::clipboard_files_dir().ok().map(|d| Inbox::new(d.with_file_name("Drops")));
+        let endpoint = Mutex::new(make_endpoint(&options, &slot, &last_saved, &inbox, &drops));
+        let t = Arc::new(Transfers { endpoint, options, slot, last_saved, inbox, drops });
+        let _ = TRANSFERS.set(t.clone());
+        t
+    }
+
+    /// Starts sending a file to the connected client, which saves it in its Downloads folder.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn send_file(path: &Path) -> Result<(), String> {
+        let t = TRANSFERS.get().ok_or("transfers aren't running")?;
+        if !t.options.files {
+            return Err("file transfer is off (--no-files)".into());
+        }
+        let file = File::open(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+        let md = file.metadata().map_err(|e| e.to_string())?;
+        if !md.is_file() {
+            return Err(format!("{} is a folder: zip it first", path.display()));
+        }
+        let name = path.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+        println!("sending {name} ({} bytes) to the client", md.len());
+        t.endpoint.lock().unwrap().send(Meta { kind: Kind::File, size: md.len(), name }, Box::new(file));
+        Ok(())
+    }
+
+    /// Files dropped on the client's window have all arrived: into the folder under the pointer
+    /// (a Finder window or the Desktop), as a drag there would; anywhere else, into the
+    /// received-files folder and onto the clipboard, ready to paste.
+    fn place_drop(&self, paths: &[PathBuf], own_seq: &mut u32, last_seq: &mut u32) {
+        let target = platform::folder_under_pointer();
+        let dir = match &target {
+            Some(d) => d.clone(),
+            None => match platform::uploads_dir() {
+                Ok(d) => d,
+                Err(e) => return println!("drop: {e}"),
+            },
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let mut placed = Vec::new();
+        for p in paths {
+            let name = p.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+            let dest = unique_path(&dir, &safe_file_name(&name));
+            if std::fs::rename(p, &dest).or_else(|_| std::fs::copy(p, &dest).map(|_| ())).is_ok() {
+                placed.push(dest);
+            }
+        }
+        println!("dropped {} file(s) into {}", placed.len(), dir.display());
+        if target.is_none() && platform::set_clipboard_files(&placed) {
+            *own_seq = platform::clipboard_sequence();
+            *last_seq = *own_seq;
+            platform::notify(&format!("{} file(s) in Downloads › DisplayWire, also on the clipboard: ⌘V to paste", placed.len()));
+        }
+        if let Some(last) = placed.last()
+            && target.is_none()
+        {
+            platform::reveal(last);
+        }
     }
 
     /// A transfer message from the client; returns what to send back.
     pub fn handle(&self, now: u64, msg: &Msg) -> Vec<Outgoing> {
+        match *msg {
+            Msg::Xfer { id, index: 0, .. } => println!("transfer {id}: starting"),
+            Msg::XferCancel { id, reason } => println!("transfer {id}: the client stopped it (reason {reason})"),
+            _ => {}
+        }
         let mut e = self.endpoint.lock().unwrap();
         transport::transfer::handle(&mut e, now, msg).unwrap_or_default()
     }
@@ -97,7 +183,7 @@ impl Transfers {
             if link.session.id() != session {
                 // A new session: whatever was in flight belonged to the last one.
                 if session != 0 {
-                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_dir);
+                    *self.endpoint.lock().unwrap() = make_endpoint(&self.options, &self.slot, &self.last_saved, &self.inbox, &self.drops);
                 }
                 session = link.session.id();
                 last_seq = platform::clipboard_sequence();
@@ -119,12 +205,38 @@ impl Transfers {
                             last_sent_text = text;
                         }
                     }
-                    Event::Received { meta, .. } => {
-                        let dir = self.last_dir.lock().unwrap().clone().map(|d| d.display().to_string()).unwrap_or_default();
-                        println!("received {} ({} bytes) in {dir}", meta.name, meta.size);
-                        platform::notify(&format!("Received {}", meta.name));
+                    Event::Received { meta, .. } if meta.kind == Kind::ClipboardFile => {
+                        let paths = self.inbox.as_ref().and_then(|i| i.lock().unwrap().received(&meta));
+                        if let Some(paths) = paths
+                            && platform::set_clipboard_files(&paths)
+                        {
+                            own_seq = platform::clipboard_sequence();
+                            last_seq = own_seq;
+                            println!("{} copied file(s) from the client, ready to paste", paths.len());
+                        }
                     }
-                    Event::ReceiveFailed { why, .. } => eprintln!("transfer from the client failed: {why}"),
+                    Event::Received { meta, .. } if meta.kind == Kind::DropFile => {
+                        if let Some(paths) = self.drops.as_ref().and_then(|d| d.lock().unwrap().received(&meta)) {
+                            self.place_drop(&paths, &mut own_seq, &mut last_seq);
+                        }
+                    }
+                    Event::Received { meta, .. } => {
+                        let saved = self.last_saved.lock().unwrap().clone();
+                        println!("received {} ({} bytes) as {}", meta.name, meta.size, saved.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
+                        platform::notify(&format!("Received {}", meta.name));
+                        if let Some(p) = saved {
+                            platform::reveal(&p);
+                        }
+                    }
+                    Event::ReceiveFailed { why, .. } => println!("transfer from the client failed: {why}"),
+                    Event::Sent { meta, .. } if meta.kind == Kind::File => {
+                        println!("sent {}", meta.name);
+                        platform::notify(&format!("Sent {}", meta.name));
+                    }
+                    Event::SendFailed { meta, why, .. } if meta.kind == Kind::File => {
+                        println!("sending {} failed: {why}", meta.name);
+                        platform::notify(&format!("Couldn't send {}: {why}", meta.name));
+                    }
                     Event::Sent { .. } | Event::SendFailed { .. } => {}
                 }
             }
@@ -133,7 +245,14 @@ impl Transfers {
                 let seq = platform::clipboard_sequence();
                 if seq != last_seq {
                     last_seq = seq;
-                    if seq != own_seq
+                    let files = if seq != own_seq && self.options.files { platform::clipboard_files() } else { None };
+                    if let Some(files) = files {
+                        // Files copied here: they go across now, ready to paste there.
+                        match xfer::clipfiles::send(&mut self.endpoint.lock().unwrap(), &files, Kind::ClipboardFile) {
+                            Ok(n) => println!("copying {n} file(s) to the client's clipboard"),
+                            Err(e) => platform::notify(&format!("Not copied to the other computer: {e}")),
+                        }
+                    } else if seq != own_seq
                         && let Some(text) = platform::clipboard_text()
                         && !text.is_empty()
                         && text != last_sent_text
@@ -210,57 +329,41 @@ impl Sink for FileSink {
     }
 }
 
-/// A file name that can't escape the folder or collide with a Windows device name.
-pub fn safe_file_name(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
-    let mut clean: String = base.chars().filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c)).collect();
-    clean = clean.trim_matches([' ', '.']).to_string();
-    let stem = clean.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
-    if clean.is_empty() {
-        return "file".into();
-    }
-    if reserved {
-        clean.insert(0, '_');
-    }
-    // Keep the extension when shortening.
-    if clean.chars().count() > 150 {
-        let ext: String = clean.rsplit_once('.').filter(|(_, e)| e.len() <= 12).map(|(_, e)| format!(".{e}")).unwrap_or_default();
-        let keep = 150 - ext.chars().count();
-        clean = clean.chars().take(keep).collect::<String>() + &ext;
-    }
-    clean
-}
-
-/// `name`, or `name (1)`, `name (2)`… if that exists already.
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
-        _ => (name.to_string(), String::new()),
-    };
-    let taken = |p: &Path| p.exists() || p.with_file_name(format!("{}.part", p.file_name().unwrap().to_string_lossy())).exists();
-    let first = dir.join(name);
-    if !taken(&first) {
-        return first;
-    }
-    (1..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !taken(p))
-        .unwrap()
-}
-
 #[cfg(windows)]
 mod platform {
     pub use crate::windows::shell::*;
     pub fn notify(text: &str) {
         crate::windows::tray::notify(text);
     }
+    /// The tray notification says where it is.
+    pub fn reveal(_: &std::path::Path) {}
+    pub fn folder_under_pointer() -> Option<std::path::PathBuf> {
+        None
+    }
+    // Files on the clipboard aren't shared by the Windows server yet.
+    pub fn clipboard_files() -> Option<Vec<std::path::PathBuf>> {
+        None
+    }
+    pub fn set_clipboard_files(_: &[std::path::PathBuf]) -> bool {
+        false
+    }
+    pub fn clipboard_files_dir() -> std::io::Result<std::path::PathBuf> {
+        Err(std::io::Error::other("not on Windows"))
+    }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 mod platform {
-    //! Off Windows (the `--file` test mode): files go to `~/Downloads/DisplayWire`, no clipboard.
+    pub use crate::macos::shell::{
+        as_user, clipboard_files, clipboard_files_dir, clipboard_sequence, clipboard_text, notify, reveal, set_clipboard_files,
+        set_clipboard_text, uploads_dir,
+    };
+    pub use crate::macos::drop::folder_under_pointer;
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod platform {
+    //! Elsewhere (the `--file` test mode): files go to `~/Downloads/DisplayWire`, no clipboard.
     use std::io;
     use std::path::PathBuf;
 
@@ -272,6 +375,19 @@ mod platform {
     }
     pub fn set_clipboard_text(_: &str) -> bool {
         false
+    }
+    pub fn clipboard_files() -> Option<Vec<PathBuf>> {
+        None
+    }
+    pub fn set_clipboard_files(_: &[PathBuf]) -> bool {
+        false
+    }
+    pub fn clipboard_files_dir() -> io::Result<PathBuf> {
+        Err(io::Error::other("no clipboard here"))
+    }
+    pub fn reveal(_: &std::path::Path) {}
+    pub fn folder_under_pointer() -> Option<PathBuf> {
+        None
     }
     pub fn uploads_dir() -> io::Result<PathBuf> {
         let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no home directory"))?;

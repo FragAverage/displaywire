@@ -6,13 +6,15 @@ Contributions are accepted under the project's licence (MIT), with no extra term
 
 ## How the project fits together
 
-A Windows **server** captures the screen, encodes it and sends it over UDP; a macOS **client** decodes and shows it,
-and sends keyboard, mouse, clipboard, files and microphone back.
+A Windows **server** captures the screen, encodes it and sends it over UDP; a **client** (macOS or Windows) decodes
+and shows it, and sends keyboard, mouse, clipboard, files and microphone back.
 
 | Path | What |
 |---|---|
 | `server/` | Windows service and tray: capture (DXGI Desktop Duplication), NV12 conversion, NVENC / Media Foundation HEVC, WASAPI audio, input injection, pairing, the device window (egui) |
+| `server/src/macos/` | The Mac server: ScreenCaptureKit capture and system audio, VideoToolbox HEVC encode (`crates/videotoolbox`), `CGEvent` input, the pointer for clients that draw it, clipboard, BlackHole microphone output, the menu-bar item and the login LaunchAgent. Everything else in `server/src` (sessions, pairing, rate control, transfers) is shared with Windows |
 | `client/` | macOS app (winit + AppKit via objc2): receive, reassemble, VideoToolbox decode, Metal/CoreAnimation present, the PC launcher and pairing window |
+| `client/src/win/` | The Windows client's own parts: Media Foundation HEVC decode on D3D11, video-processor present with a Direct2D overlay, the stream window and its menu, XInput gamepads, clipboard, and the PC list / pairing / settings window (egui, a process of its own that starts one `displaywire-client <address>` per connection). The network, audio, input and transfer code in `client/src` is shared with the Mac |
 | `crates/proto` | Wire format and discovery messages |
 | `crates/transport` | Sockets, frame packetizing and reassembly, FEC, Windows Wi-Fi tuning |
 | `crates/secure` | Noise handshake, the encrypted transport, and the PIN pairing crypto (SPAKE2) |
@@ -39,7 +41,30 @@ cargo build --release          # the Mac client and tools
 cargo test --workspace
 ```
 
-The server only builds for Windows. Either build it on a Windows machine with the same cargo commands
+On Windows, `cargo build --release -p displaywire-client` builds the Windows client. It shares `receiver.rs`,
+`input.rs`, `transfer.rs` and `servers.rs` with the Mac client, split by `#[cfg]`: after changing those, build on
+both systems (or let CI). Debug builds take `DISPLAYWIRE_TEST_SCRIPT=pair:ADDR` or `connect:ADDR`,
+`DISPLAYWIRE_TEST_PIN_FILE` and `DISPLAYWIRE_TEST_ARGS` to run the PC list's flows without a mouse, and
+`--view-only` streams without sending any input (for testing against the PC you are sitting at).
+
+### The Mac server
+
+On a Mac (13 or later) `cargo build --release -p displaywire-server` builds the Mac server, and
+`scripts/bundle-mac-server.sh target/release/displaywire-server target/release` wraps it as
+`DisplayWire Server.app`. Run from a terminal, macOS asks the *terminal* for Screen Recording and Accessibility; as
+the app, it asks for the app (and again after each rebuild, since the ad-hoc signature changes). Tests that drive the
+real pointer, keyboard and clipboard are ignored by default: `cargo test -p displaywire-server -- --ignored`.
+`DISPLAYWIRE_DUMP=file.h265` makes it append what it encodes to a file, to look at with ffmpeg. To try it alone:
+
+```
+target/release/displaywire-server --no-tray --port 9100 --data-dir /tmp/dw-mac &
+target/release/pairprobe 127.0.0.1:9100     # after "pair-start" (see --pair), or use the menu bar
+target/release/displaywire-client 127.0.0.1:9100
+```
+
+### The Windows server
+
+The Windows server only builds for Windows. Either build it on a Windows machine with the same cargo commands
 (`cargo build --release -p displaywire-server`), or cross-compile from the Mac:
 
 ```

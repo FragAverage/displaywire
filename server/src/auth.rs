@@ -31,7 +31,11 @@ pub fn default_dir() -> PathBuf {
     {
         PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into())).join("DisplayWire")
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join("Library/Application Support/DisplayWire Server")
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config/displaywire")
     }

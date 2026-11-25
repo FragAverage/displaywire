@@ -1,6 +1,6 @@
 //! All the transfers of one side of the link, in both directions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 
@@ -53,6 +53,8 @@ pub struct Endpoint {
     factory: Factory,
     next_id: u32,
     senders: HashMap<u32, Sender<Box<dyn Source + Send>>>,
+    /// Sends waiting for a free slot: the other side receives `MAX_CONCURRENT_RECEIVES` at once.
+    waiting: VecDeque<(u32, Meta, Box<dyn Source + Send>)>,
     incoming: HashMap<u32, Incoming>,
     events: Vec<Event>,
 }
@@ -61,20 +63,31 @@ impl Endpoint {
     /// `max_receive`: the largest transfer accepted. `send_rate`: bytes per second
     /// uploads are held to. `make_sink` creates where an incoming transfer goes.
     pub fn new(max_receive: u64, send_rate: u64, make_sink: impl Fn(&Meta) -> io::Result<Box<dyn Sink>> + Send + Sync + 'static) -> Endpoint {
-        Endpoint { max_receive, send_rate, factory: Arc::new(make_sink), next_id: 1, senders: HashMap::new(), incoming: HashMap::new(), events: Vec::new() }
+        Endpoint { max_receive, send_rate, factory: Arc::new(make_sink), next_id: 1, senders: HashMap::new(), waiting: VecDeque::new(), incoming: HashMap::new(), events: Vec::new() }
     }
 
-    /// Starts sending; returns the transfer's id.
+    /// Starts sending, or queues it while the other side is receiving as many as it takes at
+    /// once; returns the transfer's id.
     pub fn send(&mut self, meta: Meta, source: Box<dyn Source + Send>) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        self.senders.insert(id, Sender::new(meta, source, self.send_rate));
+        self.waiting.push_back((id, meta, source));
+        self.start_waiting();
         id
+    }
+
+    fn start_waiting(&mut self) {
+        while self.senders.len() < MAX_CONCURRENT_RECEIVES
+            && let Some((id, meta, source)) = self.waiting.pop_front()
+        {
+            self.senders.insert(id, Sender::new(meta, source, self.send_rate));
+        }
     }
 
     /// Stops sending a transfer (the other side is told when it next hears from us).
     pub fn cancel_send(&mut self, id: u32) {
         self.senders.remove(&id);
+        self.waiting.retain(|w| w.0 != id);
     }
 
     pub fn on_block(&mut self, now: u64, id: u32, index: u32, payload: &[u8]) -> Vec<Outgoing> {
@@ -140,6 +153,7 @@ impl Endpoint {
                 self.events.push(Event::Sent { id, meta: s.meta().clone() });
             }
         }
+        self.start_waiting();
         for (&id, inc) in &mut self.incoming {
             if inc.receiver.wants_ack(now) {
                 let a = inc.receiver.ack(now);
@@ -173,6 +187,7 @@ impl Endpoint {
                 (id, true, s.meta().kind, d, t, s.meta().name.clone())
             })
             .collect();
+        v.extend(self.waiting.iter().map(|(id, m, _)| (*id, true, m.kind, 0, m.size, m.name.clone())));
         v.extend(self.incoming.iter().filter(|(_, i)| i.done_ns.is_none()).filter_map(|(&id, i)| {
             let m = i.receiver.meta()?;
             let (d, t) = i.receiver.progress();
@@ -182,7 +197,7 @@ impl Endpoint {
     }
 
     pub fn is_idle(&self) -> bool {
-        self.senders.is_empty() && self.incoming.values().all(|i| i.done_ns.is_some())
+        self.senders.is_empty() && self.waiting.is_empty() && self.incoming.values().all(|i| i.done_ns.is_some())
     }
 }
 

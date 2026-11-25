@@ -9,8 +9,11 @@
 //! This crate only decides what to send and what has arrived. Sockets, files
 //! and clocks belong to the caller.
 
+pub mod clipfiles;
 mod endpoint;
+mod names;
 pub use endpoint::{Endpoint, Event, Outgoing};
+pub use names::{safe_file_name, unique_path};
 
 use std::collections::BTreeMap;
 use std::io;
@@ -38,6 +41,12 @@ const MAX_EARLY: usize = 128;
 pub enum Kind {
     File = 0,
     Clipboard = 1,
+    /// A file copied to the clipboard: one of a batch (see `clipfiles`), put on the other
+    /// side's clipboard when all have arrived.
+    ClipboardFile = 2,
+    /// A file dropped on the stream window: one of a batch, like `ClipboardFile`, saved where
+    /// the pointer is on the other side when the batch is in.
+    DropFile = 3,
 }
 
 /// What block 0 says about a transfer.
@@ -64,6 +73,8 @@ impl Meta {
         let kind = match *b.first()? {
             0 => Kind::File,
             1 => Kind::Clipboard,
+            2 => Kind::ClipboardFile,
+            3 => Kind::DropFile,
             _ => return None,
         };
         let size = u64::from_le_bytes(b.get(1..9)?.try_into().ok()?);

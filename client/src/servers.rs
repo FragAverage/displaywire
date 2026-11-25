@@ -3,6 +3,7 @@
 //! 0600 since it holds keys. Earlier versions kept a list of recent addresses and one key
 //! file per address; the first run imports those.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -80,6 +81,8 @@ fn write(servers: &[Server]) -> Result<(), String> {
     }
     // Empty and private first, then filled in, so the keys are never readable by others.
     std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    // (On Windows the file is under the user's own profile, which other users can't read.)
+    #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     std::fs::write(&path, format(servers)).map_err(|e| e.to_string())
 }

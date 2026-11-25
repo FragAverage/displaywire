@@ -34,39 +34,66 @@ or a DualShock 4 when the Mac pad is a PlayStation one (gyro, touchpad, light ba
 - [ ] Installer: offer ViGEmBus; check its licence (BSD-3) and redistribution of the signed driver.
 - [ ] README: controllers section.
 
-## 3. Windows client (agreed)
-Decided: D3D11 video decode (any GPU, zero-copy to the swapchain); one shared cross-platform UI for the PC list,
-pairing and settings on both Mac and Windows; one `client` crate with platform modules like the server; v1 has the
-Win key / Alt-Tab hook, raw relative mouse, gamepads, clipboard and file drop. UI toolkit: egui, drawn in our own
-winit window (also replaces the AppKit launcher, pairing sheet and settings on the Mac).
-- [ ] Split `client/src` into shared code (receiver, pacing, clock, stats, settings, servers, transfer, updater) and
-      `macos/` + `windows/` behind small traits: Decoder, Presenter, AudioOut, Mic, Input, Clipboard.
-- [ ] Shared UI toolkit for launcher, pairing, settings and dialogs; port the Mac launcher to it with egui.
-- [ ] Decode: `ID3D11VideoDecoder` HEVC Main (Main10 later for item 8), parse slices with `crates/hevc`.
-- [ ] Present: flip-model swapchain (`FLIP_DISCARD`, waitable object, tearing allowed), NV12 → RGB in a pixel shader.
-- [ ] Audio: WASAPI shared-mode render with the existing jitter cushion; WASAPI capture for the mic.
-- [ ] Input: Raw Input for relative mouse; `WH_KEYBOARD_LL` hook for Win key, Alt-Tab and friends while focused;
-      ClipCursor when captured; let go of everything on focus loss.
-- [ ] Gamepads: GameInput (or XInput) to the item 2 protocol.
-- [ ] Clipboard (text, skip `ExcludeClipboardContentFromMonitorProcessing`) and drag-and-drop files.
-- [ ] Wi-Fi: the Windows equivalent of AWDL tuning (`WlanSetInterface` background scan off, streaming mode).
-- [ ] Packaging: signed zip + update channel for the client; winget later.
-## 4. Mac server (agreed)
+## 3. Windows client (first version built 2026-11-23, tested against a local server; input not yet tested by hand)
+Built in `client/src/win/`, sharing the receiver, audio, input, transfer and saved-PC code with the Mac.
+What differs from what was decided:
+- Decode is Media Foundation's HEVC decoder on D3D11 (needs the *HEVC Video Extensions*), not our own
+  `ID3D11VideoDecoder` with slice parsing. Far less code and it works on any GPU the extension supports; our own
+  DXVA decode would drop the extension requirement.
+- The PC list, pairing and settings are egui (eframe) in a process of their own, which starts one
+  `displaywire-client <address>` per connection: eframe and the stream can't share an event loop. The Mac keeps its
+  AppKit launcher for now.
+- [x] Decode + present: MFT (low latency mode) → `ID3D11VideoProcessor` → flip-model swap chain, tearing allowed;
+      banner, placeholder and stats graph drawn with Direct2D. Measured on loopback at 1080p: decode 0.4–0.9 ms,
+      capture → decoded 4–8 ms; 5% simulated loss repaired with no decode errors.
+- [x] Other monitors in windows of their own, placed on a free local display, reopened on the next connection;
+      "Open All Monitors" (Ctrl+Alt+A, `--all-monitors`).
+- [x] Audio and microphone (cpal/WASAPI, the Mac's code), clipboard text (skips
+      `ExcludeClipboardContentFromMonitorProcessing`), file drop and Send File, the PC's pointer as the local cursor.
+- [x] Input: winit keys and raw relative mouse; `WH_KEYBOARD_LL` for the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc and
+      Alt+F4 while in full screen or with the pointer captured (confined + hidden). **Needs a test by hand against
+      another PC**: it was only run view-only here, since the test server was the same machine. The same goes for
+      the microphone, clipboard, file sending and gamepads.
+- [x] Gamepads: XInput (Xbox layout, rumble). No Guide button, no PlayStation extras.
+- [x] Wi-Fi: `transport::wlan` tuning while connected (the setting the Mac uses for AWDL).
+- [x] CI builds and lints it; the release workflow zips `DisplayWire-windows.zip` (not run yet).
+- [ ] Signed updates for the Windows client (`dwsign` only signs the Mac app and the server), an icon, winget.
+- [ ] Our own D3D11VA decode, to drop the HEVC extension requirement.
+- [ ] Port the Mac launcher to the shared egui UI, or the Windows one to native: one of them should go.
+## 4. Mac server (built 2026-11-23, tested on one MacBook Air over loopback)
 Decided: macOS 13+ (ScreenCaptureKit captures system audio, no loopback driver); menu-bar app started by a
 LaunchAgent at login, mirroring the Windows tray (no login-window streaming); virtual display comes with item 7.
-- [ ] Split `server/src` like the client: shared session/auth/pairing/transfer code, `windows/` and `macos/` sources.
-- [ ] Capture: `SCStream` of one display at native size and refresh rate, IOSurface-backed, cursor composited by SCK
-      (until item 6), frames only on change.
-- [ ] Encode: VideoToolbox HEVC, `RealTime`, `PrioritizeEncodingSpeedOverQuality`, low-latency rate control
-      (`EnableLowLatencyRateControl`), no B-frames, infinite GOP; reuse `crates/videotoolbox`.
-- [ ] Audio: SCK audio (exclude our own process) → the existing PCM16 path.
-- [ ] Mic: play into a virtual input device; decide on BlackHole vs our own Audio Server plug-in.
-- [ ] Input: `CGEventPost` for keys, mouse, wheel; Windows-key ↔ ⌘ mapping the other way round; Accessibility
-      permission prompt and a clear message when it's missing.
-- [ ] Clipboard (NSPasteboard, skip `org.nspasteboard.ConcealedType`) and received files into `~/Downloads/DisplayWire`.
-- [ ] Permissions UX: Screen Recording + Accessibility first-run walkthrough; pairing and device list in the menu bar.
-- [ ] Keep the Mac awake while streaming (`IOPMAssertion`); Bonjour/our discovery answer.
-- [ ] Packaging: same `.app` with a server mode, or a second app; Homebrew cask; signed updates.
+Built in `server/src/macos/`; `main.rs`, sessions, pairing, rate control and transfers are shared with Windows.
+Tested here: pairing (pairprobe), the Mac client against it (1920×1200 at 60 fps cap, capture → decoded ~9 ms on
+loopback, 0 decode errors), system audio arriving at the client, and by hand-run tests (`--ignored`) the pointer
+(absolute and relative), a modifier key and the clipboard. **Not yet tested from a PC**: the Windows client
+viewing and controlling the Mac (typing, shortcuts, double-clicks, scrolling, files, the mic into BlackHole).
+- [x] Split `server/src`: already shared apart from the platform parts; `macos/` sits beside `windows/`.
+- [x] Capture: `SCStream` of one display at its mode's pixel size, NV12 IOSurfaces, frames only on change
+      (`SCFrameStatus::Complete`), the newest kept; resolution changes followed every second (new encoder, keyframe).
+- [x] Encode: VideoToolbox HEVC (`crates/videotoolbox::Encoder`): hardware only, `RealTime`, no reordering, no periodic
+      keyframes, `EnableLowLatencyRateControl` when offered, `PrioritizeEncodingSpeedOverQuality`, Annex B with AUD.
+      Low-latency rate control alone made ~12 KB keyframes (smeared text): `MaxAllowedFrameQP` 30 fixes that
+      (~95 KB at 1920×1200), and a still screen is encoded once more after 250 ms to sharpen it.
+- [x] Audio: a second, audio-only `SCStream` (own process excluded) → PCM16 chunks.
+- [x] Mic: plays into BlackHole (`--mic-device`, default "BlackHole"), opened on its own thread (CoreAudio hung
+      opening it on the main thread). Our own Audio Server plug-in: not now.
+- [x] Input: `CGEventPost` at the HID tap; scancode → Mac key code by position (Windows key = ⌘, Alt = ⌥); modifiers as
+      flags-changed events with the flags set on every event; click counts for double clicks; pixel scrolling;
+      relative motion with deltas for games; Accessibility prompt and a clear message when it's missing.
+- [x] Pointer for `CAP_CURSOR` clients from `NSCursor.currentSystemCursor` (deprecated: falls back to drawing it in the
+      video if macOS stops giving it).
+- [x] Clipboard (NSPasteboard, skips `org.nspasteboard.ConcealedType`/`TransientType`); files into `~/Downloads/DisplayWire`.
+- [x] Menu bar: status, copy address, received files, pair / manage (the egui window, now built on macOS too), Start
+      at Login, shortcuts to the missing permissions, log, quit. Waits and retries until Screen Recording is allowed.
+- [x] Keeps the display awake while a client is connected (`IOPMAssertion`); discovery is the shared UDP answer.
+- [x] Packaging: `DisplayWire Server.app` (`scripts/bundle-mac-server.sh`, LSUIElement), `--install-service` /
+      `--uninstall-service` write and remove the LaunchAgent; the release workflow builds it universal and zips it.
+- [ ] Test from a PC (Windows client) and from another Mac; a Retina (2×) display; two displays; sleep/wake.
+- [ ] Gamepads into the Mac (no ViGEm equivalent: a DriverKit virtual HID device, or skip).
+- [ ] Signed updates and a Homebrew cask for the server app; notarization (needs the Developer account, item 11).
+- [ ] Display names: "Built-in Display" / "Display N" for now (NSScreen's names need the main thread).
+- [ ] Bonjour, if the shared discovery isn't enough.
 ## 5. Adaptive bitrate + reference-frame invalidation (done 2026-11-03, tested)
 Decided: the Settings bitrate becomes a ceiling and the server adapts below it ("fixed" checkbox keeps today's
 behaviour); controller on one-way delay plus loss; reference-frame invalidation for lost frames with a keyframe as
@@ -113,7 +140,10 @@ Display Driver (MIT); add a mode matching the client's size and refresh when con
 - [ ] 7c VDD: installer offers it; on connect, add a mode for the client display (e.g. 3024×1964@120), optionally make
       it primary and turn physical screens off for the session ("headless mode" setting); restore on disconnect,
       including after a crash (persist what we changed).
-- [ ] Mac server (item 4): `CGVirtualDisplay` equivalent.
+- [x] Mac server (item 4): a `CGVirtualDisplay` (private API, as Parsec/DeskPad) while a client is connected,
+      switched on in the menu bar (remembered); 1:1 modes 1280×720 to 3840×2160 at 60 Hz, picked in System
+      Settings › Displays; stays 10 s after a disconnect; a stream on it falls back to the main display when it goes.
+      Tested: appears, streams, removed. Open: size it to the client's monitor (needs the client to send it).
 - [ ] `lg-proto` is protocol 5: rebase it onto protocol 6 before the TV can stream from this server again.
 
 ## 8. HDR and AV1 (agreed)

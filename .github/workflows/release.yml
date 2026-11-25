@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.2.0 to build and publish the Mac client and Windows server.
+# Push a tag like v0.2.0 to build and publish the Mac client, the Windows client and the Windows server.
 on:
   push:
     tags: ["v*"]
@@ -27,10 +27,48 @@ jobs:
             target/aarch64-apple-darwin/release/displaywire-client target/x86_64-apple-darwin/release/displaywire-client
           scripts/bundle-mac.sh dist/displaywire-client dist
           ditto -c -k --keepParent dist/DisplayWire.app dist/DisplayWire-macos.zip
+      - name: Build universal DisplayWire Server.app
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release -p displaywire-server --target $t
+          done
+          lipo -create -output dist/displaywire-server \
+            target/aarch64-apple-darwin/release/displaywire-server target/x86_64-apple-darwin/release/displaywire-server
+          # With an Apple Developer ID in the secrets, the app is signed and notarized: it opens
+          # with no warning and keeps its permissions across updates. Without, it's ad-hoc
+          # signed (install it with scripts/install-mac-server.sh).
+          if [ -n "${MACOS_CERT_P12:-}" ]; then
+            kc=$RUNNER_TEMP/sign.keychain-db
+            security create-keychain -p ci "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p ci "$kc"
+            echo "$MACOS_CERT_P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+            security import $RUNNER_TEMP/cert.p12 -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -k ci "$kc" >/dev/null
+            security list-keychains -d user -s "$kc" login.keychain-db
+            export SIGN_IDENTITY=$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)
+          fi
+          scripts/bundle-mac-server.sh dist/displaywire-server dist
+          ditto -c -k --keepParent "dist/DisplayWire Server.app" dist/DisplayWire-Server-macos.zip
+          if [ -n "${SIGN_IDENTITY:-}" ]; then
+            xcrun notarytool submit dist/DisplayWire-Server-macos.zip --wait \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+            xcrun stapler staple "dist/DisplayWire Server.app"
+            rm dist/DisplayWire-Server-macos.zip
+            ditto -c -k --keepParent "dist/DisplayWire Server.app" dist/DisplayWire-Server-macos.zip
+          fi
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: client
-          path: dist/DisplayWire-macos.zip
+          path: |
+            dist/DisplayWire-macos.zip
+            dist/DisplayWire-Server-macos.zip
 
   server:
     runs-on: windows-2025
@@ -45,10 +83,20 @@ jobs:
           New-Item -ItemType Directory dist/displaywire-server-windows | Out-Null
           Copy-Item target/release/displaywire-server.exe, README.md dist/displaywire-server-windows/
           Compress-Archive dist/displaywire-server-windows dist/displaywire-server-windows.zip
+      - name: Build Windows client
+        shell: pwsh
+        run: |
+          cargo build --release -p displaywire-client
+          New-Item -ItemType Directory dist/DisplayWire-windows | Out-Null
+          Copy-Item target/release/displaywire-client.exe dist/DisplayWire-windows/DisplayWire.exe
+          Copy-Item README.md dist/DisplayWire-windows/
+          Compress-Archive dist/DisplayWire-windows dist/DisplayWire-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: server
-          path: dist/displaywire-server-windows.zip
+          path: |
+            dist/displaywire-server-windows.zip
+            dist/DisplayWire-windows.zip
 
   publish:
     needs: [client, server]
@@ -70,10 +118,14 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           test "$version" = "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" || { echo "tag $GITHUB_REF_NAME does not match the version in Cargo.toml"; exit 1; }
-          cargo run --release -p dwsign -- release "$version" dist/DisplayWire-macos.zip dist/displaywire-server-windows.zip dist
+          # A fork without the key publishes without the signed manifest (no automatic updates).
+          if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
+            cargo run --release -p dwsign -- release "$version" dist/DisplayWire-macos.zip dist/displaywire-server-windows.zip dist
+          fi
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "$GITHUB_REF_NAME" dist/DisplayWire-macos.zip dist/displaywire-server-windows.zip dist/latest.txt dist/latest.txt.sig
-          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          files="dist/DisplayWire-macos.zip dist/DisplayWire-Server-macos.zip dist/DisplayWire-windows.zip dist/displaywire-server-windows.zip"
+          [ -f dist/latest.txt.sig ] && files="$files dist/latest.txt dist/latest.txt.sig"
+          gh release create "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

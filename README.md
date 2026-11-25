@@ -1,7 +1,9 @@
 # DisplayWire
 
-Stream your Windows PC's desktop to your Mac with very low latency. Play games, run apps and use the PC as if you
-were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and your microphone all go across.
+Stream your Windows PC's desktop to your Mac, or to another Windows PC, with very low latency. Play games, run apps
+and use the PC as if you were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and your microphone
+all go across. Each of the PC's monitors can have a window of its own. It works the other way too: a Mac can be the
+one streamed, so you can use your Mac from your PC (see [Stream a Mac](#stream-a-mac)).
 
 - **Fast:** hardware video encoding on the PC (NVIDIA), hardware decoding on the Mac, a custom UDP protocol, and
   repair packets so a lost packet doesn't cost a frame. Typically 10 to 20 ms from the PC's screen to yours.
@@ -14,6 +16,8 @@ were sitting at it: the picture, sound, keyboard, mouse, clipboard, files and yo
 - **PC:** Windows 10 or 11, with an NVIDIA graphics card for the best performance. (Sound from every app needs
   Windows 10 version 2004 or later; older versions send the default output only.)
 - **Mac:** macOS 12 or later, Apple Silicon or Intel.
+- **Or a Windows PC to view from:** Windows 10 or 11 with any graphics card that decodes HEVC, and Microsoft's
+  *HEVC Video Extensions* (many PCs have them already; otherwise they are in the Microsoft Store).
 - Both on the same network, or on the same [Tailscale](https://tailscale.com) network (use the PC's Tailscale address in
   **Add PC…**). A wired connection on at least one side helps a lot. DisplayWire uses UDP port 9000 on the PC; the
   installer opens it in the Windows firewall for the local network and Tailscale only. To reach the PC any other
@@ -39,6 +43,13 @@ refuse to open it. Clear the flag once:
 xattr -dr com.apple.quarantine /Applications/DisplayWire.app
 ```
 
+### On a Windows PC you view from
+
+Download `DisplayWire-windows.zip` from the [latest release](https://github.com/FragAverage/displaywire/releases/latest),
+unzip it and run **DisplayWire.exe**. (Releases up to 0.7.0 don't have it yet: build it with
+`cargo build --release -p displaywire-client`, see [CONTRIBUTING.md](CONTRIBUTING.md).) Everything below works the
+same as on a Mac, except where the *On Windows* section says otherwise.
+
 ### On the PC
 
 1. Download `displaywire-server-windows.zip` from the [latest release](https://github.com/FragAverage/displaywire/releases/latest) and unzip it.
@@ -48,6 +59,36 @@ xattr -dr com.apple.quarantine /Applications/DisplayWire.app
 
 A DisplayWire icon appears in the notification area. Its menu pairs new devices, manages paired ones, opens the
 folder of received files, and updates the server.
+
+### Stream a Mac
+
+A Mac (macOS 13 or later) can be streamed too, to a PC or another Mac. On that Mac, open Terminal and run:
+
+```
+curl -fsSL https://raw.githubusercontent.com/FragAverage/displaywire/main/scripts/install-mac-server.sh | sh
+```
+
+That's all there is to run. It puts **DisplayWire Server** in Applications (or updates it), starts it, and from then
+on it starts whenever you log in, with a display icon in the menu bar. (Releases up to 0.7.0 don't have it: build it
+as [CONTRIBUTING.md](CONTRIBUTING.md#the-mac-server) says.) Then:
+
+1. A **Set Up DisplayWire Server** window lists the permissions it needs: **Screen & System Audio Recording** and
+   **Accessibility**, and optionally **Finder** (so dropped files land where you drop them) and the BlackHole audio
+   driver. Click each button: it asks, or opens the right page of System Settings, where you switch DisplayWire
+   Server on. Each row turns green by itself; then click **Restart Server**. The window comes back from the menu
+   (**Permissions…**), or by opening the app again.
+2. If macOS asks whether DisplayWire Server may accept incoming network connections, click **Allow**.
+3. Pair from the viewing computer as below, choosing **Pair New Device…** in the Mac's menu instead of the PC's tray.
+
+From a PC, the PC's keys do what they do on Windows (**PC Shortcuts** in the menu): Ctrl+C/V/Z… act as ⌘, Alt+Tab
+switches apps, Ctrl+Backspace deletes a word, Home/End go to the line's ends, Delete in Finder moves to the Bin, F3
+shows Mission Control, F11/F12 change the volume, and so on. Files dropped on the window land in the Finder window
+or on the Desktop under the pointer (anywhere else, in `~/Downloads/DisplayWire` and on the clipboard); files copied
+on one computer paste on the other; **Send Files to…** in the menu sends the other way. To send your microphone to
+the Mac, install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install blackhole-2ch`) and choose
+**BlackHole 2ch** as the microphone in the Mac app you're using. **Virtual Display While Connected** in the menu adds
+a screen for the other computer to open in a window of its own. A Mac can't be streamed at the login window, and
+controllers aren't passed through to a Mac yet. The log is `~/Library/Logs/DisplayWire/server.log`.
 
 ## Connect your Mac to your PC (once)
 
@@ -82,6 +123,27 @@ The ⌘ key acts as the Windows key on the PC. Switching away from the window le
 To skip ⌃⌥M, turn on **Capture the pointer when the window has focus** in Settings. The mouse is then captured
 whenever the stream window has focus. ⌃⌥M still releases it, a click in the window captures it again, and
 switching away (⌘Tab) releases it.
+
+### On Windows
+
+The Windows client has the same list of PCs, pairing and settings, and a menu bar on the stream window.
+
+| Shortcut | What it does |
+|---|---|
+| **Ctrl+Alt+M** | Capture or release the mouse |
+| **Ctrl+Alt+F** | Full screen (for the stream window that has focus) |
+| **Ctrl+Shift+W** | The same as Ctrl+Alt+F (View › Full Screen (All Windows) does every window at once) |
+| **Ctrl+Alt+A** | Open every monitor of the PC, each in a window of its own |
+| **Ctrl+Alt+S** | Show or hide the stats graph |
+| **Ctrl+Alt+V** | Microphone on or off |
+| **Ctrl+Alt+D** | Disconnect |
+
+- **More than one monitor:** **Monitors** in the menu chooses which one the main window shows, and opens the others
+  in windows of their own (each goes to a display of yours that has no stream window yet). The windows that were open
+  are opened again the next time you connect to that PC.
+- **The Windows key, Alt+Tab and Alt+F4** go to the remote PC while the stream is in full screen or the mouse is
+  captured. In an ordinary window they stay with the PC you are sitting at.
+- Xbox-style (XInput) controllers work, with rumble. Wi-Fi tuning needs no setup. There are no automatic updates yet.
 
 ### Sound and microphone
 
@@ -131,7 +193,8 @@ signed, and the apps only accept an update that matches the key built into them
 - **Nobody hears me.** Install VB-Cable on the PC and pick **CABLE Output** as the microphone in the app, and make
   sure the microphone is on (⌃⌥V).
 - **macOS won't open the app.** Run the `xattr` command in the install section.
-- **Logs.** The server writes `C:\ProgramData\DisplayWire\server.log`.
+- **Logs.** The server writes `C:\ProgramData\DisplayWire\server.log` (a Mac server started at login:
+  `~/Library/Logs/DisplayWire/server.log`).
 
 Run `displaywire-server --help` and `displaywire-client --help` for the command-line options (a different port,
 a fixed bitrate or frame rate, turning clipboard, files, audio or the microphone off, and so on).
@@ -142,6 +205,8 @@ a fixed bitrate or frame rate, turning clipboard, files, audio or the microphone
   With Homebrew: `brew uninstall --cask displaywire`.
 - **PC:** *Settings > Apps > Installed apps > DisplayWire Server*, or `displaywire-server.exe --uninstall`
   (add `--purge` to delete the paired devices and logs as well).
+- **A streamed Mac:** turn off **Start at Login** in its menu, quit it and delete `DisplayWire Server.app`. Its paired
+  devices are in `~/Library/Application Support/DisplayWire Server`.
 
 ## Security
 
